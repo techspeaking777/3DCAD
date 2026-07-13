@@ -1,7 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import * as THREE from 'three'
+import viewOpIconSheet from './assets/view-op-icons.png'
 import Viewport3D from './Viewport3D.jsx'
 import { planeColor, planeAxisLabels, sketchToWorld } from './SketchPlane.js'
+import { FacePlane } from './FacePlane.js'
 import { pxToMm, mmToPx, ALIGN_SNAP_DIST, ACQUIRE_DIST, SELECT_DIST, norm2pi, zoomRef } from './constants.js'
 import { angleOnArc, computeAllIntersections } from './geometry/intersections.js'
 import { getGeoSnap, getAllSnapPoints, checkAngle, getAngleSnap, applyTracking, computeLiveAngle, getTanPtsOnCircle, getExternalTangentPairs, nearestPt } from './geometry/snap.js'
@@ -27,9 +29,51 @@ import PageSetupPanel from './tools/PageSetupPanel.jsx'
 import GuidePanel from './tools/GuidePanel.jsx'
 import {
   IconLine, IconCircle, IconTrim, IconDelete, IconExtend, IconOffset,
-  IconMirror, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
-  IconUndo, IconRedo, IconFitView, IconSave, IconLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis
+  IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
+  IconUndo, IconRedo, IconFitView, IconSave, IconLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
+  IconIncludeFace,
+  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D,
 } from './draw/ToolIcons.jsx'
+import { glowStroke, glowFill } from './draw/vectorTheme.js'
+
+// Vector-arcade icons for the six 3D solid-op sidebar tools (see
+// draw/ToolIcons.jsx's "3D-ENVIRONMENT VECTOR ICONS" section) — replaces
+// the old solid-icons.png raster sprite sheet.
+const SOLID_ICON_COMPONENTS = {
+  extrude: IconExtrude3D, cutout: IconCutout3D, fillet3d: IconFillet3D,
+  mirror3d: IconMirror3D, loft3d: IconLoft3D, join3d: IconJoin3D,
+}
+
+// Pixel-art view-preset icons (src/assets/view-op-icons.png) — same
+// background-position cropping trick as SOLID_OP_CELLS, but each icon's own
+// glyph (not the surrounding card/border/label — those aren't used here,
+// since the view buttons already render their own text label) has a
+// different aspect ratio (SIDE is a tall thin rectangle, ISO is wider), so
+// each cell stores its own w/h rather than sharing one. There's also a fifth
+// "VIEW" glyph in the sheet (dashed border, crosshair) not wired to any
+// button yet.
+const VIEW_OP_SHEET_W = 1774, VIEW_OP_SHEET_H = 887
+const VIEW_OP_CELLS = {
+  top:   { x: 443,  y: 389, w: 205, h: 203 },
+  front: { x: 790,  y: 393, w: 198, h: 197 },
+  side:  { x: 1176, y: 389, w: 107, h: 201 },
+  iso:   { x: 1453, y: 383, w: 204, h: 225 },
+}
+const VIEW_OP_ICON_H = 52   // 25% smaller than the 70px extrude/cutout/fillet icons — those felt too big here
+
+function viewOpIconStyle(id) {
+  const cell = VIEW_OP_CELLS[id]
+  if (!cell) return null
+  const scale = VIEW_OP_ICON_H / cell.h
+  return {
+    width: cell.w * scale, height: VIEW_OP_ICON_H,
+    backgroundImage: `url(${viewOpIconSheet})`,
+    backgroundRepeat: 'no-repeat',
+    backgroundSize: `${VIEW_OP_SHEET_W * scale}px ${VIEW_OP_SHEET_H * scale}px`,
+    backgroundPosition: `-${cell.x * scale}px -${cell.y * scale}px`,
+    imageRendering: 'pixelated',
+  }
+}
 
 // Helpers for activePlane which can be 'XY'|'XZ'|'YZ' or a FacePlane object
 function getPlaneColor(ap) {
@@ -107,6 +151,124 @@ function buildCutWorkerParams(cutFeat) {
   }
 }
 
+// Builds cadWorker params to rebuild a solid's OWN base shape from scratch
+// (no cuts/fillets applied) — linear extrude or revolve, mirroring
+// buildCutWorkerParams. Shared by every "rebuild clean, then replay features
+// in order" flow (cutout edit/delete, fillet edit/delete, STL export).
+function buildBaseWorkerParams(solid) {
+  // Join/mirror solids have no profilePts/depthMm/planeId at all — they're
+  // not rebuildable via buildExtrude/buildRevolve, only via joinShapes()/
+  // mirrorShape() respectively (see rebuildJoinBaseMesh, commitMirrorSolid).
+  // Returning null here (rather than crashing on solid.profilePts.circleMeta
+  // — solid.profilePts is undefined for these) means "no cold-rebuild
+  // fallback available"; callers that pass this straight through as a
+  // worker `base` param rely on shapeStore already being warm, which is
+  // always true immediately after these solids are created — the same
+  // "one-time snapshot, no live tracking" assumption Join3D/Mirror3D already
+  // make elsewhere.
+  if (solid.operation === 'join' || solid.operation === 'mirror') return null
+  // Loft has no single profilePts/depthMm/planeId either — its "base" is an
+  // ordered list of profiles sharing one normal/uAxis basis (already stored
+  // in mm on the solid, see commitLoft) rebuilt via cadWorker.js's buildLoft.
+  if (solid.operation === 'loft') {
+    return {
+      profiles: solid.profiles.map(p => ({ pts: p.pts, circle: p.circle, offsetMm: p.offsetMm })),
+      normal: solid.normal, origin: solid.origin, uAxis: solid.uAxis, ruled: !!solid.ruled,
+    }
+  }
+  const facePlaneParams = fp => fp ? {
+    normal: [fp.normal.x, fp.normal.y, fp.normal.z],
+    origin: [pxToMm(fp.origin.x), pxToMm(fp.origin.y), pxToMm(fp.origin.z)],
+    uAxis:  [fp.uAxis.x, fp.uAxis.y, fp.uAxis.z],
+  } : {}
+  if (solid.operation === 'revolve') {
+    return {
+      pts: solid.profilePts, planeId: solid.planeId,
+      axis: solid.revolveAxis, angleDeg: solid.angleDeg ?? 360, reverse: !!solid.revolveReverse,
+      circle: solid.profilePts.circleMeta || null,
+      ...facePlaneParams(solid.facePlane),
+    }
+  }
+  return {
+    pts: solid.profilePts,
+    depthMm: solid.depthMm,
+    planeId: solid.planeId,
+    direction: solid.direction || 'both',
+    circle: solid.profilePts.circleMeta || null,
+    ...facePlaneParams(solid.facePlane),
+  }
+}
+
+// Loft's shared plane basis, in SCENE units (px) — a work-plane pick has no
+// FacePlane object of its own (SketchPlane.js's XY/XZ/YZ transforms are
+// fixed at world origin with no offset support at all), so this derives an
+// equivalent {origin, normal, uAxis} directly from SketchPlane.js's own
+// per-plane sketchToWorld cases: XY sketch.x->world.x, normal=+Z; XZ
+// sketch.x->world.x too, normal=+Y; YZ sketch.x->world.y, normal=+X. Work
+// planes always pass through the world origin (see WorkPlanes.js), so
+// origin is always (0,0,0) — same in px or mm, it's the zero vector either way.
+// vAxis is stored explicitly per plane rather than derived from
+// cross(normal, uAxis) — that cross product only happens to match
+// SketchPlane.js's own hand-picked per-plane convention for XY and YZ;
+// for XZ it comes out sign-flipped (SketchPlane's sketchToWorld gives
+// world.z = -sy, but cross(normal,uAxis) for XZ yields a vAxis that would
+// produce +sy instead), which would make vertical mouse movement track
+// backwards specifically when lofting off the XZ plane.
+function workPlaneToFacePlaneBasisPx(planeId) {
+  const table = {
+    XY: { normal: new THREE.Vector3(0, 0, 1), uAxis: new THREE.Vector3(1, 0, 0), vAxis: new THREE.Vector3(0, 1, 0) },
+    // normal is -Y (not +Y) — matches this app's established XZ camera
+    // convention (SketchPlane.js's own header: "XZ: camera at (0,-800,0)").
+    // Getting this sign backwards doesn't break the sketchToWorld math (it
+    // stays internally self-consistent either way), but it does put the
+    // camera on the wrong side of the plane — like viewing a drawing from
+    // behind the page — which renders every click mirrored left-right
+    // relative to where the mouse actually is.
+    XZ: { normal: new THREE.Vector3(0, -1, 0), uAxis: new THREE.Vector3(1, 0, 0), vAxis: new THREE.Vector3(0, 0, 1) },
+    YZ: { normal: new THREE.Vector3(1, 0, 0), uAxis: new THREE.Vector3(0, 1, 0), vAxis: new THREE.Vector3(0, 0, 1) },
+  }
+  const t = table[planeId] || table.XY
+  return { origin: new THREE.Vector3(0, 0, 0), normal: t.normal.clone(), uAxis: t.uAxis.clone(), vAxis: t.vAxis.clone() }
+}
+
+// Builds the FacePlane a loft profile sketches on: basis (px, from either
+// workPlaneToFacePlaneBasisPx or a picked FacePlane's own origin/normal/
+// uAxis/vAxis) offset along the shared normal by offsetMm (mm, converted to
+// px — unit direction vectors need no conversion, only the origin position
+// does). Uses basis.vAxis directly (see workPlaneToFacePlaneBasisPx) rather
+// than re-deriving it, so it stays correct for every plane, not just the
+// ones where cross(normal,uAxis) happens to agree with SketchPlane.js.
+function buildLoftFacePlane(basis, offsetMm) {
+  const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(offsetMm))
+  return new FacePlane(origin, basis.normal, basis.uAxis, basis.vAxis)
+}
+
+// Ordered cutout/fillet ops for `solid`, in the shape cadWorker.js's
+// mirrorShape/exportSTL handlers expect. `features` is taken as an explicit
+// parameter (not read from component closure) so callers control exactly
+// which snapshot to use — matters for rebuildDependentMirrors, which must
+// use freshly-built state, not a stale render's closure.
+function buildSolidOpsForWorker(solid, features) {
+  return features
+    .filter(f => f.solidId === solid.id && (f.operation === 'cutout' || f.type === 'fillet'))
+    .map(f => f.type === 'fillet'
+      ? { type: 'fillet', radius: f.radius, edgePoints: f.edgePoints }
+      : { type: 'cut', params: buildCutWorkerParams(f) })
+}
+
+// Rebuilds a solid's clean base mesh (via cadEngine.revolve or .extrude,
+// matching how it was originally built) and seeds the worker's shapeStore
+// for it — the first step of every "rebuild + replay" chain. Returns both
+// the mesh (for an immediate render) and the params (as the `base` fallback
+// for subsequent subtract/fillet3d calls on this solidId).
+async function rebuildBaseMesh(solid) {
+  const baseWorkerParams = buildBaseWorkerParams(solid)
+  const meshData = solid.operation === 'revolve'
+    ? await cadEngine.revolve({ solidId: solid.id, ...baseWorkerParams })
+    : await cadEngine.extrude({ solidId: solid.id, ...baseWorkerParams })
+  return { meshData, baseWorkerParams }
+}
+
 // Cheap bounding-box estimate (in the same world/px space as the app's other
 // overlap tests) for a revolve cut's swept volume — used only as a candidate
 // filter to decide which existing solids a new revolve-cutout touches; OCC
@@ -133,20 +295,47 @@ function revolveSweepBoxPx(pts, axis, angleDeg, reverse, planeId, facePlane) {
   return new THREE.Box3().setFromPoints(allPts)
 }
 
+// ── Mirror3D reflection helpers ─────────────────────────────────────────────
+// Reflect a world-space point/direction across a plane (origin O, unit normal n).
+function reflectPoint(p, O, n) {
+  const rel = new THREE.Vector3().subVectors(p, O)
+  const d = rel.dot(n)
+  return p.clone().addScaledVector(n, -2 * d)
+}
+function reflectDir(v, n) {
+  const d = v.dot(n)
+  return v.clone().addScaledVector(n, -2 * d)
+}
+
+// A plain work plane (XY/XZ/YZ) has no FacePlane object of its own — derive an
+// equivalent {origin,normal,uAxis,vAxis} basis DIRECTLY from sketchToWorld's
+// own behavior (rather than hand-deriving normal signs per plane, which is
+// easy to get backwards — e.g. XZ's raycasting normal in SketchPlane.js
+// points the "wrong" way relative to the uAxis×vAxis convention FacePlane
+// expects). This guarantees the basis always agrees with how points actually
+// get projected, by construction.
+function planeIdBasis(planeId) {
+  const origin = new THREE.Vector3(0, 0, 0)
+  const uAxis = sketchToWorld(1, 0, planeId).sub(sketchToWorld(0, 0, planeId)).normalize()
+  // sketchToWorld uses -sy, so the raw delta for sy=1 is already -vAxis.
+  const vAxis = sketchToWorld(0, 0, planeId).sub(sketchToWorld(0, 1, planeId)).normalize()
+  const normal = new THREE.Vector3().crossVectors(uAxis, vAxis).normalize()
+  return { origin, normal, uAxis, vAxis }
+}
 
 // ── SmartStep Bar ─────────────────────────────────────────────────────────────
 // Shows the current step of the active Extrude / Cutout operation.
 // Completed steps show a ✓ and are clickable to go back.
 // Disappears entirely when no solid operation is running.
 
-function SmartStepBar({ op, currentStep, color, onStepBack }) {
-  if (!op) return null
+const EXTRUDE_STEPS = [
+  { id: 1, label: 'Pick Plane' },
+  { id: 2, label: 'Draw Profile' },
+  { id: 3, label: 'Set Depth' },
+]
 
-  const steps = [
-    { id: 1, label: 'Pick Plane' },
-    { id: 2, label: 'Draw Profile' },
-    { id: 3, label: 'Set Depth' },
-  ]
+function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEPS, hint = null }) {
+  if (!op) return null
 
   return (
     <div style={{
@@ -285,6 +474,17 @@ function SmartStepBar({ op, currentStep, color, onStepBack }) {
 
       <div style={{ flex: 1 }}/>
 
+      {/* Optional trailing hint — e.g. live selection count + accept keys.
+          Absent for the existing Extrude/Cutout and Mirror3D usages. */}
+      {hint && (
+        <span style={{
+          fontFamily: 'monospace', fontSize: 10,
+          color, flexShrink: 0, letterSpacing: '0.05em', marginRight: 16,
+        }}>
+          {hint}
+        </span>
+      )}
+
       {/* Esc hint */}
       <span style={{
         fontFamily: 'monospace', fontSize: 10,
@@ -298,10 +498,11 @@ function SmartStepBar({ op, currentStep, color, onStepBack }) {
 
 // ── Feature Tree Panel ────────────────────────────────────────────────────────
 
-function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent }) {
+function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, mirrorPickActive, onPickMirrorSource, joinPickActive, joinSel, onToggleJoinMember, onEditLoft }) {
   const [editingName, setEditingName] = useState(null)
   const [editDepthId, setEditDepthId] = useState(null)
   const [depthVal, setDepthVal]       = useState('')
+  const [hoveredMirrorRow, setHoveredMirrorRow] = useState(null)
 
   function startRename(id, currentName) {
     setEditingName(id)
@@ -355,25 +556,60 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           const isActiveSketch = feat.id === activeSketchId
           const isSketch = feat.type === 'sketch'
           const isExtrude = feat.type === 'extrude'
+          const isFillet = feat.type === 'fillet'
+          const isMirror = isExtrude && feat.operation === 'mirror'
+          const isJoin = isExtrude && feat.operation === 'join'
+          const isLoft = isExtrude && feat.operation === 'loft'
+          const isLocked = !!feat.joinedInto
+          const hasDependentMirror = features.some(f => f.operation === 'mirror' && f.sourceSolidId === feat.solidId)
+          const isMirrorEligible = isExtrude && !isMirror && !isLocked
+          const isJoinEligible = isExtrude && feat.operation !== 'cutout' && !isJoin && !isLocked && !hasDependentMirror
+          const isJoinSelected = joinSel?.includes(feat.id)
           const editingDepth = editDepthId === feat.id
 
-          const itemBg = isActiveSketch ? '#e8f0ff' : 'transparent'
-          const borderLeft = isActiveSketch ? '3px solid #3a7bd5'
+          const mirrorHover = mirrorPickActive && isMirrorEligible && hoveredMirrorRow === feat.id
+          const itemBg = isJoinSelected ? '#fff8e0' : mirrorHover ? '#eafbe8' : isActiveSketch ? '#e8f0ff' : 'transparent'
+          const borderLeft = isJoinSelected ? '3px solid #FFEE88'
+                           : isActiveSketch ? '3px solid #3a7bd5'
                            : isSketch ? '3px solid #ddd'
                            : '3px solid transparent'
 
           return (
-            <div key={feat.id} style={{
+            <div key={feat.id}
+              title={isLocked ? `Part of ${features.find(f=>f.id===feat.joinedInto)?.name || 'a Join'} — delete the join to edit` : undefined}
+              onMouseEnter={()=>{ if (mirrorPickActive && isMirrorEligible) setHoveredMirrorRow(feat.id) }}
+              onMouseLeave={()=>{ if (mirrorPickActive) setHoveredMirrorRow(null) }}
+              onClick={()=>{
+                if (mirrorPickActive && isMirrorEligible) onPickMirrorSource(feat.id)
+                else if (joinPickActive && isJoinEligible) onToggleJoinMember(feat.id)
+              }}
+              style={{
               borderLeft, background: itemBg,
               padding: '6px 10px 6px 8px',
               borderBottom: '1px solid #eee',
-              cursor: isSketch ? 'pointer' : 'default',
+              opacity: isLocked ? 0.45 : 1,
+              cursor: mirrorPickActive ? (isMirrorEligible ? 'pointer' : 'default')
+                    : joinPickActive   ? (isJoinEligible ? 'pointer' : 'default')
+                    : (isSketch ? 'pointer' : 'default'),
             }}>
               {/* Feature header row */}
               <div style={{display:'flex', alignItems:'center', gap:6}}>
+                {/* Join-pick checkbox */}
+                {joinPickActive && isJoinEligible && (
+                  <span style={{
+                    width:13, height:13, flexShrink:0, borderRadius:3,
+                    border:`1.5px solid ${isJoinSelected ? '#c9a600' : '#aaa'}`,
+                    background: isJoinSelected ? '#FFEE88' : 'transparent',
+                    display:'flex', alignItems:'center', justifyContent:'center',
+                    fontSize:10, color:'#4a3e00', lineHeight:1,
+                  }}>
+                    {isJoinSelected ? '✓' : ''}
+                  </span>
+                )}
                 {/* Icon */}
                 <span style={{fontSize:14, flexShrink:0}}>
-                  {isSketch ? '📐' : '⬆'}
+                  {isSketch ? '📐' : isFillet ? '◠' : isMirror ? '⇄' : isJoin ? '⛓' : isLoft ? '🌀' : '⬆'}
+                  {isLocked ? ' 🔒' : ''}
                 </span>
 
                 {/* Name — double-click to rename */}
@@ -435,18 +671,41 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                       </button>
                     </>
                   )}
-                  {isExtrude && (
+                  {isExtrude && !isLocked && (
                     <>
-                      {!sketchMode && feat.sketchLines !== undefined && (
+                      {!sketchMode && isLoft && (
+                        <button title="Edit loft profiles"
+                          onClick={e=>{e.stopPropagation(); onEditLoft(feat.id)}}
+                          style={{background:'none',border:'none',cursor:'pointer',
+                            padding:'1px 3px', fontSize:11, color:'#3a7bd5'}}
+                        >✏️</button>
+                      )}
+                      {!sketchMode && !isLoft && feat.sketchLines !== undefined && (
                         <button title="Edit sketch"
                           onClick={e=>{e.stopPropagation(); onEditSketch(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
                             padding:'1px 3px', fontSize:11, color:'#3a7bd5'}}
                         >✏️</button>
                       )}
-                      {!sketchMode && (
+                      {!sketchMode && !isMirror && !isJoin && !isLoft && (
                         <button title={feat.operation==='cutout' ? 'Edit cutout extent' : 'Edit extrusion extent'}
                           onClick={e=>{e.stopPropagation(); onEditExtent(feat.id)}}
+                          style={{background:'none',border:'none',cursor:'pointer',
+                            padding:'1px 3px', fontSize:11, color:'#888'}}
+                        >⚙</button>
+                      )}
+                      <button title="Delete"
+                        onClick={e=>{e.stopPropagation(); onDelete(feat.id)}}
+                        style={{background:'none',border:'none',cursor:'pointer',
+                          padding:'1px 3px', fontSize:11, color:'#e05a4e'}}
+                      >🗑</button>
+                    </>
+                  )}
+                  {isFillet && (
+                    <>
+                      {!sketchMode && (
+                        <button title="Edit fillet radius"
+                          onClick={e=>{e.stopPropagation(); onEditFilletRadius(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
                             padding:'1px 3px', fontSize:11, color:'#888'}}
                         >⚙</button>
@@ -474,8 +733,48 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                 </div>
               )}
 
+              {/* Mirror subtitle: colour + source feature + mirror plane */}
+              {isMirror && (
+                <div style={{marginLeft:20, marginTop:3}}>
+                  <div style={{display:'flex', alignItems:'center', gap:5}}>
+                    <div style={{width:8,height:8,borderRadius:'50%',
+                      background:feat.color||'#8E65F3', flexShrink:0}}/>
+                    <span style={{color:'#777', fontSize:10}}>
+                      mirror of {features.find(f=>f.id===feat.sourceFeatureId)?.name || '?'}
+                      {' · '}{feat.mirrorPlane?.kind==='face' ? 'face' : feat.mirrorPlane?.planeId || '?'}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Join subtitle: colour + member names */}
+              {isJoin && (
+                <div style={{marginLeft:20, marginTop:3}}>
+                  <div style={{display:'flex', alignItems:'center', gap:5}}>
+                    <div style={{width:8,height:8,borderRadius:'50%',
+                      background:feat.color||'#FFEE88', flexShrink:0}}/>
+                    <span style={{color:'#777', fontSize:10}}>
+                      join · {(feat.memberFeatureIds||[]).length} bodies
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Loft subtitle: colour + profile count */}
+              {isLoft && (
+                <div style={{marginLeft:20, marginTop:3}}>
+                  <div style={{display:'flex', alignItems:'center', gap:5}}>
+                    <div style={{width:8,height:8,borderRadius:'50%',
+                      background:feat.color||'#33D5EC', flexShrink:0}}/>
+                    <span style={{color:'#777', fontSize:10}}>
+                      loft · {(feat.profiles||[]).length} profiles
+                    </span>
+                  </div>
+                </div>
+              )}
+
               {/* Extrude subtitle: colour + depth + operation */}
-              {isExtrude && (
+              {isExtrude && !isMirror && !isJoin && !isLoft && (
                 <div style={{marginLeft:20, marginTop:3}}>
                   <div style={{display:'flex', alignItems:'center', gap:5}}>
                     <div style={{width:8,height:8,borderRadius:'50%',
@@ -492,6 +791,19 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                       {feat.operation!=='cutout' && feat.operation!=='revolve' && feat.direction && feat.direction!=='both'
                         ? ` · ${feat.direction}` : ''}
                       {groupSize(feat) > 1 ? ` · ${groupSize(feat)} bodies` : ''}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Fillet subtitle: colour + radius */}
+              {isFillet && (
+                <div style={{marginLeft:20, marginTop:3}}>
+                  <div style={{display:'flex', alignItems:'center', gap:5}}>
+                    <div style={{width:8,height:8,borderRadius:'50%',
+                      background:feat.color||'#9c6ade', flexShrink:0}}/>
+                    <span style={{color:'#777', fontSize:10}}>
+                      R{feat.radius}mm · fillet{feat.edgePoints?.length > 1 ? ` · ${feat.edgePoints.length} edges` : ''}
                     </span>
                   </div>
                 </div>
@@ -544,7 +856,7 @@ export default function App() {
   // sketches hold their own geometry; working arrays are the active sketch buffer
   const [features,setFeatures]=useState([])
   const [activeSketchId,setActiveSketchId]=useState(null)  // which sketch is being edited
-  const featureCountRef=useRef({sketch:0,extrude:0})       // for auto-naming
+  const featureCountRef=useRef({sketch:0,extrude:0,fillet:0,mirror:0,join:0,loft:0})       // for auto-naming
   const [treeCollapsed,setTreeCollapsed]=useState(false)
 
   const viewport3dRef=useRef(null)
@@ -588,6 +900,12 @@ export default function App() {
   const [mirrorP1,setMirrorP1]=useState(null)
   const [mirrorPreview,setMirrorPreview]=useState(null)
 
+  // Centre tool state — pick geometry, Tab/right-click accepts AND commits in
+  // one step (snaps the selection's bbox center to the sketch origin), unlike
+  // Mirror/Resize/Fillet which need one more input after accepting.
+  const [centerSel,setCenterSel]=useState([])
+  const [centerHover,setCenterHover]=useState(null)
+
   // Move/Copy tool state
   const [moveCopySel,setMoveCopySel]=useState([])
   const [moveCopyAccepted,setMoveCopyAccepted]=useState(false)
@@ -621,7 +939,7 @@ export default function App() {
   // T key toggles tangent snap mode; resets to false after each line is placed or Esc
   const [tKeyDown,setTKeyDown]=useState(false)
   const [pKeyDown,setPKeyDown]=useState(false)
-  const [drawStyle,setDrawStyle]=useState(null) // null|'dashed'|'construction'
+  const [drawStyle,setDrawStyle]=useState(null) // null|'construction'
   const [perpSourceLineIdx,setPerpSourceLineIdx]=useState(null)
   // Trace tool state
   const [traceOpen,setTraceOpen]=useState(false)
@@ -754,6 +1072,23 @@ export default function App() {
     setMirrorSel([]);setMirrorAccepted(false)
     setMirrorHover(null);setMirrorP1(null);setMirrorPreview(null)
   }
+  function resetCenter(){
+    setCenterSel([]); setCenterHover(null)
+  }
+  // Accept for the Centre tool IS the commit — snaps the current selection's
+  // bbox center to the sketch origin, then resets back to step 1 (stays on
+  // the tool, ready to pick the next selection — same as Mirror's post-commit
+  // resetMirror()).
+  function commitCenter(){
+    if (centerSel.length===0) return
+    const bbox = selectionBBox(centerSel, lines, circles, arcs, splines)
+    if (!bbox) return
+    const cx=(bbox.x1+bbox.x2)/2, cy=(bbox.y1+bbox.y2)/2
+    commit(snapshot())
+    const result = applySelectionTransform(centerSel, lines, circles, arcs, splines, {x:0,y:0}, 1, 1, -cx, -cy)
+    setLines(result.lines); setCircles(result.circles); setArcs(result.arcs); setSplines(result.splines)
+    resetCenter()
+  }
   function resetMoveCopy(){
     setMoveCopySel([]);setMoveCopyAccepted(false)
     setMoveCopyMode('move');setMoveCopyCountInput('1')
@@ -789,6 +1124,7 @@ export default function App() {
   // Returns true when we're in a selection phase that supports drag-window select
   function inSelPhase(){
     return (tool==='mirror'&&!mirrorAccepted)||
+           (tool==='center')||
            (tool==='movecopy'&&!moveCopyAccepted)||
            (tool==='rotatecopy'&&!rotateCopyAccepted)||
            (tool==='resize'&&!resizeAccepted)||
@@ -801,18 +1137,29 @@ export default function App() {
     const minY=Math.min(rect.y1,rect.y2),maxY=Math.max(rect.y1,rect.y2)
     const ptIn=(x,y)=>x>=minX&&x<=maxX&&y>=minY&&y<=maxY
     const hits=[]
+    // Ghost geometry (a Loft profile's previous profile, injected dimmed/
+    // snap-only via injectLoftGhost — see the matching guard in
+    // trimDelete.js) must stay unselectable here too: this one function
+    // backs the Select tool's own selection (and Delete key) plus every
+    // MODIFY-group tool's click/drag pick (Mirror, Centre, Move/Copy,
+    // Rotate/Copy, Resize, Fillet), so skipping ghostRef entities here locks
+    // them out of all of those in one place.
     linesRef.current.forEach((l,idx)=>{
+      if(l.ghostRef) return
       if(ptIn(l.x1,l.y1)||ptIn(l.x2,l.y2)) hits.push({kind:'line',idx})
     })
     circlesRef.current.forEach((c,idx)=>{
+      if(c.ghostRef) return
       if(ptIn(c.cx,c.cy)||ptIn(c.cx+c.r,c.cy)||ptIn(c.cx-c.r,c.cy)) hits.push({kind:'circle',idx})
     })
     arcsRef.current.forEach((arc,idx)=>{
+      if(arc.ghostRef) return
       const p1x=arc.cx+arc.r*Math.cos(arc.startAngle),p1y=arc.cy+arc.r*Math.sin(arc.startAngle)
       const p2x=arc.cx+arc.r*Math.cos(arc.endAngle),p2y=arc.cy+arc.r*Math.sin(arc.endAngle)
       if(ptIn(arc.cx,arc.cy)||ptIn(p1x,p1y)||ptIn(p2x,p2y)) hits.push({kind:'arc',idx})
     })
     splinesRef.current.forEach((sp,idx)=>{
+      if(sp.ghostRef) return
       if(sp.points.some(p=>ptIn(p.x,p.y))) hits.push({kind:'spline',idx})
     })
     const merge=(prev)=>{
@@ -821,6 +1168,7 @@ export default function App() {
       return m
     }
     if(tool==='mirror')      setMirrorSel(merge)
+    if(tool==='center')      setCenterSel(merge)
     if(tool==='movecopy')    setMoveCopySel(merge)
     if(tool==='rotatecopy')  setRotateCopySel(merge)
     if(tool==='resize')      setResizeSel(merge)
@@ -956,6 +1304,11 @@ export default function App() {
     if (tool!=='mirror'||mirrorAccepted||!mousePos){setMirrorHover(null);return}
     setMirrorHover(nearestMirrorEntity(mousePos,lines,circles,arcs,splines))
   },[tool,mirrorAccepted,mousePos,lines,circles,arcs,splines])
+
+  useEffect(()=>{
+    if (tool!=='center'||!mousePos){setCenterHover(null);return}
+    setCenterHover(nearestMirrorEntity(mousePos,lines,circles,arcs,splines))
+  },[tool,mousePos,lines,circles,arcs,splines])
 
   useEffect(()=>{
     if (tool!=='mirror'||!mirrorAccepted||!mirrorP1||!mousePos||!mirrorSel.length){setMirrorPreview(null);return}
@@ -1378,6 +1731,8 @@ export default function App() {
       const isOffHov=offsetHover?.kind==='line'&&offsetHover.idx===idx&&!isOffSel
       const isMirSel=mirrorSel.some(e=>e.kind==='line'&&e.idx===idx)
       const isMirHov=mirrorHover?.kind==='line'&&mirrorHover.idx===idx&&!isMirSel
+      const isCenSel=centerSel.some(e=>e.kind==='line'&&e.idx===idx)
+      const isCenHov=centerHover?.kind==='line'&&centerHover.idx===idx&&!isCenSel
       const isMCSel=moveCopySel.some(e=>e.kind==='line'&&e.idx===idx)
       const isMCHov=moveCopyHover?.kind==='line'&&moveCopyHover.idx===idx&&!isMCSel
       const isRCSel=rotateCopySel.some(e=>e.kind==='line'&&e.idx===idx)
@@ -1388,9 +1743,9 @@ export default function App() {
       const isFiHov=filletHover?.kind==='line'&&filletHover.idx===idx&&!isFiSel
       const isSelHov=selectHover?.kind==='line'&&selectHover.idx===idx&&!selection.some(s=>s.kind==='line'&&s.idx===idx)
       const isSelected=selection.some(s=>s.kind==='line'&&s.idx===idx)
-      const color=isDelTarget?'#F44336':isOffSel||isMirSel||isMCSel||isRCSel||isRzSel||isFiSel?'#FF9800':isOffHov||isMirHov||isMCHov||isRCHov||isRzHov||isFiHov?'#FFD600':isSelHov||isSelected?'#64B5F6':null
+      const color=isDelTarget?'#F44336':isOffSel||isMirSel||isCenSel||isMCSel||isRCSel||isRzSel||isFiSel?'#FF9800':isOffHov||isMirHov||isCenHov||isMCHov||isRCHov||isRzHov||isFiHov?'#FFD600':isSelHov||isSelected?'#64B5F6':null
       if (!color) return
-      const lw=(isDelTarget||isOffSel||isMirSel||isMCSel||isRCSel||isRzSel||isFiSel?3:2)/sc
+      const lw=(isDelTarget||isOffSel||isMirSel||isCenSel||isMCSel||isRCSel||isRzSel||isFiSel?3:2)/sc
       ctx.save();ctx.strokeStyle=color;ctx.lineWidth=lw;ctx.setLineDash([])
       ctx.beginPath();ctx.moveTo(line.x1,line.y1);ctx.lineTo(line.x2,line.y2);ctx.stroke()
       ctx.restore()
@@ -1399,6 +1754,8 @@ export default function App() {
       const isDelTarget=deletePreview?.kind==='circle'&&deletePreview.idx===idx
       const isMirSel=mirrorSel.some(e=>e.kind==='circle'&&e.idx===idx)
       const isMirHov=mirrorHover?.kind==='circle'&&mirrorHover.idx===idx&&!isMirSel
+      const isCenSel=centerSel.some(e=>e.kind==='circle'&&e.idx===idx)
+      const isCenHov=centerHover?.kind==='circle'&&centerHover.idx===idx&&!isCenSel
       const isMCSel=moveCopySel.some(e=>e.kind==='circle'&&e.idx===idx)
       const isMCHov=moveCopyHover?.kind==='circle'&&moveCopyHover.idx===idx&&!isMCSel
       const isRCSel=rotateCopySel.some(e=>e.kind==='circle'&&e.idx===idx)
@@ -1407,9 +1764,9 @@ export default function App() {
       const isRzHov=resizeHover?.kind==='circle'&&resizeHover.idx===idx&&!isRzSel
       const isSelHov=selectHover?.kind==='circle'&&selectHover.idx===idx&&!selection.some(s=>s.kind==='circle'&&s.idx===idx)
       const isSelected=selection.some(s=>s.kind==='circle'&&s.idx===idx)
-      const color=isDelTarget?'#F44336':isMirSel||isMCSel||isRCSel||isRzSel?'#FF9800':isMirHov||isMCHov||isRCHov||isRzHov?'#FFD600':isSelHov||isSelected?'#64B5F6':null
+      const color=isDelTarget?'#F44336':isMirSel||isCenSel||isMCSel||isRCSel||isRzSel?'#FF9800':isMirHov||isCenHov||isMCHov||isRCHov||isRzHov?'#FFD600':isSelHov||isSelected?'#64B5F6':null
       if (!color) return
-      const lw=(isDelTarget||isMirSel||isMCSel||isRCSel||isRzSel?3:2)/sc
+      const lw=(isDelTarget||isMirSel||isCenSel||isMCSel||isRCSel||isRzSel?3:2)/sc
       ctx.save();ctx.strokeStyle=color;ctx.lineWidth=lw;ctx.setLineDash([])
       ctx.beginPath();ctx.arc(c.cx,c.cy,c.r,0,Math.PI*2);ctx.stroke();ctx.restore()
     })
@@ -1419,6 +1776,8 @@ export default function App() {
       const isOffHov=offsetHover?.kind==='arc'&&offsetHover.idx===idx&&!isOffSel
       const isMirSel=mirrorSel.some(e=>e.kind==='arc'&&e.idx===idx)
       const isMirHov=mirrorHover?.kind==='arc'&&mirrorHover.idx===idx&&!isMirSel
+      const isCenSel=centerSel.some(e=>e.kind==='arc'&&e.idx===idx)
+      const isCenHov=centerHover?.kind==='arc'&&centerHover.idx===idx&&!isCenSel
       const isMCSel=moveCopySel.some(e=>e.kind==='arc'&&e.idx===idx)
       const isMCHov=moveCopyHover?.kind==='arc'&&moveCopyHover.idx===idx&&!isMCSel
       const isRCSel=rotateCopySel.some(e=>e.kind==='arc'&&e.idx===idx)
@@ -1427,11 +1786,41 @@ export default function App() {
       const isRzHov=resizeHover?.kind==='arc'&&resizeHover.idx===idx&&!isRzSel
       const isSelHov=selectHover?.kind==='arc'&&selectHover.idx===idx&&!selection.some(s=>s.kind==='arc'&&s.idx===idx)
       const isSelected=selection.some(s=>s.kind==='arc'&&s.idx===idx)
-      const color=isDelTarget?'#F44336':isOffSel||isMirSel||isMCSel||isRCSel||isRzSel?'#FF9800':isOffHov||isMirHov||isMCHov||isRCHov||isRzHov?'#FFD600':isSelHov||isSelected?'#64B5F6':null
+      const color=isDelTarget?'#F44336':isOffSel||isMirSel||isCenSel||isMCSel||isRCSel||isRzSel?'#FF9800':isOffHov||isMirHov||isCenHov||isMCHov||isRCHov||isRzHov?'#FFD600':isSelHov||isSelected?'#64B5F6':null
       if (!color) return
-      const lw=(isDelTarget||isOffSel||isMirSel||isMCSel||isRCSel||isRzSel?3:2)/sc
+      const lw=(isDelTarget||isOffSel||isMirSel||isCenSel||isMCSel||isRCSel||isRzSel?3:2)/sc
       ctx.save();ctx.strokeStyle=color;ctx.lineWidth=lw;ctx.setLineDash([])
       ctx.beginPath();ctx.arc(arc.cx,arc.cy,arc.r,arc.startAngle,arc.endAngle,false);ctx.stroke();ctx.restore()
+    })
+    // Splines never got the same selection/hover highlight treatment as
+    // lines/circles/arcs above (drawSplines existed, just unused here) — so
+    // picking one up in Mirror/Move/Rotate/Resize/Offset worked (selection
+    // state already tracks kind==='spline') but nothing ever drew the
+    // orange/yellow highlight stroke on it.
+    drawSplines.forEach((sp,idx)=>{
+      if (sp.points.length<2) return
+      const isDelTarget=deletePreview?.kind==='spline'&&deletePreview.idx===idx
+      const isOffSel=offsetEntity?.kind==='spline'&&offsetEntity.idx===idx
+      const isOffHov=offsetHover?.kind==='spline'&&offsetHover.idx===idx&&!isOffSel
+      const isMirSel=mirrorSel.some(e=>e.kind==='spline'&&e.idx===idx)
+      const isMirHov=mirrorHover?.kind==='spline'&&mirrorHover.idx===idx&&!isMirSel
+      const isCenSel=centerSel.some(e=>e.kind==='spline'&&e.idx===idx)
+      const isCenHov=centerHover?.kind==='spline'&&centerHover.idx===idx&&!isCenSel
+      const isMCSel=moveCopySel.some(e=>e.kind==='spline'&&e.idx===idx)
+      const isMCHov=moveCopyHover?.kind==='spline'&&moveCopyHover.idx===idx&&!isMCSel
+      const isRCSel=rotateCopySel.some(e=>e.kind==='spline'&&e.idx===idx)
+      const isRCHov=rotateCopyHover?.kind==='spline'&&rotateCopyHover.idx===idx&&!isRCSel
+      const isRzSel=resizeSel.some(e=>e.kind==='spline'&&e.idx===idx)
+      const isRzHov=resizeHover?.kind==='spline'&&resizeHover.idx===idx&&!isRzSel
+      const isSelHov=selectHover?.kind==='spline'&&selectHover.idx===idx&&!selection.some(s=>s.kind==='spline'&&s.idx===idx)
+      const isSelected=selection.some(s=>s.kind==='spline'&&s.idx===idx)
+      const color=isDelTarget?'#F44336':isOffSel||isMirSel||isCenSel||isMCSel||isRCSel||isRzSel?'#FF9800':isOffHov||isMirHov||isCenHov||isMCHov||isRCHov||isRzHov?'#FFD600':isSelHov||isSelected?'#64B5F6':null
+      if (!color) return
+      const lw=(isDelTarget||isOffSel||isMirSel||isCenSel||isMCSel||isRCSel||isRzSel?3:2)/sc
+      const s2=sp.polyline?sp.points:sampleSpline(sp.points,sp.closed,16)
+      ctx.save();ctx.strokeStyle=color;ctx.lineWidth=lw;ctx.setLineDash([])
+      ctx.beginPath();ctx.moveTo(s2[0].x,s2[0].y);s2.slice(1).forEach(p=>ctx.lineTo(p.x,p.y));ctx.stroke()
+      ctx.restore()
     })
 
     // ── In-progress spline ──
@@ -1765,7 +2154,7 @@ export default function App() {
       if (geo) drawLineIndicator(ctx,geo.x,geo.y,geo.type,sc)
     }
 
-  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetDistLocked,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,intersectionPts,joinHover,joinFirstPt,dims,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState])
+  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetDistLocked,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,intersectionPts,joinHover,joinFirstPt,dims,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState])
 
 
   // ── Phase 2 Step 3: plane tagging ────────────────────────────────────────
@@ -1779,6 +2168,29 @@ export default function App() {
     return { plane: 'face', facePlane: ap }
   }
 
+  // ── Include From Face ────────────────────────────────────────────────────
+  // General sketch tool (works while sketching on any solid face — extrude,
+  // cutout, or a loft profile): copies the CURRENT face's own boundary into
+  // this sketch as real, editable line geometry, so it can be traced/reused
+  // as a profile instead of redrawn by hand. Sources from
+  // activePlane.refSegments — already computed in sketch-space by
+  // FacePlane.js's faceHitToPlane() when the face was picked (the same data
+  // that already powers edge-snapping while sketching on a face), so this
+  // needs no new geometry extraction. It's a mesh-derived polygon
+  // approximation of the face boundary, not exact OCC curves (fine per the
+  // user's explicit "don't care if it's a circle/polyline/spline/arc" — they
+  // just want the shape available to work with, not a bit-exact curve).
+  function includeFaceGeometry() {
+    const ap = activePlaneRef.current
+    if (!ap || typeof ap !== 'object' || !ap.refSegments || !ap.refSegments.length) return
+    const tag = planeTag()
+    const newLines = ap.refSegments.map(seg => ({
+      x1: seg.x1, y1: seg.y1, x2: seg.x2, y2: seg.y2, ...tag,
+    }))
+    commit(snapshot())
+    setLines(prev => [...prev, ...newLines])
+  }
+
   // ── Feature tree helpers ─────────────────────────────────────────────────
 
   function nextSketchName() {
@@ -1789,6 +2201,22 @@ export default function App() {
     featureCountRef.current.extrude += 1
     return `Extrude ${featureCountRef.current.extrude}`
   }
+  function nextFilletName() {
+    featureCountRef.current.fillet += 1
+    return `Fillet ${featureCountRef.current.fillet}`
+  }
+  function nextMirrorName() {
+    featureCountRef.current.mirror += 1
+    return `Mirror ${featureCountRef.current.mirror}`
+  }
+  function nextJoinName() {
+    featureCountRef.current.join += 1
+    return `Join ${featureCountRef.current.join}`
+  }
+  function nextLoftName() {
+    featureCountRef.current.loft += 1
+    return `Loft ${featureCountRef.current.loft}`
+  }
 
   // Enter sketch mode for a new or existing sketch
   function enterSketch(plane, existingId=null, initialGeometry=null) {
@@ -1797,7 +2225,7 @@ export default function App() {
     setSketchMode(true)
     setActiveSketchId(existingId)
     setTool('line')
-    resetDrawState();resetOffset();resetMirror();resetMoveCopy()
+    resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy()
     resetRotateCopy();resetResize();resetFillet();resetSpline()
     resetText();resetSelection();resetJoin();resetDim()
 
@@ -1824,13 +2252,23 @@ export default function App() {
 
   // ── Phase 2 Step 3b: Sketch on face ──────────────────────────────────────
   function handleFaceClick(facePlane) {
+    if (tool==='mirror3d' && mirror3dSourceFeatureId) { commitMirror3D({ kind:'face', facePlane }); return }
+    if (tool==='loft3d' && !loftState) { startLoftProfile1({ kind:'face', facePlane }); return }
     if (extrudeState) return  // step 3 (depth): ignore stray face clicks
     enterSketch(facePlane)
     viewport3dRef.current?.snapToFace(facePlane)
   }
 
   function handlePlaneClick({ id }) {
+    if (tool==='mirror3d' && mirror3dSourceFeatureId) { commitMirror3D({ kind:'workplane', planeId:id }); return }
+    if (tool==='loft3d' && !loftState) { startLoftProfile1({ kind:'workplane', planeId:id }); return }
     if (extrudeState) return  // step 3 (depth): ignore stray plane clicks
+    // Work planes pass through/near the model with no occlusion check against
+    // solids in front of them (see WorkPlanes.js's hitTestPlanes) — clicking an
+    // edge near a plane could otherwise register as a plane click too and drop
+    // into sketch mode. showWorkPlanes already excludes fillet3d mode; this is
+    // a second guard in case a stray click still gets through.
+    if (tool==='fillet3d') return
     enterSketch(id)
     viewport3dRef.current?.snapToPlane(id)
   }
@@ -1845,15 +2283,52 @@ export default function App() {
     const isFace = plane && typeof plane === 'object' && plane.worldToSketch
     const planeId = isFace ? 'face' : (typeof plane === 'string' ? plane : 'XY')
 
+    // Ghost reference geometry (the previous loft profile, injected by
+    // injectLoftGhost so it renders dimmed and stays snap-able) must never
+    // count as part of THIS sketch's own profile — strip it before detection.
+    const ownLines = lines.filter(l => !l.ghostRef)
+    const ownCircles = circles.filter(c => !c.ghostRef)
+    const ownArcs = arcs.filter(a => !a.ghostRef)
+    const ownSplines = splines.filter(s => !s.ghostRef)
+
     // Detect closed profiles (needed for both standalone sketches and extrude flow)
     const allProfiles = []
-    const profiles = detectProfiles(lines, arcs, planeId, circles, splines)
+    const profiles = detectProfiles(ownLines, ownArcs, planeId, ownCircles, ownSplines)
     profiles.forEach(pts => {
       const cx = pts.reduce((s,p)=>s+p.x,0)/pts.length
       const cy = pts.reduce((s,p)=>s+p.y,0)/pts.length
       allProfiles.push({ planeId, facePlane: isFace ? plane : null, pts, centroid:{x:cx,y:cy} })
     })
     setCachedProfiles(allProfiles)
+
+    if (loftState) {
+      // ── Loft flow: store this profile, show the step popup (never
+      //    auto-commits — Next/Previous/Finish Loft all come from the popup) ──
+      // Note: NOT gated on tool==='loft3d' — enterSketch() always resets
+      // `tool` to 'line' once a profile sketch starts (it doubles as the
+      // active 2D drawing tool), so by the time Finish Sketch is clicked
+      // here, tool is whatever draw tool was last selected, not 'loft3d'.
+      // loftState alone is the reliable "are we in a loft session" signal.
+      if (allProfiles.length === 0) {
+        setSketchMode(true)
+        setActivePlane(plane)
+        setCadError('No closed profile found — make sure your sketch forms a closed loop.')
+        setTimeout(() => setCadError(null), 5000)
+        return
+      }
+      const best = allProfiles[0]
+      const profileEntry = {
+        sketchLines: ownLines, sketchCircles: ownCircles, sketchArcs: ownArcs, sketchSplines: ownSplines,
+        pts: best.pts, circle: best.pts.circleMeta || null,
+        offsetMm: loftState.currentOffsetMm,
+      }
+      setLoftState(prev => {
+        const nextProfiles = [...prev.profiles]
+        nextProfiles[prev.currentIdx] = profileEntry
+        return { ...prev, profiles: nextProfiles }
+      })
+      return
+    }
 
     if (extrudeTool) {
       // ── Extrude/Cutout flow: step 2 ──────────────────────────────────────
@@ -1935,7 +2410,7 @@ export default function App() {
         sketchSplines: [...splines],
       }
 
-      viewport3dRef.current?.snapToIsometric()
+      viewport3dRef.current?.restoreSavedView()
 
       if (editingFeat) {
         // Editing existing feature: skip step 3, commit directly with original params
@@ -1971,7 +2446,33 @@ export default function App() {
     // Clear working arrays — committed geometry lives in features now
     setLines([]); setCircles([]); setArcs([]); setSplines([])
     setExtrudeHandlePos(null)
-    viewport3dRef.current?.snapToIsometric()
+    viewport3dRef.current?.restoreSavedView()
+  }
+
+  // Cancel button next to Finish Sketch — abandons the whole in-progress
+  // Cut/Extrude/Loft feature (not just the current 2D tool, which is what
+  // Escape does now — see the sketchMode Escape handler). Only meaningful
+  // while extrudeTool or loftState is set; a plain standalone sketch has no
+  // "feature" to cancel, so this button isn't shown for that case.
+  function cancelFeature() {
+    resetDrawState();resetSpline();resetOffset();resetMirror();resetCenter();resetMoveCopy()
+    resetRotateCopy();resetResize();resetFillet();resetText();resetSelection()
+    resetJoin();resetDim()
+    if (hiddenEditSolidRef.current) {
+      setSolids(prev => [...prev, ...hiddenEditSolidRef.current])
+      hiddenEditSolidRef.current = null
+    }
+    setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
+    activePlaneRef.current = null
+    setLines([]); setCircles([]); setArcs([]); setSplines([])
+    if (extrudeTool) {
+      setExtrudeTool(null); setExtrudeState(null); setEditingFeatureId(null)
+    }
+    if (loftState) {
+      resetLoft3D()
+      setTool('select')
+    }
+    viewport3dRef.current?.restoreSavedView()
   }
 
   // Called when EXTRUDE or CUTOUT tool is activated from sidebar
@@ -1996,6 +2497,998 @@ export default function App() {
     setCachedProfiles([])
   }
 
+  // ── Fillet (3D edge) state machine ────────────────────────────────────────
+  // Phase 1 (selecting): tool==='fillet3d', !fillet3dAccepted — click toggles
+  //   edges in/out of fillet3dSel (same accumulate-then-act pattern as
+  //   Mirror/Move-Copy/Rotate-Copy/Resize/2D-Fillet's own sel+accepted state).
+  // Phase 2 (accepted): Enter/Tab promotes once fillet3dSel.length>0 — radius
+  //   popup shown, no more edge picking.
+  // Phase 3 (commit): popup's ↵ → cadEngine.fillet3d() rebuilds that one solid,
+  //   ALL selected edges rounded together in one operation (replicad's
+  //   EdgeFinder.either() combinator — see cadWorker.js).
+  // Scoped to one solid per selection session (see project_fillet3d_status.md) —
+  // fillet3dSel entries always share the same solidId in practice.
+  const [fillet3dHover, setFillet3dHover] = useState(null)     // {solidId, edgeId, point} while hovering, unpicked
+  const [fillet3dSel, setFillet3dSel] = useState([])           // [{solidId, edgeId, point}] accumulated picks
+  const [fillet3dAccepted, setFillet3dAccepted] = useState(false)
+  const [fillet3dRadiusInput, setFillet3dRadiusInput] = useState('2')
+  const [fillet3dHandlePos, setFillet3dHandlePos] = useState(null)
+
+  function activateFillet3DTool() {
+    resetSelection()
+    resetDrawState()
+    if (sketchModeRef.current) {
+      setSketchMode(false)
+      setActivePlane(null)
+      setActiveSketchId(null)
+      activePlaneRef.current = null
+    }
+    setTool('fillet3d')
+    setExtrudeTool(null)
+    setExtrudeState(null)
+    setEditingFeatureId(null)
+    setFillet3dSel([])
+    setFillet3dAccepted(false)
+    setFillet3dHover(null)
+    setFillet3dRadiusInput('2')
+    setFillet3dHandlePos(null)
+    viewport3dRef.current?.restoreSavedView()
+  }
+
+  // ── Measure (3D) state machine ────────────────────────────────────────────
+  // Single-click on an edge → immediate result (length for a straight edge,
+  // diameter for a circular one, or a labeled curve length as a fallback —
+  // see classifyEdgeGeometry, since neither the mesh data nor OCC expose a
+  // curve-type tag we could read directly, only point samples). Two clicks on
+  // faces/points (anywhere raycastSolidFace lands, not just vertices) →
+  // distance between them. Esc clears the current result/pending point first,
+  // a second Esc (nothing pending) leaves the tool — same two-stage pattern
+  // as fillet3d/mirror3d/join3d.
+  const [measureHover, setMeasureHover] = useState(null)       // {kind:'edge',solidId,edgeId,point} | {kind:'point',solidId,point} | null
+  const [measureP1, setMeasureP1] = useState(null)             // {solidId, point} — first point of a pending distance pick
+  const [measureResult, setMeasureResult] = useState(null)     // {kind:'straight'|'circular'|'curve'|'distance', ...}
+  const [measureHandlePos, setMeasureHandlePos] = useState(null)
+
+  function activateMeasureTool() {
+    resetSelection()
+    resetDrawState()
+    if (sketchModeRef.current) {
+      setSketchMode(false)
+      setActivePlane(null)
+      setActiveSketchId(null)
+      activePlaneRef.current = null
+    }
+    setTool('measure')
+    setExtrudeTool(null)
+    setExtrudeState(null)
+    setEditingFeatureId(null)
+    resetMeasure()
+    viewport3dRef.current?.restoreSavedView()
+  }
+
+  function resetMeasure() {
+    setMeasureHover(null)
+    setMeasureP1(null)
+    setMeasureResult(null)
+    setMeasureHandlePos(null)
+    viewport3dRef.current?.clearEdgeHighlight()
+    clearMeasureOverlay()
+  }
+
+  // Circumcenter of 3 non-collinear 3D points (standard closed-form via the
+  // triangle's circumradius vector) — used to test whether an edge's point
+  // samples lie on a circle, since nothing upstream (meshEdges/OCC as wired
+  // here) tags an edge's curve type or gives a center/radius directly.
+  function circumcenter3(A, B, C) {
+    const ab = B.clone().sub(A)
+    const ac = C.clone().sub(A)
+    const abXac = ab.clone().cross(ac)
+    const abXacLenSq = abXac.lengthSq()
+    if (abXacLenSq < 1e-9) return null   // collinear — no unique circle
+    const toCenter = abXac.clone().cross(ab).multiplyScalar(ac.lengthSq())
+      .add(ac.clone().cross(abXac).multiplyScalar(ab.lengthSq()))
+      .multiplyScalar(1 / (2 * abXacLenSq))
+    return { center: A.clone().add(toCenter), radius: toCenter.length() }
+  }
+
+  // Classifies one edge from its point samples (getEdgePolyline) as straight
+  // (length = endpoint distance), circular (fit a circle through 3 spread
+  // samples, verify every other sample lands on it within tolerance —
+  // diameter/radius), or a general curve (fallback: summed segment length,
+  // labeled so it's not mistaken for a true diameter). Returns null if the
+  // edge can't be looked up (e.g. solid rebuilt since the hover).
+  function classifyEdgeGeometry(vp, solidId, edgeId) {
+    const poly = vp.getEdgePolyline(solidId, edgeId)
+    if (!poly?.points || poly.points.length < 6) return null
+    const SCALE = 2
+    const raw = poly.points
+    const pts = []
+    for (let i = 0; i < raw.length; i += 3) {
+      const v = new THREE.Vector3(raw[i], raw[i+1], raw[i+2]).applyMatrix4(poly.matrixWorld)
+      pts.push(new THREE.Vector3(v.x/SCALE, v.y/SCALE, v.z/SCALE))
+    }
+    let segLen = 0
+    for (let i = 0; i < raw.length/3 - 1; i++) segLen += pts[i].distanceTo(pts[i+1])
+
+    const first = pts[0], last = pts[pts.length-1]
+    const chord = first.distanceTo(last)
+    const chordDir = chord > 1e-6 ? last.clone().sub(first).normalize() : null
+    const maxDev = chordDir
+      ? Math.max(...pts.map(p => p.clone().sub(first).cross(chordDir).length()))
+      : 0
+    const straightTol = Math.max(0.02, chord * 0.01)
+    if (chordDir && maxDev < straightTol) {
+      return { kind: 'straight', length: chord }
+    }
+
+    // Try a circle fit through 3 well-spread samples (first / ~1/3 / ~2/3).
+    const iMid = Math.max(1, Math.floor(pts.length/3))
+    const iTwoThirds = Math.min(pts.length-2, Math.floor(pts.length*2/3))
+    const fit = circumcenter3(pts[0], pts[iMid], pts[iTwoThirds])
+    if (fit) {
+      const tol = Math.max(0.05, fit.radius * 0.02)
+      const fits = pts.every(p => Math.abs(p.distanceTo(fit.center) - fit.radius) < tol)
+      if (fits) return { kind: 'circular', radius: fit.radius, diameter: fit.radius*2, center: fit.center }
+    }
+    return { kind: 'curve', length: segLen }
+  }
+
+  // Redraws the point-mode markers (P1 dot, live hover dot, dashed connector
+  // + running distance label) on the shared preview overlay canvas — same
+  // canvas fillet3d's markers use (never active at the same time as Measure).
+  function clearMeasureOverlay() {
+    const vp = viewport3dRef.current; if (!vp) return
+    const oc = vp.getExtrudePreviewCanvas(); if (!oc) return
+    const ctx = oc.getContext('2d')
+    ctx.setTransform(1,0,0,1,0,0)
+    ctx.clearRect(0,0,oc.width,oc.height)
+  }
+
+  function drawMeasureOverlay(vp, p1, hover) {
+    const oc = vp.getExtrudePreviewCanvas(); if (!oc) return
+    const ctx = oc.getContext('2d')
+    ctx.setTransform(1,0,0,1,0,0)
+    ctx.clearRect(0,0,oc.width,oc.height)
+    const SCALE = 2
+    const color = '#4FC3F7'
+    const toScreen = p => vp.worldToScreen(p[0]*SCALE, p[1]*SCALE, p[2]*SCALE)
+
+    const drawDot = (pt) => {
+      const s = toScreen(pt); if (!s) return null
+      ctx.save(); ctx.fillStyle = color
+      ctx.beginPath(); ctx.arc(s.x, s.y, 5, 0, Math.PI*2); ctx.fill()
+      ctx.restore()
+      return s
+    }
+
+    const p1Screen = p1 ? drawDot(p1.point) : null
+    if (hover?.kind === 'point') {
+      const hoverScreen = drawDot(hover.point)
+      if (p1Screen && hoverScreen) {
+        ctx.save()
+        ctx.strokeStyle = color
+        ctx.setLineDash([5,4])
+        ctx.lineWidth = 1.5
+        ctx.beginPath()
+        ctx.moveTo(p1Screen.x, p1Screen.y)
+        ctx.lineTo(hoverScreen.x, hoverScreen.y)
+        ctx.stroke()
+        ctx.restore()
+        const d = Math.hypot(
+          hover.point[0]-p1.point[0], hover.point[1]-p1.point[1], hover.point[2]-p1.point[2])
+        ctx.save()
+        ctx.fillStyle = color
+        ctx.font = 'bold 12px monospace'
+        ctx.textAlign = 'center'
+        ctx.shadowColor = color; ctx.shadowBlur = 6
+        ctx.fillText(`${d.toFixed(2)} mm`, (p1Screen.x+hoverScreen.x)/2, (p1Screen.y+hoverScreen.y)/2 - 8)
+        ctx.restore()
+      }
+    }
+  }
+
+  // Mouse move while the Measure tool is active — edges take priority (same
+  // dedicated raycastSolidEdges pass fillet3d uses); if the ray misses every
+  // edge, fall back to a plain point-on-face hit via raycastSolidFace.
+  function handleMeasureHover(e) {
+    if (tool !== 'measure') return
+    const vp = viewport3dRef.current; if (!vp) return
+    const edgeHit = vp.raycastSolidEdges(e.clientX, e.clientY)
+    if (edgeHit && edgeHit.edgeId != null) {
+      setMeasureHover({ kind:'edge', ...edgeHit })
+      return
+    }
+    const faceHit = vp.raycastSolidFace(e.clientX, e.clientY)
+    setMeasureHover(faceHit ? { kind:'point', ...faceHit } : null)
+  }
+
+  function handleMeasureClick(e) {
+    if (tool !== 'measure' || !measureHover) return
+    const vp = viewport3dRef.current; if (!vp) return
+
+    if (measureHover.kind === 'edge') {
+      const { solidId, edgeId } = measureHover
+      const geo = classifyEdgeGeometry(vp, solidId, edgeId)
+      if (!geo) return
+      setMeasureResult({ ...geo, solidId, edgeId })
+      setMeasureP1(null)
+      setMeasureHandlePos({ x: e.clientX + 20, y: e.clientY - 20 })
+      vp.setSelectedEdges([{ solidId, edgeId }])
+      return
+    }
+
+    // Point mode: first click starts P1 (also clears any previous result, so
+    // starting a fresh pick doesn't require Esc first); second click computes
+    // the distance and settles back to "ready for a new pair" (P1 cleared).
+    if (!measureP1) {
+      setMeasureP1({ solidId: measureHover.solidId, point: measureHover.point })
+      setMeasureResult(null)
+      setMeasureHandlePos({ x: e.clientX + 20, y: e.clientY - 20 })
+      vp.clearEdgeHighlight()
+      return
+    }
+    const [x1,y1,z1] = measureP1.point, [x2,y2,z2] = measureHover.point
+    setMeasureResult({
+      kind: 'distance', distance: Math.hypot(x2-x1, y2-y1, z2-z1),
+      dx: Math.abs(x2-x1), dy: Math.abs(y2-y1), dz: Math.abs(z2-z1),
+    })
+    setMeasureHandlePos({ x: e.clientX + 20, y: e.clientY - 20 })
+    setMeasureP1(null)
+  }
+
+  // ── Mirror (3D feature) state machine ─────────────────────────────────────
+  // Step 1: click a feature row in the Feature Tree to pick mirror3dSourceFeatureId.
+  // Step 2: click a work plane or solid face — commits immediately (see
+  //   commitMirror3D), no third input step needed unlike fillet3d/extrude.
+  const [mirror3dSourceFeatureId, setMirror3dSourceFeatureId] = useState(null)
+
+  function activateMirror3DTool() {
+    resetSelection()
+    resetDrawState()
+    if (sketchModeRef.current) {
+      setSketchMode(false)
+      setActivePlane(null)
+      setActiveSketchId(null)
+      activePlaneRef.current = null
+    }
+    setTool('mirror3d')
+    setExtrudeTool(null)
+    setExtrudeState(null)
+    setEditingFeatureId(null)
+    setMirror3dSourceFeatureId(null)
+    viewport3dRef.current?.clearSolidHighlight()
+    viewport3dRef.current?.restoreSavedView()
+  }
+
+  function resetMirror3D() {
+    setMirror3dSourceFeatureId(null)
+    viewport3dRef.current?.clearSolidHighlight()
+  }
+
+  // ── Join (3D boolean union) state machine ─────────────────────────────────
+  // Step 1: toggle 2+ eligible feature rows in the Feature Tree into joinSel.
+  // Step 2: accept via Enter, right-click, or Tab — commits immediately, no
+  //   3D-viewport interaction needed at all (unlike Mirror3D's plane pick).
+  const [joinSel, setJoinSel] = useState([])   // [featureId, ...] accumulated picks
+
+  function activateJoin3DTool() {
+    resetSelection()
+    resetDrawState()
+    if (sketchModeRef.current) {
+      setSketchMode(false)
+      setActivePlane(null)
+      setActiveSketchId(null)
+      activePlaneRef.current = null
+    }
+    setTool('join3d')
+    setExtrudeTool(null)
+    setExtrudeState(null)
+    setEditingFeatureId(null)
+    setJoinSel([])
+    viewport3dRef.current?.restoreSavedView()
+  }
+
+  function resetJoin3D() {
+    setJoinSel([])
+  }
+
+  function handleToggleJoinMember(featId) {
+    if (tool !== 'join3d') return
+    setJoinSel(prev => prev.includes(featId) ? prev.filter(id => id !== featId) : [...prev, featId])
+  }
+
+  // Keeps every currently-selected join member glowing in the 3D view, live
+  // as the selection changes — mirrors how selected fillet edges/mirror
+  // sources are highlighted elsewhere. Also clears on leaving the tool
+  // (the effect re-runs with an empty solidIds list otherwise, since
+  // joinSel itself doesn't get cleared until resetJoin3D — this explicit
+  // tool!=='join3d' branch is what actually removes the glow on tool-switch).
+  useEffect(() => {
+    if (tool !== 'join3d') { viewport3dRef.current?.clearJoinHighlight(); return }
+    const solidIds = joinSel.map(id => features.find(f => f.id === id)?.solidId).filter(Boolean)
+    viewport3dRef.current?.highlightJoinMembers(solidIds)
+  }, [joinSel, tool])
+
+  // Boolean-unions every selected member into one new solid. Members are
+  // removed from `solids` (not rendered independently anymore) but their
+  // FEATURE entries stay — just locked via joinedInto — carrying everything
+  // needed to rebuild them fresh if the Join is later deleted (see
+  // rebuildFeatureSolid). No "live" tracking needed afterward: members can't
+  // be edited while locked, so nothing can go stale the way a Mirror source can.
+  async function commitJoin() {
+    const selIds = joinSel
+    resetJoin3D()
+    if (selIds.length < 2) return
+    const memberFeats = selIds.map(id => features.find(f => f.id === id)).filter(Boolean)
+    const memberSolids = memberFeats.map(f => solids.find(s => s.id === f.solidId)).filter(Boolean)
+    if (memberSolids.length < 2) return
+    try {
+      const newSolidId = Date.now()
+      const members = memberSolids.map(s => ({
+        solidId: s.id, base: buildBaseWorkerParams(s), ops: buildSolidOpsForWorker(s, features),
+      }))
+      const meshData = await cadEngine.joinShapes({ solidId: newSolidId, members })
+      const group = replicadMeshToThree(meshData, memberSolids[0].color, newSolidId)
+
+      const joinFeatId = `join-${newSolidId}`
+      setSolids(prev => [
+        ...prev.filter(s => !memberSolids.some(m => m.id === s.id)),
+        { id: newSolidId, group, operation: 'join', memberSolidIds: memberSolids.map(s => s.id), color: memberSolids[0].color },
+      ])
+      setFeatures(prev => [
+        ...prev.map(f => memberFeats.some(m => m.id === f.id) ? { ...f, joinedInto: joinFeatId } : f),
+        { id: joinFeatId, type: 'extrude', name: nextJoinName(), operation: 'join',
+          solidId: newSolidId, memberFeatureIds: selIds, memberSolidIds: memberSolids.map(s => s.id),
+          color: memberSolids[0].color },
+      ])
+    } catch (err) {
+      console.error('Join failed:', err)
+      setCadError(`Join failed: ${err.message || String(err)}`)
+      setTimeout(() => setCadError(null), 6000)
+    }
+  }
+
+  // ── Loft (multi-profile lofted solid) state machine ───────────────────────
+  // Step 1: pick a work plane or face — becomes Profile 1's plane, and fixes
+  //   the shared normal/uAxis basis every later profile reuses (only the
+  //   offset along that normal differs — see buildLoftFacePlane).
+  // Step 2..N: sketch a closed profile, "Finish Sketch" (the same trigger
+  //   every other sketch flow already uses) stores it into loftState.profiles
+  //   at loftState.currentIdx and shows the step popup (Previous/Next/Finish
+  //   Loft) instead of committing — loft never auto-commits on Finish Sketch.
+  // Next/Previous re-enter the sketch on an adjacent profile's plane, restoring
+  // that profile's own saved sketch via enterSketch's existing initialGeometry
+  // param (same mechanism a normal extrude edit already uses) and injecting
+  // the profile immediately behind it as a dimmed, snappable ghost.
+  // loftState.basis = {origin, normal, uAxis} — THREE.Vector3, SCENE (px) units.
+  const [loftState, setLoftState] = useState(null)
+  const [loftEditingFeatureId, setLoftEditingFeatureId] = useState(null)
+
+  function activateLoft3DTool() {
+    resetSelection()
+    resetDrawState()
+    if (sketchModeRef.current) {
+      setSketchMode(false)
+      setActivePlane(null)
+      setActiveSketchId(null)
+      activePlaneRef.current = null
+    }
+    setTool('loft3d')
+    setExtrudeTool(null)
+    setExtrudeState(null)
+    setEditingFeatureId(null)
+    setLoftState(null)
+    setLoftEditingFeatureId(null)
+    viewport3dRef.current?.restoreSavedView()
+  }
+
+  function resetLoft3D() {
+    setLoftState(null)
+    setLoftEditingFeatureId(null)
+  }
+
+  // Step 1 commit — picking the plane/face fixes the shared basis and goes
+  // straight into Profile 1's sketch, no separate "accept" step (matches
+  // Mirror3D's own single-click plane pick).
+  async function startLoftProfile1(pick) {
+    const basis = pick.kind === 'face'
+      ? { origin: pick.facePlane.origin.clone(), normal: pick.facePlane.normal.clone(), uAxis: pick.facePlane.uAxis.clone(), vAxis: pick.facePlane.vAxis.clone() }
+      : workPlaneToFacePlaneBasisPx(pick.planeId)
+    setLoftState({ basis, ruled: false, profiles: [], currentIdx: 0, currentOffsetMm: 0, distanceInput: '20' })
+    const plane = buildLoftFacePlane(basis, 0)
+    // Await the camera tween BEFORE opening the sketch — snapToFace's Promise
+    // resolves when the ~420ms animation finishes. The camera position itself
+    // is what's being interpolated frame-by-frame during that window (not
+    // just a visual nicety — screenToWorld raycasts FROM the live camera
+    // object), so drawing while it's still mid-tween raycasts from a camera
+    // that hasn't reached the straight-on view yet, producing a click point
+    // that doesn't match what's on screen. Entering the sketch only after
+    // the tween settles removes that window entirely, rather than requiring
+    // the user to intuit "wait a beat before drawing."
+    await viewport3dRef.current?.snapToFace(plane)
+    enterSketch(plane)
+  }
+
+  // Appends `profile`'s own sketch geometry into the live working arrays,
+  // tagged ghostRef so the sketch draw loop dims it and handleFinishSketch's
+  // loft branch excludes it from the NEW profile's own detection — reuses
+  // the existing circles/lines state (and therefore getGeoSnap, which already
+  // takes those arrays directly) instead of a parallel snap system.
+  function injectLoftGhost(profile) {
+    if (!profile) return
+    setLines(prev => [...prev, ...profile.sketchLines.map(l => ({ ...l, ghostRef: true }))])
+    setCircles(prev => [...prev, ...profile.sketchCircles.map(c => ({ ...c, ghostRef: true }))])
+    setArcs(prev => [...prev, ...profile.sketchArcs.map(a => ({ ...a, ghostRef: true }))])
+    setSplines(prev => [...prev, ...profile.sketchSplines.map(s => ({ ...s, ghostRef: true }))])
+  }
+
+  async function loftNextProfile() {
+    const st = loftState
+    if (!st) return
+    const nextIdx = st.currentIdx + 1
+    const existingNext = st.profiles[nextIdx]   // re-visiting an already-sketched profile (edit flow)
+    const nextOffsetMm = existingNext ? existingNext.offsetMm : st.currentOffsetMm + (parseFloat(st.distanceInput) || 20)
+    const ghostProfile = st.profiles[st.currentIdx]
+    setLoftState(prev => ({ ...prev, currentIdx: nextIdx, currentOffsetMm: nextOffsetMm }))
+    const plane = buildLoftFacePlane(st.basis, nextOffsetMm)
+    // Await the camera settling before opening the sketch — see startLoftProfile1.
+    await viewport3dRef.current?.snapToFace(plane)
+    enterSketch(
+      plane, null,
+      existingNext ? { lines: existingNext.sketchLines, circles: existingNext.sketchCircles, arcs: existingNext.sketchArcs, splines: existingNext.sketchSplines } : null
+    )
+    injectLoftGhost(ghostProfile)
+  }
+
+  async function loftPreviousProfile() {
+    const st = loftState
+    if (!st || st.currentIdx === 0) return
+    const prevIdx = st.currentIdx - 1
+    const prevProfile = st.profiles[prevIdx]
+    if (!prevProfile) return
+    const ghostProfile = st.profiles[prevIdx - 1]
+    setLoftState(prev => ({ ...prev, currentIdx: prevIdx, currentOffsetMm: prevProfile.offsetMm }))
+    const plane = buildLoftFacePlane(st.basis, prevProfile.offsetMm)
+    await viewport3dRef.current?.snapToFace(plane)
+    enterSketch(
+      plane, null,
+      { lines: prevProfile.sketchLines, circles: prevProfile.sketchCircles, arcs: prevProfile.sketchArcs, splines: prevProfile.sketchSplines }
+    )
+    injectLoftGhost(ghostProfile)
+  }
+
+  // Rebuilds a loft feature's shared plane basis (THREE.Vector3, scene px)
+  // from its stored plain-array fields (mm) — shared by handleEditLoft and
+  // startLoftFromProfile so there's one source of truth for this conversion.
+  function featureLoftBasisPx(feat) {
+    const normal = new THREE.Vector3(...feat.normal)
+    const uAxis  = new THREE.Vector3(...feat.uAxis)
+    return {
+      origin: new THREE.Vector3(mmToPx(feat.origin[0]), mmToPx(feat.origin[1]), mmToPx(feat.origin[2])),
+      normal, uAxis,
+      // Older/malformed data without a stored vAxis falls back to the cross
+      // product — correct for XY/YZ, only wrong for XZ (see
+      // workPlaneToFacePlaneBasisPx) — better than crashing on a missing field.
+      vAxis: feat.vAxis ? new THREE.Vector3(...feat.vAxis) : new THREE.Vector3().crossVectors(normal, uAxis).normalize(),
+    }
+  }
+
+  // Reopens an existing loft feature for editing at Profile 1, same
+  // Next/Previous stepping as creation — "Finish Loft" re-commits in place
+  // (see commitLoft's editingId branch) instead of creating a new solid.
+  function handleEditLoft(featureId) {
+    const feat = features.find(f => f.id === featureId)
+    if (!feat || feat.operation !== 'loft') return
+    resetSelection(); resetDrawState()
+    setTool('loft3d')
+    const basis = featureLoftBasisPx(feat)
+    setLoftState({ basis, ruled: !!feat.ruled, profiles: feat.profiles, currentIdx: 0, currentOffsetMm: feat.profiles[0].offsetMm, distanceInput: '20' })
+    setLoftEditingFeatureId(featureId)
+    const p0 = feat.profiles[0]
+    const plane = buildLoftFacePlane(basis, p0.offsetMm)
+    viewport3dRef.current?.snapToFace(plane).then(() => {
+      enterSketch(plane, null,
+        { lines: p0.sketchLines, circles: p0.sketchCircles, arcs: p0.sketchArcs, splines: p0.sketchSplines })
+    })
+  }
+
+  // Finish Loft — builds the solid through every stored profile. Guards
+  // against fewer than 2 (OCC's loftWith needs at least 2 sections, same
+  // guard cadWorker.js's buildLoft itself has, mirrored here so the error
+  // surfaces immediately instead of round-tripping to the worker first).
+  async function commitLoft() {
+    const st = loftState
+    if (!st) return
+    const profiles = st.profiles.filter(Boolean)
+    if (profiles.length < 2) {
+      setCadError('Need at least 2 profiles to loft.')
+      setTimeout(() => setCadError(null), 5000)
+      return
+    }
+    const editingId = loftEditingFeatureId
+    const basis = st.basis
+    const ruled = !!st.ruled
+    resetLoft3D()
+    setTool('select')
+    setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
+    setLines([]); setCircles([]); setArcs([]); setSplines([])
+
+    const normal = [basis.normal.x, basis.normal.y, basis.normal.z]
+    const origin = [pxToMm(basis.origin.x), pxToMm(basis.origin.y), pxToMm(basis.origin.z)]
+    const uAxis  = [basis.uAxis.x, basis.uAxis.y, basis.uAxis.z]
+    // vAxis isn't needed by the worker (buildLoft only uses normal+uAxis),
+    // but must be stored so handleEditLoft can rebuild the exact same basis —
+    // re-deriving it via cross(normal,uAxis) on edit wouldn't match for a
+    // loft that started on the XZ work plane (see workPlaneToFacePlaneBasisPx).
+    const vAxis  = [basis.vAxis.x, basis.vAxis.y, basis.vAxis.z]
+
+    try {
+      const solidId = editingId ? features.find(f => f.id === editingId)?.solidId : Date.now()
+      const meshData = await cadEngine.loft({
+        solidId, normal, origin, uAxis, ruled,
+        profiles: profiles.map(p => ({ pts: p.pts, circle: p.circle, offsetMm: p.offsetMm })),
+      })
+      const color = (editingId && solids.find(s => s.id === solidId)?.color) || extrudeColor
+      const group = replicadMeshToThree(meshData, color, solidId)
+      const solidData = { id: solidId, group, operation: 'loft', color, normal, origin, uAxis, vAxis, profiles, ruled }
+
+      setSolids(prev => editingId ? prev.map(s => s.id === solidId ? solidData : s) : [...prev, solidData])
+      if (editingId) {
+        setFeatures(prev => prev.map(f => f.id === editingId ? { ...f, normal, origin, uAxis, vAxis, profiles, ruled } : f))
+      } else {
+        setFeatures(prev => [...prev, {
+          id: `loft-${solidId}`, type: 'extrude', operation: 'loft', name: nextLoftName(),
+          solidId, normal, origin, uAxis, vAxis, profiles, ruled, color,
+        }])
+      }
+      await rebuildDependentMirrors(solidData)
+    } catch (err) {
+      console.error('Loft failed:', err)
+      setCadError(`Loft failed: ${err.message || String(err)}`)
+      setTimeout(() => setCadError(null), 6000)
+    }
+  }
+
+  function handlePickMirror3DSource(featId) {
+    if (tool !== 'mirror3d' || mirror3dSourceFeatureId) return
+    const feat = features.find(f => f.id === featId)
+    if (!feat) return
+    setMirror3dSourceFeatureId(featId)
+    if (feat.operation === 'cutout') {
+      // A cutout is often a small detail on a much larger body — highlight
+      // just the cutout's own profile (at its entry plane) instead of
+      // glowing the whole solid, same reasoning as commitMirrorCutout's
+      // reflection math needing the source's own plane basis.
+      const toWorld = feat.facePlane
+        ? p => feat.facePlane.sketchToWorld(p.x, p.y)
+        : p => sketchToWorld(p.x, p.y, feat.planeId)
+      viewport3dRef.current?.highlightCutoutFace(feat.profilePts.map(toWorld))
+    } else {
+      viewport3dRef.current?.highlightSolid(feat.solidId)
+    }
+  }
+
+  // Step 2 commit — picking the plane/face immediately mirrors, no third
+  // input step. `pick` is {kind:'face', facePlane} or {kind:'workplane', planeId}.
+  // Dispatches on the SOURCE feature's operation per the confirmed behavior:
+  // cutout -> mirrored onto the same solid; extrude/revolve -> separate new solid.
+  async function commitMirror3D(pick) {
+    const sourceFeat = features.find(f => f.id === mirror3dSourceFeatureId)
+    setMirror3dSourceFeatureId(null)
+    viewport3dRef.current?.clearSolidHighlight()
+    setTool('select')
+    if (!sourceFeat) return
+    try {
+      if (sourceFeat.operation === 'cutout') {
+        await commitMirrorCutout(sourceFeat, pick)
+      } else {
+        await commitMirrorSolid(sourceFeat, pick)
+      }
+    } catch (err) {
+      console.error('Mirror failed:', err)
+      setCadError(`Mirror failed: ${err.message || String(err)}`)
+      setTimeout(() => setCadError(null), 6000)
+    }
+  }
+
+  // Mirroring a CUTOUT stays on the SAME solid — rebuildSolidChain's replay
+  // loop only understands cutout PARAMS (re-derived fresh every rebuild), not
+  // a cached shape an OCC mirror() could substitute in, so this reflects the
+  // cutout's own definition (plane + profile points, + revolve axis if any)
+  // across the picked mirror plane client-side, and adds the result as an
+  // ordinary new cutout feature — no worker mirror call needed at all.
+  // `pick` is the RAW picked plane: {kind:'workplane', planeId} or
+  // {kind:'face', facePlane: <real FacePlane instance>}.
+  async function commitMirrorCutout(cutFeat, pick) {
+    const baseSolid = solids.find(s => s.id === cutFeat.solidId)
+    if (!baseSolid) throw new Error('Target solid not found')
+
+    const { O, n } = pick.kind === 'face'
+      ? { O: pick.facePlane.origin, n: pick.facePlane.normal }
+      : { O: new THREE.Vector3(0, 0, 0), n: planeIdBasis(pick.planeId).normal }
+
+    // Unify work-plane and face-plane sources into one FacePlane-shaped
+    // object so the rest of this function doesn't need two code paths.
+    const sourceBasis = cutFeat.facePlane || (() => {
+      const b = planeIdBasis(cutFeat.planeId)
+      return new FacePlane(b.origin, b.normal, b.uAxis, b.vAxis)
+    })()
+
+    const mirroredNormal = reflectDir(sourceBasis.normal, n)
+    const mirroredUAxis  = reflectDir(sourceBasis.uAxis, n)
+    const mirroredOrigin = reflectPoint(sourceBasis.origin, O, n)
+    // Re-derive (not reflect) vAxis — reflecting normal/uAxis independently
+    // then crossing them keeps the frame orthonormal; the mirror is
+    // orientation-reversing by nature, which is correct here, not a bug.
+    const mirroredVAxis = new THREE.Vector3().crossVectors(mirroredNormal, mirroredUAxis).normalize()
+    const mirroredFacePlane = new FacePlane(mirroredOrigin, mirroredNormal, mirroredUAxis, mirroredVAxis)
+
+    const reflectPt2D = (p) => {
+      const world = sourceBasis.sketchToWorld(p.x, p.y)
+      return mirroredFacePlane.worldToSketch(reflectPoint(world, O, n))
+    }
+
+    // Plain points only — arcs/splines' curveSegments metadata isn't carried
+    // over (reflecting an arc/spline's true-curve definition into a NEW 2D
+    // plane needs its own angle/tangent transform, not just point reflection).
+    // Falls back to the polygonized approximation, same accepted fidelity
+    // trade-off this app already makes for other mixed profiles.
+    const mirroredPts = cutFeat.profilePts.map(reflectPt2D)
+    if (cutFeat.profilePts.circleMeta) {
+      const cm = cutFeat.profilePts.circleMeta
+      const c2 = reflectPt2D({ x: cm.cx, y: cm.cy })
+      mirroredPts.circleMeta = { cx: c2.x, cy: c2.y, r: cm.r }
+    }
+    let mirroredAxis = null
+    if (cutFeat.revolveAxis) {
+      const a = cutFeat.revolveAxis
+      const p1 = reflectPt2D({ x: a.x1, y: a.y1 })
+      const p2 = reflectPt2D({ x: a.x2, y: a.y2 })
+      mirroredAxis = { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y }
+    }
+
+    const newFeat = {
+      id: `cutout-${baseSolid.id}-${Date.now()}`,
+      type: 'extrude', name: nextExtrudeName(), operation: 'cutout',
+      solidId: baseSolid.id, sourceFeatureId: cutFeat.id,
+      planeId: 'face', facePlane: mirroredFacePlane,
+      profilePts: mirroredPts,
+      depthMm: cutFeat.depthMm, cutDepthMm: cutFeat.cutDepthMm, cutDirection: cutFeat.cutDirection,
+      extentMode: cutFeat.extentMode, color: cutFeat.color,
+      revolveAxis: mirroredAxis, angleDeg: cutFeat.angleDeg, revolveReverse: cutFeat.revolveReverse,
+    }
+
+    // Same pattern as committing any other brand-new cutout (see commitExtrude):
+    // apply this ONE cut directly against the target's current shapeStore-cached
+    // shape, rather than rebuildSolidChain's full replay — replaying would read
+    // `features` from this closure, which is stale until the setFeatures below
+    // actually lands.
+    const cutParams = buildCutWorkerParams(newFeat)
+    const baseParams = buildBaseWorkerParams(baseSolid)
+    const meshData = await cadEngine.subtract({ baseSolidId: baseSolid.id, cut: cutParams, base: baseParams })
+    const group = replicadMeshToThree(meshData, baseSolid.color, baseSolid.id)
+    const updatedSolid = { ...baseSolid, group }
+    setSolids(prev => prev.map(s => s.id === baseSolid.id ? updatedSolid : s))
+    setFeatures(prev => [...prev, newFeat])
+    await rebuildDependentMirrors(updatedSolid)
+  }
+
+  // Mirroring an EXTRUDE/REVOLVE produces a completely separate new solid —
+  // not fused with the source (a future "Union (Join)" tool handles merging
+  // bodies explicitly). Stores sourceSolidId/mirrorPlane so it can be kept
+  // live via rebuildDependentMirrors whenever the source changes.
+  async function commitMirrorSolid(sourceFeat, pick) {
+    const sourceSolid = solids.find(s => s.id === sourceFeat.solidId)
+    if (!sourceSolid) throw new Error('Source solid not found')
+
+    const planeParams = pick.kind === 'face'
+      ? {
+          kind: 'face',
+          normal: [pick.facePlane.normal.x, pick.facePlane.normal.y, pick.facePlane.normal.z],
+          origin: [pxToMm(pick.facePlane.origin.x), pxToMm(pick.facePlane.origin.y), pxToMm(pick.facePlane.origin.z)],
+          uAxis:  [pick.facePlane.uAxis.x, pick.facePlane.uAxis.y, pick.facePlane.uAxis.z],
+        }
+      : { kind: 'workplane', planeId: pick.planeId }
+
+    const base = buildBaseWorkerParams(sourceSolid)
+    const ops = buildSolidOpsForWorker(sourceSolid, features)
+
+    const newSolidId = Date.now()
+    const meshData = await cadEngine.mirrorShape({ solidId: newSolidId, base, ops, plane: planeParams })
+    const group = replicadMeshToThree(meshData, sourceSolid.color, newSolidId)
+
+    setSolids(prev => [...prev, {
+      id: newSolidId, group, operation: 'mirror',
+      sourceSolidId: sourceSolid.id, mirrorPlane: planeParams,
+      color: sourceSolid.color, planeId: null, facePlane: null,
+    }])
+    setFeatures(prev => [...prev, {
+      id: `mirror-${newSolidId}`, type: 'extrude', name: nextMirrorName(),
+      solidId: newSolidId, operation: 'mirror',
+      sourceSolidId: sourceSolid.id, sourceFeatureId: sourceFeat.id,
+      mirrorPlane: planeParams, color: sourceSolid.color,
+    }])
+    // No rebuildDependentMirrors call here — a freshly-created mirror solid
+    // cannot yet have anything depending on it.
+  }
+
+  // Re-triggers rebuild of every mirror-solid whose source is `solid`. Takes
+  // the solid object directly (not just an id) so callers pass the FRESHLY
+  // updated object they just built — reading `solids` state here would be
+  // stale until the setSolids call that triggered this actually lands
+  // (React batches state updates). Scoped ONE level deep only — a mirror's
+  // own source can never itself be a mirror (enforced by excluding
+  // operation==='mirror' rows from Feature-Tree pick eligibility), so no
+  // recursion guard is needed.
+  async function rebuildDependentMirrors(solid) {
+    const dependents = features.filter(f => f.operation === 'mirror' && f.sourceSolidId === solid.id)
+    if (dependents.length === 0) return
+    const base = buildBaseWorkerParams(solid)
+    const ops = buildSolidOpsForWorker(solid, features)
+    for (const mirrorFeat of dependents) {
+      try {
+        const meshData = await cadEngine.mirrorShape({ solidId: mirrorFeat.solidId, base, ops, plane: mirrorFeat.mirrorPlane })
+        const group = replicadMeshToThree(meshData, mirrorFeat.color, mirrorFeat.solidId)
+        setSolids(prev => prev.map(s => s.id === mirrorFeat.solidId ? { ...s, group } : s))
+      } catch (err) {
+        console.error('Dependent mirror rebuild failed:', err)
+      }
+    }
+  }
+
+  // Rebuilds ONE feature's own solid from scratch, purely from its stored
+  // params — used only when un-joining (a member's solid was removed from
+  // `solids` while locked, so this is how it comes back). Dispatches on the
+  // feature's own operation, same as buildBaseWorkerParams/rebuildBaseMesh's
+  // extrude-vs-revolve dispatch does elsewhere, plus a 'mirror' case matching
+  // commitMirrorSolid's own call shape.
+  // A type:'extrude' feature (extrude/revolve operation) already carries
+  // every field buildBaseWorkerParams/rebuildSolidChain need from a `solid`
+  // object — shared by rebuildFeatureSolid and rebuildJoinBaseMesh below.
+  function featureToTempSolid(feat) {
+    return {
+      id: feat.solidId, operation: feat.operation, profilePts: feat.profilePts,
+      depthMm: feat.depthMm, direction: feat.direction, planeId: feat.planeId, facePlane: feat.facePlane,
+      revolveAxis: feat.revolveAxis, angleDeg: feat.angleDeg, revolveReverse: feat.revolveReverse,
+      // Loft has none of the above (no single profilePts/depthMm/planeId) —
+      // its own basis + ordered profile list instead, same fields
+      // buildBaseWorkerParams' loft branch reads off a `solid` object.
+      normal: feat.normal, origin: feat.origin, uAxis: feat.uAxis, vAxis: feat.vAxis, profiles: feat.profiles, ruled: feat.ruled,
+    }
+  }
+
+  async function rebuildFeatureSolid(feat) {
+    if (feat.operation === 'mirror') {
+      const sourceSolid = solids.find(s => s.id === feat.sourceSolidId)
+      if (!sourceSolid) throw new Error('Mirror source solid not found')
+      const base = buildBaseWorkerParams(sourceSolid)
+      const ops = buildSolidOpsForWorker(sourceSolid, features)
+      return cadEngine.mirrorShape({ solidId: feat.solidId, base, ops, plane: feat.mirrorPlane })
+    }
+    // rebuildSolidChain also transparently replays this member's OWN
+    // cutouts/fillets — untouched by the join, still in `features` keyed to
+    // feat.solidId the whole time.
+    return rebuildSolidChain(featureToTempSolid(feat))
+  }
+
+  // Re-fuses a join solid's base from its members' own stored feature params
+  // — needed when something on TOP of the join (a fillet/cutout) gets edited,
+  // which goes through rebuildSolidChain and needs to rebuild the base clean
+  // first. Member solids no longer exist in `solids` while locked, so this
+  // reconstructs each member's base/ops from its FEATURE entry instead (same
+  // per-member params rebuildFeatureSolid's extrude/revolve case builds).
+  // A mirror member has no extrude-style base/ops of its own — passes
+  // base:null/ops:[], relying on that member's shapeStore entry already
+  // being warm (true unless the worker restarted since it was joined).
+  async function rebuildJoinBaseMesh(joinSolid) {
+    const joinFeat = features.find(f => f.solidId === joinSolid.id && f.operation === 'join')
+    if (!joinFeat) throw new Error('Join feature not found for solid')
+    const memberFeats = (joinFeat.memberFeatureIds || []).map(id => features.find(f => f.id === id)).filter(Boolean)
+    const members = memberFeats.map(mf => {
+      if (mf.operation === 'mirror') return { solidId: mf.solidId, base: null, ops: [] }
+      const tempSolid = featureToTempSolid(mf)
+      return { solidId: mf.solidId, base: buildBaseWorkerParams(tempSolid), ops: buildSolidOpsForWorker(tempSolid, features) }
+    })
+    const meshData = await cadEngine.joinShapes({ solidId: joinSolid.id, members })
+    return { meshData, baseWorkerParams: null }
+  }
+
+  // Clears only the 2D dot-marker canvas — NOT the 3D edge highlights (hover
+  // and selected are each independently managed: hover self-clears inside
+  // raycastSolidEdges on every call, selected is driven by its own effect
+  // below). Calling vp.clearEdgeHighlight() from here would wipe the
+  // persistent orange selection highlight every time the mouse leaves an edge.
+  function clearFillet3DMarker() {
+    const vp = viewport3dRef.current; if (!vp) return
+    const oc = vp.getExtrudePreviewCanvas(); if (!oc) return
+    const ctx = oc.getContext('2d')
+    ctx.setTransform(1,0,0,1,0,0)
+    ctx.clearRect(0,0,oc.width,oc.height)
+  }
+
+  function resetFillet3D() {
+    setFillet3dSel([])
+    setFillet3dHover(null)
+    setFillet3dAccepted(false)
+    setFillet3dHandlePos(null)
+    setEditingFeatureId(null)
+    clearFillet3DMarker()
+    viewport3dRef.current?.clearEdgeHighlight()
+  }
+
+  // Markers at every selected edge point (filled dot, purple) plus the
+  // current hover point (outline dot, skipped once it's already selected) —
+  // a simple 2D hint, not a true rounded-edge preview, which would need a
+  // real OCC recompute per keystroke the way the extrude/revolve ghosts avoid.
+  // Radius-preview circles only show once accepted (drawn at every selected
+  // point, so the size preview applies to the whole set).
+  function drawFillet3DMarkers(vp, selPoints, hoverPoint, radiusMm, accepted) {
+    const oc = vp.getExtrudePreviewCanvas(); if (!oc) return
+    const ctx = oc.getContext('2d')
+    ctx.setTransform(1,0,0,1,0,0)
+    ctx.clearRect(0,0,oc.width,oc.height)
+    const SCALE = 2
+    const color = '#9c6ade'
+    const toScreen = p => vp.worldToScreen(p[0]*SCALE, p[1]*SCALE, p[2]*SCALE)
+
+    for (const point of selPoints) {
+      const screenPt = toScreen(point); if (!screenPt) continue
+      ctx.save()
+      ctx.fillStyle = color
+      ctx.beginPath()
+      ctx.arc(screenPt.x, screenPt.y, 5, 0, Math.PI*2)
+      ctx.fill()
+      ctx.restore()
+
+      if (accepted && radiusMm > 0) {
+        const p0 = vp.worldToScreen(0,0,0)
+        const p1 = vp.worldToScreen(SCALE,0,0)
+        const screenPxPerMm = (p0 && p1) ? Math.hypot(p1.x-p0.x, p1.y-p0.y) : 2
+        ctx.save()
+        ctx.strokeStyle = color
+        ctx.globalAlpha = 0.5
+        ctx.setLineDash([4,3])
+        ctx.beginPath()
+        ctx.arc(screenPt.x, screenPt.y, radiusMm*screenPxPerMm, 0, Math.PI*2)
+        ctx.stroke()
+        ctx.restore()
+      }
+    }
+
+    if (hoverPoint) {
+      const screenPt = toScreen(hoverPoint)
+      if (screenPt) {
+        ctx.save()
+        ctx.strokeStyle = color
+        ctx.lineWidth = 2
+        ctx.beginPath()
+        ctx.arc(screenPt.x, screenPt.y, 4, 0, Math.PI*2)
+        ctx.stroke()
+        ctx.restore()
+      }
+    }
+  }
+
+  // Mouse move over the 3D view while still picking edges — raycast against
+  // solid edges and update the hover highlight (marker/3D-highlight redraw
+  // happens via the effect below, keyed on this state).
+  function handleFillet3DHover(e) {
+    if (tool !== 'fillet3d' || fillet3dAccepted) return
+    const vp = viewport3dRef.current; if (!vp) return
+    const hit = vp.raycastSolidEdges(e.clientX, e.clientY)
+    setFillet3dHover(hit)
+  }
+
+  // Click while hovering a highlighted edge — toggle it in/out of the
+  // selection set (same toggle idiom as mirrorSel/moveCopySel/etc: click an
+  // already-selected edge again to deselect it).
+  function handleFillet3DClick(e) {
+    if (tool !== 'fillet3d' || fillet3dAccepted || !fillet3dHover) return false
+    const hit = fillet3dHover
+    setFillet3dSel(prev => {
+      const already = prev.findIndex(s => s.solidId===hit.solidId && s.edgeId===hit.edgeId)
+      return already>=0 ? prev.filter((_,i)=>i!==already) : [...prev, hit]
+    })
+    setFillet3dHandlePos({ x: e.clientX + 20, y: e.clientY - 20 })
+    return true
+  }
+
+  // Keeps the 2D dot markers + radius-preview circles in sync with the
+  // selection/hover/radius input.
+  useEffect(() => {
+    const vp = viewport3dRef.current
+    if (!vp || tool !== 'fillet3d') return
+    const selPoints = fillet3dSel.map(e => e.point)
+    const hoverPoint = (!fillet3dAccepted && fillet3dHover &&
+      !fillet3dSel.some(e => e.solidId===fillet3dHover.solidId && e.edgeId===fillet3dHover.edgeId))
+      ? fillet3dHover.point : null
+    drawFillet3DMarkers(vp, selPoints, hoverPoint, parseFloat(fillet3dRadiusInput)||0, fillet3dAccepted)
+    return () => clearFillet3DMarker()
+  }, [tool, fillet3dSel, fillet3dHover, fillet3dRadiusInput, fillet3dAccepted])
+
+  // Keeps the 3D edge highlight (persistent orange) in sync with the selection set.
+  useEffect(() => {
+    viewport3dRef.current?.setSelectedEdges(fillet3dSel.map(({solidId, edgeId}) => ({solidId, edgeId})))
+  }, [fillet3dSel])
+
+  // Leaving the fillet tool for any other tool clears all state and highlights.
+  useEffect(() => {
+    if (tool !== 'fillet3d') {
+      setFillet3dHover(null); setFillet3dSel([]); setFillet3dAccepted(false); setFillet3dHandlePos(null)
+      clearFillet3DMarker()
+      viewport3dRef.current?.clearEdgeHighlight()
+    }
+  }, [tool])
+
+  // Keeps Measure's point-mode markers (P1 dot, live hover dot + connector)
+  // in sync — mirrors fillet3d's marker-sync effect above. Edge-mode's
+  // highlight is handled separately by setSelectedEdges (in handleMeasureClick)
+  // plus Viewport3D's own hover-highlight draw loop, so nothing extra needed
+  // here for that case (measureP1 stays null while an edge result is shown,
+  // so this draws nothing on top of it).
+  useEffect(() => {
+    const vp = viewport3dRef.current
+    if (!vp || tool !== 'measure') return
+    drawMeasureOverlay(vp, measureP1, measureHover)
+  }, [tool, measureP1, measureHover])
+
+  // Leaving Measure for any other tool clears all state and highlights.
+  useEffect(() => {
+    if (tool !== 'measure') resetMeasure()
+  }, [tool])
+
+  // Re-open the radius popup for an existing fillet, at its original edges —
+  // no re-picking needed since solidId/edgePoints are already stored. Commit
+  // goes through the same rebuild-chain path as editing a cutout.
+  function handleEditFilletRadius(featureId) {
+    const feat = features.find(f => f.id === featureId)
+    if (!feat || feat.type !== 'fillet') return
+    resetSelection(); resetDrawState()
+    setTool('fillet3d')
+    setEditingFeatureId(featureId)
+    setFillet3dSel(feat.edgePoints.map((point,i) => ({ solidId: feat.solidId, edgeId: feat.edgeIds?.[i] ?? null, point })))
+    setFillet3dAccepted(true)
+    setFillet3dRadiusInput(String(feat.radius))
+    const vp = viewport3dRef.current
+    const SCALE = 2
+    const firstPt = feat.edgePoints[0]
+    const screenPt = firstPt && vp?.worldToScreen(firstPt[0]*SCALE, firstPt[1]*SCALE, firstPt[2]*SCALE)
+    setFillet3dHandlePos(screenPt ? { x: screenPt.x+20, y: screenPt.y-20 } : { x: window.innerWidth/2, y: window.innerHeight/2 })
+  }
+
+  async function commitFillet3D() {
+    if (fillet3dSel.length === 0) return
+    const solidId = fillet3dSel[0].solidId   // one solid per session — see plan
+    const points = fillet3dSel.map(e => e.point)
+    const edgeIds = fillet3dSel.map(e => e.edgeId)
+    const radius = parseFloat(fillet3dRadiusInput) || 1
+    const targetSolid = solids.find(s => s.id === solidId)
+    if (!targetSolid) { resetFillet3D(); return }
+    const editingId = editingFeatureId
+    resetFillet3D()
+    try {
+      const meshData = editingId
+        ? await rebuildSolidChain(targetSolid, { overrideId: editingId, overrideFilletRadius: radius })
+        : await cadEngine.fillet3d({ solidId, edgePoints: points, radius, base: buildBaseWorkerParams(targetSolid) })
+      const group = replicadMeshToThree(meshData, targetSolid.color, solidId)
+      const updatedSolid = { ...targetSolid, group }
+      setSolids(prev => prev.map(s => s.id === solidId ? updatedSolid : s))
+      if (editingId) {
+        setFeatures(prev => prev.map(f => f.id === editingId ? { ...f, radius } : f))
+      } else {
+        setFeatures(prev => [...prev, {
+          id: `fillet-${solidId}-${Date.now()}`, type: 'fillet', name: nextFilletName(),
+          solidId, edgePoints: points, edgeIds, radius, color: targetSolid.color,
+        }])
+      }
+      await rebuildDependentMirrors(updatedSolid)
+    } catch (err) {
+      console.error('Fillet failed:', err)
+      setCadError(`Fillet failed: ${err.message || String(err)} — try a smaller radius or different edges.`)
+      setTimeout(() => setCadError(null), 6000)
+    }
+  }
+
   // ── Extrude click→move→click state machine ───────────────────────────────
   // Phase 1 (idle):   extrudeTool set, extrudeState null — show "click to extrude" on profile
   // Phase 2 (armed):  first click on profile → extrudeState.armed=true, mouse moves freely
@@ -2005,16 +3498,57 @@ export default function App() {
   const extrudeMouseRef = useRef(null)   // latest mouse client coords while armed
   const previewSolidRef = useRef(null)
 
-  // Called every mouse move — tracks position for arrow + canvas preview
+  // Called every mouse move — tracks position for arrow + canvas preview, and
+  // drives the depth live from cursor distance along the extrude direction —
+  // Fusion-style hover-to-set-depth. Applies to plain extrude and to cutout's
+  // Value Extent. Through-all has no depth to hover-set (fixed huge value,
+  // see commitExtrude's cutDepthMm) but One Way's SIDE still needs to follow
+  // the mouse — a through-all cut now respects direction (only removes
+  // material on the chosen side, see cutDirection in commitExtrude), so
+  // there has to be a way to flip it. Revolve's angle stays popup-only.
   function handleExtrudeDragMove(e) {
     if (!extrudeState?.armed) return
     extrudeMouseRef.current = { x: e.clientX, y: e.clientY }
-    // Extent (depth or revolve angle) comes only from the popup input, not
-    // mouse position — both ghost previews run on their own rAF loop reacting
-    // to extrudeState (see startExtrudeAnimLoop/startRevolveAnim + effects
-    // further down), so there's nothing to compute or draw here on mouse move.
     setSolids(prev => prev.filter(s => s.id !== '__preview__'))
     previewSolidRef.current = null
+
+    if (extrudeState.revolveAxis) return
+    const p = extrudeAnimParamsRef.current
+    const vp = viewport3dRef.current
+    if (!p || !vp) return
+    // Fresh from the current camera, same as the rAF loop — see
+    // computeExtrudeDirScreen's comment for why these can't be cached.
+    const { dir, centScreen } = computeExtrudeDirScreen(vp, p.planeId, p.facePlane, p.centroid)
+    if (!centScreen) return
+    const vpRect = vp.getDomElement?.()?.parentElement?.getBoundingClientRect?.()
+    if (!vpRect) return
+    const mx = e.clientX - vpRect.left, my = e.clientY - vpRect.top
+    const proj = (mx - centScreen.x) * dir.dx + (my - centScreen.y) * dir.dy
+
+    const isThroughAll = extrudeTool === 'cutout' && extrudeState.extentMode === 'through'
+    if (isThroughAll) {
+      setExtrudeState(prev => {
+        if (!prev?.armed) return prev
+        const nextDir = prev.direction === 'both' ? 'both' : (proj >= 0 ? 'front' : 'back')
+        if (prev.direction === nextDir) return prev
+        return { ...prev, direction: nextDir }
+      })
+      return
+    }
+
+    const screenPxPerMm = getScreenPxPerMm(vp, p.planeId, p.facePlane)
+    if (!screenPxPerMm) return
+    let mm = Math.abs(proj) / screenPxPerMm
+    if (gridSnap) mm = Math.round(mm / gridSizeMm) * gridSizeMm
+    mm = Math.max(gridSnap ? gridSizeMm : 0.1, mm)
+    const mmStr = String(Math.round(mm * 100) / 100)
+
+    setExtrudeState(prev => {
+      if (!prev?.armed) return prev
+      const nextDir = prev.direction === 'both' ? 'both' : (proj >= 0 ? 'front' : 'back')
+      if (prev.depthInput === mmStr && prev.direction === nextDir) return prev
+      return { ...prev, depthInput: mmStr, direction: nextDir }
+    })
   }
 
   // Revolve preview: a cheap 2D animation, not a real OCC recompute (that would
@@ -2159,11 +3693,28 @@ export default function App() {
       if (startTime === null) startTime = now
       const p = extrudeAnimParamsRef.current
       if (p) {
-        const elapsed = (now - startTime) % (duration*2)
-        const t = elapsed < duration ? elapsed/duration : (2 - elapsed/duration)
-        const eased = t*t*(3-2*t)   // smoothstep
-        drawExtrudePreview(p.vp, p.profilePts, p.planeId, p.dir, p.centScreen,
-          p.depthMm, p.direction, p.opType, p.color, p.facePlane, eased)
+        // dir/centScreen recomputed fresh every frame from the CURRENT
+        // camera (see computeExtrudeDirScreen) — they're screen projections,
+        // not sketch-space values, so they can't be cached across frames
+        // without going stale the moment the camera moves independently of
+        // extrudeState (orbiting, or a still-settling view tween).
+        const { dir, centScreen } = computeExtrudeDirScreen(p.vp, p.planeId, p.facePlane, p.centroid)
+        if (centScreen) {
+          // Both plain extrude and cutout's Value Extent now follow the mouse
+          // live (handleExtrudeDragMove) — a breathing pulse on top of that
+          // would fight the cursor and make the preview drift from where the
+          // mouse actually is, so it's held at full depth (eased=1). Only
+          // cutout's Through All has no depth to hover-set (fixed ∞ visual
+          // length), so it keeps the idle breathing pulse as a live indicator.
+          let eased = 1
+          if (p.opType === 'cutout' && !isFinite(p.depthMm)) {
+            const elapsed = (now - startTime) % (duration*2)
+            const t = elapsed < duration ? elapsed/duration : (2 - elapsed/duration)
+            eased = t*t*(3-2*t)   // smoothstep
+          }
+          drawExtrudePreview(p.vp, p.profilePts, p.planeId, dir, centScreen,
+            p.depthMm, p.direction, p.opType, p.color, p.facePlane, eased)
+        }
       }
       extrudeAnimRef.current = requestAnimationFrame(frame)
     }
@@ -2192,20 +3743,63 @@ export default function App() {
     const planeId = st.planeId
     const facePlane = st.facePlane || null
     const isCutout = extrudeTool === 'cutout'
-    const rawDir = vp.planeExtrudeDirection(planeId, facePlane) || { dx:0, dy:-1 }
-    const dir = (facePlane && !isCutout) ? { dx:-rawDir.dx, dy:-rawDir.dy } : rawDir
-    const centScreen = vp.sketchToScreen(st.centroid.x, st.centroid.y, planeId, facePlane)
-    if (!centScreen) return
     const isThroughAll = isCutout && st.extentMode === 'through'
     const depthMm = isThroughAll ? Infinity : (parseFloat(st.depthInput) || 20)
+    // dir/centScreen are deliberately NOT computed/cached here — they're
+    // camera-projections (planeExtrudeDirection/sketchToScreen) recomputed
+    // fresh every animation frame in startExtrudeAnimLoop's frame(), and
+    // fresh on every mousemove in handleExtrudeDragMove, via
+    // computeExtrudeDirScreen — see that function's comment for why.
     extrudeAnimParamsRef.current = {
-      vp, profilePts: prof, planeId, dir, centScreen, depthMm,
+      vp, profilePts: prof, planeId, facePlane, centroid: st.centroid, depthMm,
       direction: st.direction || 'front', opType: extrudeTool,
-      color: isCutout ? '#e05a4e' : extrudeColor, facePlane,
+      color: isCutout ? '#e05a4e' : extrudeColor,
     }
   }, [extrudeState?.armed, extrudeState?.revolveAxis, extrudeState?.planeId, extrudeState?.facePlane,
       extrudeState?.profiles, extrudeState?.pickedIdx, extrudeState?.centroid,
       extrudeState?.extentMode, extrudeState?.depthInput, extrudeState?.direction, extrudeTool, extrudeColor])
+
+  // Recomputes the screen-space extrude-normal direction + the profile
+  // centroid's screen position FRESH from the current camera. These are
+  // camera-dependent (planeExtrudeDirection/sketchToScreen both project
+  // through vp's current camera), so they must never be cached across
+  // frames/mousemoves — caching them in extrudeAnimParamsRef (as an earlier
+  // version of this code did) went stale as soon as the camera moved
+  // (orbit, or a still-settling tween) without the mouse also moving, since
+  // nothing else would trigger a recompute. That's exactly what made a
+  // through-all cutout's One Way arrow render "not normal" to the profile
+  // until the direction buttons were toggled (forcing React state — and
+  // therefore a recompute — even though the camera, not the direction, was
+  // the actual stale value).
+  // No isCutout-based negation here: buildExtrude in cadWorker.js only
+  // special-cases 'front' direction for a CUTOUT on a FACE ("Replicad face
+  // plane normal points OUTWARD; 'front' cut means INWARD") — but that's an
+  // OCC-side offset convention, not a screen-direction flip, and a plain
+  // (non-cutout) face extrude grows outward exactly like a work-plane one.
+  function computeExtrudeDirScreen(vp, planeId, facePlane, centroidSketch) {
+    const dir = vp.planeExtrudeDirection(planeId, facePlane) || { dx:0, dy:-1 }
+    const centScreen = vp.sketchToScreen(centroidSketch.x, centroidSketch.y, planeId, facePlane)
+    return { dir, centScreen }
+  }
+
+  // Screen pixels per 1mm along a plane/face's normal, at the current camera
+  // zoom — same projection trick drawExtrudePreview uses internally for its
+  // own arrow length, extracted here so handleExtrudeDragMove's hover-follow
+  // can convert a screen-space mouse offset into mm.
+  function getScreenPxPerMm(vp, planeId, facePlane) {
+    const SCALE = 2
+    const p0 = vp.worldToScreen(0, 0, 0)
+    let pv
+    if (facePlane && facePlane.normal) {
+      const n = facePlane.normal
+      pv = [n.x * SCALE, n.y * SCALE, n.z * SCALE]
+    } else {
+      const planeVecs = { XY:[0,0,SCALE], XZ:[0,SCALE,0], YZ:[SCALE,0,0] }
+      pv = planeVecs[planeId] || [0,SCALE,0]
+    }
+    const p1 = vp.worldToScreen(pv[0], pv[1], pv[2])
+    return (p0 && p1) ? Math.hypot(p1.x-p0.x, p1.y-p0.y) : null
+  }
 
   // Draw the extrude/cutout preview on the overlay canvas.
   // Extrudes show a wireframe + arrows; cutouts show arrows only.
@@ -2249,11 +3843,18 @@ export default function App() {
 
     let capPts, basePts, isBoth = false
 
+    // 'front' builds the solid on the +normal side (buildExtrude in
+    // cadWorker.js: profile sits at the plane, extrude() grows along
+    // +normal) — so the cap (far face) must be drawn toward +dir, not -dir.
+    // Previously backwards: the ghost preview's cap/arrow pointed opposite
+    // to where the committed solid actually appears, for every plane (this
+    // is plane-agnostic — a separate bug from the XZ-specific normal-sign
+    // fix in planeExtrudeDirection).
     if (direction === 'front') {
-      capPts  = screenPts.map(p => ({ x: p.x - dir.dx*offsetLen, y: p.y - dir.dy*offsetLen }))
+      capPts  = screenPts.map(p => ({ x: p.x + dir.dx*offsetLen, y: p.y + dir.dy*offsetLen }))
       basePts = screenPts
     } else if (direction === 'back') {
-      capPts  = screenPts.map(p => ({ x: p.x + dir.dx*offsetLen, y: p.y + dir.dy*offsetLen }))
+      capPts  = screenPts.map(p => ({ x: p.x - dir.dx*offsetLen, y: p.y - dir.dy*offsetLen }))
       basePts = screenPts
     } else {
       const half = offsetLen / 2
@@ -2262,30 +3863,53 @@ export default function App() {
       isBoth = true
     }
 
-    const strokeColor = isCutout ? '#e05a4e' : (color || '#3a7bd5')
-    const fillColor   = isCutout ? 'rgba(224,90,78,0.12)' : 'rgba(58,123,213,0.12)'
+    // Vector-arcade neon palette — brighter/more saturated than the flat UI
+    // accent colors so the glow reads clearly against the dark viewport.
+    const strokeColor = isCutout ? '#FF3B5C' : (color || '#3ad6ff')
+
+    const facePath = (pts) => (c) => {
+      c.beginPath()
+      c.moveTo(pts[0].x, pts[0].y)
+      pts.slice(1).forEach(p => c.lineTo(p.x, p.y))
+      c.closePath()
+    }
 
     // ── Wireframe faces + lateral edges (extrudes only) ──────────────────────
     if (!isCutout) {
-      const drawFace = (pts) => {
-        ctx.beginPath()
-        ctx.moveTo(pts[0].x, pts[0].y)
-        pts.slice(1).forEach(p => ctx.lineTo(p.x, p.y))
-        ctx.closePath()
-        ctx.fillStyle = fillColor; ctx.fill()
-        ctx.strokeStyle = strokeColor; ctx.lineWidth = 1.5
-        ctx.setLineDash([]); ctx.stroke()
-      }
-      if (isBoth) drawFace(basePts)
-      drawFace(capPts)
       if (isBoth) {
-        ctx.strokeStyle = strokeColor; ctx.lineWidth = 1; ctx.setLineDash([4,3])
+        glowFill(ctx, facePath(basePts), strokeColor, 0.06)
+        glowStroke(ctx, facePath(basePts), strokeColor, 1.25)
+      }
+      glowFill(ctx, facePath(capPts), strokeColor, 0.1)
+      glowStroke(ctx, facePath(capPts), strokeColor, 1.75)
+      if (isBoth) {
+        // Plain (non-glow) strokes, batched into ONE path — these lateral
+        // connectors are drawn once per profile POINT, and a tessellated
+        // circle has ~60+ of them (vs. 4 for a rectangle). Using glowStroke
+        // per-segment here meant ~120 shadow-blurred stroke() calls every
+        // animation frame for a circle, which floods the canvas with
+        // overlapping blur until it visually saturates to a solid blown-out
+        // mass — the "screen goes black/blue" bug. The main cap/base outlines
+        // above are cheap regardless of point count (2 draws total), so they
+        // keep the glow; these secondary guide lines don't need it.
+        ctx.save()
+        ctx.strokeStyle = strokeColor
+        ctx.lineWidth = 1
+        ctx.setLineDash([5,4])
+        ctx.beginPath()
         basePts.forEach((bp, i) => {
           const cp = capPts[i]; if (!cp) return
-          ctx.beginPath(); ctx.moveTo(bp.x, bp.y); ctx.lineTo(cp.x, cp.y); ctx.stroke()
+          ctx.moveTo(bp.x, bp.y); ctx.lineTo(cp.x, cp.y)
         })
-        ctx.setLineDash([])
+        ctx.stroke()
+        ctx.restore()
       }
+    } else {
+      // Cutout: dashed scan-line outline only, no fill — reads as "material
+      // about to be removed" rather than "material being added."
+      ctx.setLineDash([4,3])
+      glowStroke(ctx, facePath(capPts), strokeColor, 1.5)
+      ctx.setLineDash([])
     }
 
     // ── Direction arrow(s) ────────────────────────────────────────────────────
@@ -2294,16 +3918,19 @@ export default function App() {
     const mainLabel = isThroughAll ? '∞' : `${depthMm}mm`
 
     const drawArrow = (fromX, fromY, toX, toY, label) => {
-      ctx.strokeStyle = strokeColor; ctx.lineWidth = 2
-      ctx.beginPath(); ctx.moveTo(fromX, fromY); ctx.lineTo(toX, toY); ctx.stroke()
+      glowStroke(ctx, (c)=>{c.beginPath();c.moveTo(fromX,fromY);c.lineTo(toX,toY)}, strokeColor, 2)
       const a = Math.atan2(toY-fromY, toX-fromX)
       ctx.save(); ctx.translate(toX, toY); ctx.rotate(a)
+      ctx.shadowColor = strokeColor; ctx.shadowBlur = 8
       ctx.fillStyle = strokeColor
-      ctx.beginPath(); ctx.moveTo(10,0); ctx.lineTo(-6,-5); ctx.lineTo(-6,5); ctx.closePath(); ctx.fill()
+      ctx.beginPath(); ctx.moveTo(11,0); ctx.lineTo(-6,-6); ctx.lineTo(-6,6); ctx.closePath(); ctx.fill()
       ctx.restore()
       if (label) {
+        ctx.save()
+        ctx.shadowColor = strokeColor; ctx.shadowBlur = 6
         ctx.fillStyle = strokeColor; ctx.font = 'bold 12px monospace'; ctx.textAlign = 'left'
         ctx.fillText(label, toX+14, toY+4)
+        ctx.restore()
       }
     }
 
@@ -2395,6 +4022,32 @@ export default function App() {
     }
   }
 
+  // Rebuilds solidId completely from its own clean base shape, replaying every
+  // cutout/fillet feature that targets it in feature-array order (their
+  // natural chronological order) — the "rebuild + replay" pattern used
+  // throughout this app's editing model, now shared by cutout AND fillet
+  // edit/delete so the two interleave correctly regardless of which was
+  // applied first. `overrideId` + `overrideCut`/`overrideFilletRadius`
+  // substitutes new params for ONE feature being edited; `skipId` omits one
+  // being deleted. Returns the final meshData.
+  async function rebuildSolidChain(baseSolid, { overrideId=null, overrideCut=null, overrideFilletRadius=null, skipId=null } = {}) {
+    let { meshData, baseWorkerParams } = baseSolid.operation === 'join'
+      ? await rebuildJoinBaseMesh(baseSolid)
+      : await rebuildBaseMesh(baseSolid)
+    const ops = features.filter(f => f.solidId === baseSolid.id && (f.operation === 'cutout' || f.type === 'fillet'))
+    for (const opFeat of ops) {
+      if (opFeat.id === skipId) continue
+      if (opFeat.type === 'fillet') {
+        const radius = opFeat.id === overrideId ? overrideFilletRadius : opFeat.radius
+        meshData = await cadEngine.fillet3d({ solidId: baseSolid.id, edgePoints: opFeat.edgePoints, radius, base: baseWorkerParams })
+      } else {
+        const cutParams = opFeat.id === overrideId ? overrideCut : buildCutWorkerParams(opFeat)
+        meshData = await cadEngine.subtract({ baseSolidId: baseSolid.id, cut: cutParams, base: baseWorkerParams })
+      }
+    }
+    return meshData
+  }
+
   async function commitExtrude(overrideState=null) {
     const state = overrideState || extrudeStateRef.current || extrudeState
     if (!state) return
@@ -2408,9 +4061,13 @@ export default function App() {
     const cached = cachedProfiles.find(p => p.pts === pts)
     const facePlane = state.facePlane || cached?.facePlane || null
 
-    // Cutout: through-all uses a huge depth to guarantee punch-through; value uses user depth
+    // Cutout: through-all uses a huge depth to guarantee punch-through; value uses user depth.
+    // Direction is respected either way — a one-way through-all cut only removes
+    // material on the chosen side of the plane, same as buildExtrude's normal
+    // front/back/both handling (cutExtentRangeMm mirrors this exactly), it just
+    // uses a depth big enough to guarantee it reaches the far end of the solid.
     const cutDepthMm  = (isCutout && extentMode === 'through') ? 10000 : depthMm
-    const cutDirection = (isCutout && extentMode === 'through') ? 'both'  : direction
+    const cutDirection = direction
 
     // Capture all state before clearing (setExtrudeState(null) makes extrudeState stale)
     const editingId = editingFeatureId
@@ -2467,23 +4124,6 @@ export default function App() {
               } : {}),
             }
 
-        // Worker params for re-extruding a solid's own (uncut) base shape.
-        const buildBaseParams = (solid) => ({
-          pts: solid.profilePts,
-          depthMm: solid.depthMm,
-          planeId: solid.planeId,
-          direction: solid.direction || 'both',
-          circle: solid.profilePts.circleMeta || null,
-          ...(solid.facePlane ? {
-            normal: [solid.facePlane.normal.x, solid.facePlane.normal.y, solid.facePlane.normal.z],
-            origin: [pxToMm(solid.facePlane.origin.x), pxToMm(solid.facePlane.origin.y), pxToMm(solid.facePlane.origin.z)],
-            uAxis:  [solid.facePlane.uAxis.x,  solid.facePlane.uAxis.y,  solid.facePlane.uAxis.z],
-          } : {}),
-        })
-        // Worker params for one specific existing cutout feature's own cut
-        // geometry (linear or revolve-shaped) — see buildCutWorkerParams.
-        const buildCutParams = buildCutWorkerParams
-
         if (editingId && editingFeat?.groupId) {
           // Editing a grouped (multi-body) cutout — apply the new sketch/extent
           // to every solid the group originally spanned. Membership stays fixed
@@ -2496,19 +4136,16 @@ export default function App() {
           for (const member of groupMembers) {
             const baseSolid = solids.find(s => s.id === member.solidId)
             if (!baseSolid) continue
-            const baseWorkerParams = buildBaseParams(baseSolid)
-            let meshData = await cadEngine.extrude({ solidId: baseSolid.id, ...baseWorkerParams })
-            const allCutsOnThisSolid = features.filter(f => f.operation === 'cutout' && f.solidId === baseSolid.id)
-            for (const cutFeat of allCutsOnThisSolid) {
-              const cFeat = cutFeat.groupId === groupId ? cut : buildCutParams(cutFeat)
-              meshData = await cadEngine.subtract({ baseSolidId: baseSolid.id, cut: cFeat, base: baseWorkerParams })
-            }
-            const group = replicadMeshToThree(meshData, baseSolid.color)
-            setSolids(prev => prev.map(s => s.id === baseSolid.id ? { ...s, group } : s))
+            // `member` IS the cutout feature for this solid within the group being edited.
+            const meshData = await rebuildSolidChain(baseSolid, { overrideId: member.id, overrideCut: cut })
+            const group = replicadMeshToThree(meshData, baseSolid.color, baseSolid.id)
+            const updatedSolid = { ...baseSolid, group }
+            setSolids(prev => prev.map(s => s.id === baseSolid.id ? updatedSolid : s))
             updatedById.set(member.id, {
               ...member, depthMm, cutDepthMm, cutDirection, extentMode, profilePts: pts, facePlane,
               revolveAxis, angleDeg, revolveReverse, ...sketchGeom,
             })
+            await rebuildDependentMirrors(updatedSolid)
           }
           setFeatures(prev => prev.map(f => updatedById.get(f.id) || f))
 
@@ -2528,7 +4165,9 @@ export default function App() {
             // Swept-volume box, sampled across the sweep angle (see revolveSweepBoxPx).
             cutBox = revolveSweepBoxPx(pts, revolveAxis, angleDeg, revolveReverse, planeId, facePlane)
           } else {
-            const worldNormals = { XY:[0,0,1], XZ:[0,1,0], YZ:[1,0,0] }
+            // XZ's world normal is -Y, not +Y — see the matching comment on
+            // Viewport3D.jsx's planeExtrudeDirection (same bug class fixed there).
+            const worldNormals = { XY:[0,0,1], XZ:[0,-1,0], YZ:[1,0,0] }
             const [nx, ny, nz] = facePlane
               ? [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z]
               : (worldNormals[planeId] || [0,0,1])
@@ -2553,10 +4192,11 @@ export default function App() {
           const groupId = `cutgroup-${Date.now()}`
           const newFeats = []
           for (const target of affected) {
-            const targetBaseParams = buildBaseParams(target)
+            const targetBaseParams = buildBaseWorkerParams(target)
             const meshData = await cadEngine.subtract({ baseSolidId: target.id, cut, base: targetBaseParams })
-            const group = replicadMeshToThree(meshData, target.color)
-            setSolids(prev => prev.map(s => s.id === target.id ? { ...s, group } : s))
+            const group = replicadMeshToThree(meshData, target.color, target.id)
+            const updatedSolid = { ...target, group }
+            setSolids(prev => prev.map(s => s.id === target.id ? updatedSolid : s))
             newFeats.push({
               id: `cutout-${target.id}-${Date.now()}`,
               type: 'extrude', name: nextExtrudeName(), groupId,
@@ -2564,6 +4204,7 @@ export default function App() {
               depthMm, cutDepthMm, cutDirection, extentMode, color, operation: 'cutout', planeId, profilePts: pts, facePlane,
               revolveAxis, angleDeg, revolveReverse, ...sketchGeom,
             })
+            await rebuildDependentMirrors(updatedSolid)
           }
           setFeatures(prev => [...prev, ...newFeats])
 
@@ -2571,23 +4212,17 @@ export default function App() {
           // Editing an existing, non-grouped (single-body) cutout.
           const baseSolid = solids.find(s => s.id === editingFeat.solidId)
           if (!baseSolid) throw new Error('No base solid to cut from')
-          const baseWorkerParams = buildBaseParams(baseSolid)
 
           // Re-editing: the worker's shapeStore for this solidId currently holds
           // the OLD compounded result, so a plain subtract here would stack the
           // new cut on top of the old one instead of replacing it. Rebuild the
-          // base clean and replay every cutout on it in order, substituting the
-          // new profile/extent for the one being edited.
-          let meshData = await cadEngine.extrude({ solidId: baseSolid.id, ...baseWorkerParams })
-          const allCuts = features.filter(f => f.operation === 'cutout' && f.solidId === baseSolid.id)
-          for (const cutFeat of allCuts) {
-            const cFeat = cutFeat.id === editingId ? cut : buildCutParams(cutFeat)
-            meshData = await cadEngine.subtract({ baseSolidId: baseSolid.id, cut: cFeat, base: baseWorkerParams })
-          }
-
-          const group = replicadMeshToThree(meshData, baseSolid.color)
+          // base clean and replay every cutout/fillet on it in order,
+          // substituting the new profile/extent for the one being edited.
+          const meshData = await rebuildSolidChain(baseSolid, { overrideId: editingId, overrideCut: cut })
+          const group = replicadMeshToThree(meshData, baseSolid.color, baseSolid.id)
+          const updatedSolid = { ...baseSolid, group }
           setSolids(prev => prev.map(s =>
-            s.id === baseSolid.id ? { ...s, group } : s
+            s.id === baseSolid.id ? updatedSolid : s
           ))
           const cutoutFeat = {
             id: editingId, type: 'extrude', name: editingFeat?.name || nextExtrudeName(),
@@ -2596,6 +4231,7 @@ export default function App() {
             revolveAxis, angleDeg, revolveReverse, ...sketchGeom,
           }
           setFeatures(prev => prev.map(f => f.id === editingId ? cutoutFeat : f))
+          await rebuildDependentMirrors(updatedSolid)
         }
 
       } else if (revolveAxis) {
@@ -2614,7 +4250,7 @@ export default function App() {
           } : {}),
         }
         const meshData = await cadEngine.revolve({ ...revolveParams, solidId })
-        const group = replicadMeshToThree(meshData, color)
+        const group = replicadMeshToThree(meshData, color, solidId)
         const solid = { id:solidId, group, planeId, operation:'revolve', profilePts:pts, color, facePlane, revolveAxis, angleDeg, revolveReverse }
         setSolids(prev => [...prev.filter(s => s.id !== solidId), solid])
         const revolveFeat = {
@@ -2629,6 +4265,7 @@ export default function App() {
         } else {
           setFeatures(prev => [...prev, revolveFeat])
         }
+        await rebuildDependentMirrors(solid)
 
       } else if (textGroup) {
         // Whole-word text extrude: one solid per letter (each already carries
@@ -2665,7 +4302,7 @@ export default function App() {
             throw e
           }
           setSolids(prev => [...prev, {
-            id: solidId, group: replicadMeshToThree(meshData, color), planeId, operation:'extrude',
+            id: solidId, group: replicadMeshToThree(meshData, color, solidId), planeId, operation:'extrude',
             direction, depth: mmToPx(depthMm), depthMm, profilePts: letterPts, color, facePlane,
           }])
           // Punch each hole (the counter in O/A/8/etc.) all the way through the
@@ -2688,7 +4325,7 @@ export default function App() {
               console.error(`[textGroup] letter ${letterIdx} hole ${holeIdx} cut failed, holePts:`, holePts.length, e)
               throw e
             }
-            const group = replicadMeshToThree(meshData, color)
+            const group = replicadMeshToThree(meshData, color, solidId)
             setSolids(prev => prev.map(s => s.id === solidId ? { ...s, group } : s))
           }
           newFeats.push({
@@ -2736,7 +4373,7 @@ export default function App() {
             }
             meshData = await cadEngine.subtract({ baseSolidId: member.solidId, cut: holeCut, base: letterWorkerParams })
           }
-          const group = replicadMeshToThree(meshData, member.color)
+          const group = replicadMeshToThree(meshData, member.color, member.solidId)
           setSolids(prev => prev.map(s => s.id === member.solidId ? { ...s, group, direction, depth: mmToPx(depthMm), depthMm } : s))
           updatedById.set(member.id, { ...member, depthMm, direction, extentMode })
         }
@@ -2746,7 +4383,7 @@ export default function App() {
         // Run geometry in worker (OpenCascade WASM); solidId lets worker cache this shape
         const solidId = editingFeat?.solidId || Date.now()
         const meshData = await cadEngine.extrude({ ...workerParams, solidId })
-        const group = replicadMeshToThree(meshData, color)
+        const group = replicadMeshToThree(meshData, color, solidId)
         const solid = { id:solidId, group, planeId, operation:'extrude', direction,
           depth:mmToPx(depthMm), depthMm, profilePts:pts, color, facePlane }
         // filter+push: old solid was removed when entering edit mode, map would find nothing
@@ -2772,6 +4409,7 @@ export default function App() {
         } else {
           setFeatures(prev => [...prev, extrudeFeat])
         }
+        await rebuildDependentMirrors(solid)
       }
 
       commit(snapshot())
@@ -2935,7 +4573,7 @@ export default function App() {
       sketchSplines: feat.sketchSplines || [],
     })
 
-    viewport3dRef.current?.snapToIsometric()
+    viewport3dRef.current?.restoreSavedView()
   }
 
   // Legacy: depth-only edit (kept for undo compat)
@@ -2958,7 +4596,7 @@ export default function App() {
         } : {}),
       }
       const meshData = await cadEngine.extrude(workerParams)
-      const group = replicadMeshToThree(meshData, color)
+      const group = replicadMeshToThree(meshData, color, feat.solidId)
       setSolids(prev => prev.map(s =>
         s.id===feat.solidId ? {...s, depth:mmToPx(newDepthMm), depthMm:newDepthMm, group} : s
       ))
@@ -2985,6 +4623,40 @@ export default function App() {
     const feat = features.find(f => f.id === featureId)
     if (!feat) return
 
+    if (feat.operation === 'join') {
+      // Un-join: restore each member to its own independent, editable solid,
+      // and auto-delete anything built on top of the joined result since —
+      // confirmed with the user — a fillet/cutout/mirror targeting the fused
+      // body doesn't have a well-defined meaning once it's un-merged. One
+      // level deep only, same pragmatic depth limit as Mirror3D's own cascade.
+      const dependentIds = features.filter(f => f.solidId === feat.solidId && f.id !== feat.id).map(f => f.id)
+      const memberFeats = (feat.memberFeatureIds || []).map(id => features.find(f => f.id === id)).filter(Boolean)
+
+      const restored = []
+      for (const mf of memberFeats) {
+        try {
+          const meshData = await rebuildFeatureSolid(mf)
+          const group = replicadMeshToThree(meshData, mf.color, mf.solidId)
+          restored.push({ id: mf.solidId, group, operation: mf.operation, color: mf.color,
+            planeId: mf.planeId, facePlane: mf.facePlane, profilePts: mf.profilePts,
+            depthMm: mf.depthMm, direction: mf.direction,
+            revolveAxis: mf.revolveAxis, angleDeg: mf.angleDeg, revolveReverse: mf.revolveReverse,
+            sourceSolidId: mf.sourceSolidId, mirrorPlane: mf.mirrorPlane,
+            normal: mf.normal, origin: mf.origin, uAxis: mf.uAxis, vAxis: mf.vAxis, profiles: mf.profiles, ruled: mf.ruled })
+        } catch (err) {
+          console.error('Un-join restore failed for', mf.id, err)
+          setCadError(`Un-join failed to restore "${mf.name}": ${err.message || String(err)}`)
+          setTimeout(() => setCadError(null), 6000)
+        }
+      }
+
+      setSolids(prev => [...prev.filter(s => s.id !== feat.solidId), ...restored])
+      setFeatures(prev => prev
+        .filter(f => f.id !== featureId && !dependentIds.includes(f.id))
+        .map(f => memberFeats.some(m => m.id === f.id) ? { ...f, joinedInto: undefined } : f))
+      return
+    }
+
     if (feat.operation === 'cutout') {
       // A grouped (multi-body) cutout deletes every member together — they're
       // one logical cut that happened to span several solids.
@@ -2997,38 +4669,32 @@ export default function App() {
         const baseSolid = thisFeat && solids.find(s => s.id === thisFeat.solidId)
         if (!baseSolid) continue
         try {
-          // Rebuild the base solid clean (this also refreshes the worker's shapeStore)
-          const baseWorkerParams = {
-            solidId: baseSolid.id,
-            pts: baseSolid.profilePts,
-            depthMm: baseSolid.depthMm,
-            planeId: baseSolid.planeId,
-            direction: baseSolid.direction || 'both',
-            circle: baseSolid.profilePts.circleMeta || null,
-            ...(baseSolid.facePlane ? {
-              normal: [baseSolid.facePlane.normal.x, baseSolid.facePlane.normal.y, baseSolid.facePlane.normal.z],
-              origin: [pxToMm(baseSolid.facePlane.origin.x), pxToMm(baseSolid.facePlane.origin.y), pxToMm(baseSolid.facePlane.origin.z)],
-              uAxis:  [baseSolid.facePlane.uAxis.x, baseSolid.facePlane.uAxis.y, baseSolid.facePlane.uAxis.z],
-            } : {}),
-          }
-          let meshData = await cadEngine.extrude(baseWorkerParams)
-
-          // Re-apply any other cutouts on this solid in order (skip the one(s) being deleted)
-          const remainingCuts = features.filter(f =>
-            !idsToDelete.includes(f.id) && f.operation === 'cutout' && f.solidId === baseSolid.id
-          )
-          for (const cutFeat of remainingCuts) {
-            const cut = buildCutWorkerParams(cutFeat)
-            meshData = await cadEngine.subtract({ baseSolidId: baseSolid.id, cut, base: baseWorkerParams })
-          }
-
-          const group = replicadMeshToThree(meshData, baseSolid.color)
+          // Rebuild the base solid clean, replaying every other cutout/fillet
+          // on it in order (skip the one being deleted — group members each
+          // belong to a different solid, so at most one id applies here).
+          const meshData = await rebuildSolidChain(baseSolid, { skipId: idToDelete })
+          const group = replicadMeshToThree(meshData, baseSolid.color, baseSolid.id)
           setSolids(prev => prev.map(s => s.id === baseSolid.id ? { ...s, group } : s))
         } catch (err) {
           console.error('Cutout delete restore failed:', err)
         }
       }
       setFeatures(prev => prev.filter(f => !idsToDelete.includes(f.id)))
+      return
+    }
+
+    if (feat.type === 'fillet') {
+      const baseSolid = solids.find(s => s.id === feat.solidId)
+      if (baseSolid) {
+        try {
+          const meshData = await rebuildSolidChain(baseSolid, { skipId: featureId })
+          const group = replicadMeshToThree(meshData, baseSolid.color, baseSolid.id)
+          setSolids(prev => prev.map(s => s.id === baseSolid.id ? { ...s, group } : s))
+        } catch (err) {
+          console.error('Fillet delete restore failed:', err)
+        }
+      }
+      setFeatures(prev => prev.filter(f => f.id !== featureId))
       return
     }
 
@@ -3068,25 +4734,18 @@ export default function App() {
       return
     }
     try {
-      const facePlaneParams = fp => fp ? {
-        normal: [fp.normal.x, fp.normal.y, fp.normal.z],
-        origin: [pxToMm(fp.origin.x), pxToMm(fp.origin.y), pxToMm(fp.origin.z)],
-        uAxis:  [fp.uAxis.x, fp.uAxis.y, fp.uAxis.z],
-      } : {}
-
+      // Ordered ops (cutout + fillet interleaved, in feature-array order) —
+      // only used by the worker's cold-rebuild fallback when a solid isn't
+      // already cached in shapeStore (e.g. right after a fresh page load);
+      // the common case just reuses the live cached shape directly.
       const solidsForExport = solids.map(solid => {
-        const base = {
-          pts: solid.profilePts,
-          depthMm: solid.depthMm,
-          planeId: solid.planeId,
-          direction: solid.direction || 'both',
-          circle: solid.profilePts.circleMeta || null,
-          ...facePlaneParams(solid.facePlane),
-        }
-        const cuts = features
-          .filter(f => f.operation === 'cutout' && f.solidId === solid.id)
-          .map(buildCutWorkerParams)
-        return { solidId: solid.id, base, cuts }
+        const base = buildBaseWorkerParams(solid)
+        const ops = features
+          .filter(f => f.solidId === solid.id && (f.operation === 'cutout' || f.type === 'fillet'))
+          .map(f => f.type === 'fillet'
+            ? { type: 'fillet', radius: f.radius, edgePoints: f.edgePoints }
+            : { type: 'cut', params: buildCutWorkerParams(f) })
+        return { solidId: solid.id, base, ops }
       })
 
       const { stlBlob } = await cadEngine.exportSTL({ solids: solidsForExport })
@@ -3214,6 +4873,16 @@ export default function App() {
     // Step 2 (sketch mode): clicks belong to sketch tools, not extrude handler
     if (extrudeTool && !sketchMode) {
       handleExtrudeClick(raw)
+      return
+    }
+
+    if (tool==='fillet3d') {
+      handleFillet3DClick(e)
+      return
+    }
+
+    if (tool==='measure') {
+      handleMeasureClick(e)
       return
     }
 
@@ -3417,10 +5086,13 @@ export default function App() {
         // Second click — place the offset
         if (!offsetPreview) return
         commit(snapshot())
-        if (offsetPreview.kind==='line')   setLines(p=>[...p,{x1:offsetPreview.x1,y1:offsetPreview.y1,x2:offsetPreview.x2,y2:offsetPreview.y2,...(offsetPreview.style?{style:offsetPreview.style}:{})}])
-        if (offsetPreview.kind==='circle') setCircles(p=>[...p,{cx:offsetPreview.cx,cy:offsetPreview.cy,r:offsetPreview.r,...(offsetPreview.style?{style:offsetPreview.style}:{})}])
-        if (offsetPreview.kind==='arc')    setArcs(p=>[...p,{cx:offsetPreview.cx,cy:offsetPreview.cy,r:offsetPreview.r,startAngle:offsetPreview.startAngle,endAngle:offsetPreview.endAngle,...(offsetPreview.style?{style:offsetPreview.style}:{})}])
-        if (offsetPreview.kind==='spline') setSplines(p=>[...p,{points:offsetPreview.points,closed:offsetPreview.closed,polyline:offsetPreview.polyline,...(offsetPreview.style?{style:offsetPreview.style}:{})}])
+        // Same plane/facePlane tagging every other commit needs — see the
+        // matching comment on the Mirror tool's commit, same bug class.
+        const ofPt = planeTag()
+        if (offsetPreview.kind==='line')   setLines(p=>[...p,{x1:offsetPreview.x1,y1:offsetPreview.y1,x2:offsetPreview.x2,y2:offsetPreview.y2,...(offsetPreview.style?{style:offsetPreview.style}:{}),...ofPt}])
+        if (offsetPreview.kind==='circle') setCircles(p=>[...p,{cx:offsetPreview.cx,cy:offsetPreview.cy,r:offsetPreview.r,...(offsetPreview.style?{style:offsetPreview.style}:{}),...ofPt}])
+        if (offsetPreview.kind==='arc')    setArcs(p=>[...p,{cx:offsetPreview.cx,cy:offsetPreview.cy,r:offsetPreview.r,startAngle:offsetPreview.startAngle,endAngle:offsetPreview.endAngle,...(offsetPreview.style?{style:offsetPreview.style}:{}),...ofPt}])
+        if (offsetPreview.kind==='spline') setSplines(p=>[...p,{points:offsetPreview.points,closed:offsetPreview.closed,polyline:offsetPreview.polyline,...(offsetPreview.style?{style:offsetPreview.style}:{}),...ofPt}])
         resetOffset()
       }
       return
@@ -3451,9 +5123,30 @@ export default function App() {
             endPt={x:angled.x,y:angled.y}
           }
           const finalMirror=buildMirror(mirrorSel,lines,circles,arcs,splines,mirrorP1.x,mirrorP1.y,endPt.x,endPt.y)
-          commit(snapshot());setLines(p=>[...p,...finalMirror.newLines]);setCircles(p=>[...p,...finalMirror.newCircles]);setArcs(p=>[...p,...finalMirror.newArcs]);setSplines(p=>[...p,...finalMirror.newSplines]);resetMirror()
+          // Mirrored entities need the same plane/facePlane tag as everything
+          // else committed in this sketch — without it they silently default
+          // to XY (via the pervasive `entity.plane || 'XY'` fallback used for
+          // rendering), so on any non-XY or face-plane sketch they're invisible
+          // (filtered out of the current plane's render pass) even though
+          // hit-testing/snapping still finds them (those read the raw arrays,
+          // no plane filter). Same bug class fixed once before for text import.
+          const pt = planeTag()
+          commit(snapshot())
+          setLines(p=>[...p,...finalMirror.newLines.map(l=>({...l,...pt}))])
+          setCircles(p=>[...p,...finalMirror.newCircles.map(c=>({...c,...pt}))])
+          setArcs(p=>[...p,...finalMirror.newArcs.map(a=>({...a,...pt}))])
+          setSplines(p=>[...p,...finalMirror.newSplines.map(sp=>({...sp,...pt}))])
+          resetMirror()
         }
       }
+      return
+    }
+
+    if (tool==='center'){
+      const hit=nearestMirrorEntity(raw,lines,circles,arcs,splines);if(!hit)return
+      const already=centerSel.findIndex(s=>s.kind===hit.kind&&s.idx===hit.idx)
+      if (already>=0) setCenterSel(p=>p.filter((_,i)=>i!==already))
+      else setCenterSel(p=>[...p,hit])
       return
     }
 
@@ -3474,8 +5167,15 @@ export default function App() {
         const count=Math.max(1,parseInt(moveCopyCountInput)||1)
         commit(snapshot())
         const copies=buildCopies(moveCopySel,lines,circles,arcs,splines,dx,dy,count)
-        if (moveCopyMode==='move'){const pruned=removeSelected(moveCopySel,lines,circles,arcs,splines);setLines([...pruned.lines,...copies.newLines]);setCircles([...pruned.circles,...copies.newCircles]);setArcs([...pruned.arcs,...copies.newArcs]);setSplines([...pruned.splines,...copies.newSplines])}
-        else{setLines(p=>[...p,...copies.newLines]);setCircles(p=>[...p,...copies.newCircles]);setArcs(p=>[...p,...copies.newArcs]);setSplines(p=>[...p,...copies.newSplines])}
+        // Same plane/facePlane tagging every other commit needs — see the
+        // matching comment on the Mirror tool's commit, same bug class.
+        const mcPt = planeTag()
+        const mcLines=copies.newLines.map(l=>({...l,...mcPt}))
+        const mcCircles=copies.newCircles.map(c=>({...c,...mcPt}))
+        const mcArcs=copies.newArcs.map(a=>({...a,...mcPt}))
+        const mcSplines=copies.newSplines.map(sp=>({...sp,...mcPt}))
+        if (moveCopyMode==='move'){const pruned=removeSelected(moveCopySel,lines,circles,arcs,splines);setLines([...pruned.lines,...mcLines]);setCircles([...pruned.circles,...mcCircles]);setArcs([...pruned.arcs,...mcArcs]);setSplines([...pruned.splines,...mcSplines])}
+        else{setLines(p=>[...p,...mcLines]);setCircles(p=>[...p,...mcCircles]);setArcs(p=>[...p,...mcArcs]);setSplines(p=>[...p,...mcSplines])}
         resetMoveCopy();resetDrawState()
       }
       return
@@ -3498,8 +5198,15 @@ export default function App() {
         const count=Math.max(1,parseInt(rotateCopyCountInput)||1)
         commit(snapshot())
         const copies=buildRotatedCopies(rotateCopySel,lines,circles,arcs,splines,startPoint.x,startPoint.y,angleDeg,count)
-        if (rotateCopyMode==='rotate'){const pruned=removeSelected(rotateCopySel,lines,circles,arcs,splines);setLines([...pruned.lines,...copies.newLines]);setCircles([...pruned.circles,...copies.newCircles]);setArcs([...pruned.arcs,...copies.newArcs]);setSplines([...pruned.splines,...copies.newSplines])}
-        else{setLines(p=>[...p,...copies.newLines]);setCircles(p=>[...p,...copies.newCircles]);setArcs(p=>[...p,...copies.newArcs]);setSplines(p=>[...p,...copies.newSplines])}
+        // Same plane/facePlane tagging every other commit needs — see the
+        // matching comment on the Mirror tool's commit, same bug class.
+        const rcPt = planeTag()
+        const rcLines=copies.newLines.map(l=>({...l,...rcPt}))
+        const rcCircles=copies.newCircles.map(c=>({...c,...rcPt}))
+        const rcArcs=copies.newArcs.map(a=>({...a,...rcPt}))
+        const rcSplines=copies.newSplines.map(sp=>({...sp,...rcPt}))
+        if (rotateCopyMode==='rotate'){const pruned=removeSelected(rotateCopySel,lines,circles,arcs,splines);setLines([...pruned.lines,...rcLines]);setCircles([...pruned.circles,...rcCircles]);setArcs([...pruned.arcs,...rcArcs]);setSplines([...pruned.splines,...rcSplines])}
+        else{setLines(p=>[...p,...rcLines]);setCircles(p=>[...p,...rcCircles]);setArcs(p=>[...p,...rcArcs]);setSplines(p=>[...p,...rcSplines])}
         resetRotateCopy();resetDrawState()
       }
       return
@@ -3518,10 +5225,13 @@ export default function App() {
         commit(snapshot())
         const scaled=buildScaled(resizeSel,lines,circles,arcs,splines,anchor.x,anchor.y,s)
         const pruned=removeSelected(resizeSel,lines,circles,arcs,splines)
-        setLines([...pruned.lines,...scaled.newLines])
-        setCircles([...pruned.circles,...scaled.newCircles])
-        setArcs([...pruned.arcs,...scaled.newArcs])
-        setSplines([...pruned.splines,...scaled.newSplines])
+        // Same plane/facePlane tagging every other commit needs — see the
+        // matching comment on the Mirror tool's commit, same bug class.
+        const rsPt = planeTag()
+        setLines([...pruned.lines,...scaled.newLines.map(l=>({...l,...rsPt}))])
+        setCircles([...pruned.circles,...scaled.newCircles.map(c=>({...c,...rsPt}))])
+        setArcs([...pruned.arcs,...scaled.newArcs.map(a=>({...a,...rsPt}))])
+        setSplines([...pruned.splines,...scaled.newSplines.map(sp=>({...sp,...rsPt}))])
         resetResize()
       }
       return
@@ -3542,10 +5252,15 @@ export default function App() {
         const s1=lines[filletSel[0].idx]?.style
         const s2=lines[filletSel[1].idx]?.style
         commit(snapshot())
+        // Same plane/facePlane tagging every other commit needs — see the
+        // matching comment on the Mirror tool's commit, same bug class.
+        // trimLine()/the new arc in filletMath.js drop it just like style did
+        // (hence the existing manual style patch-back below).
+        const flPt = planeTag()
         setLines(p=>[...p.filter((_,i)=>!filletSel.some(s=>s.idx===i)),
-          s1?{...newL1,style:s1}:newL1,
-          s2?{...newL2,style:s2}:newL2])
-        setArcs(p=>[...p,arc])
+          {...newL1,...(s1?{style:s1}:{}),...flPt},
+          {...newL2,...(s2?{style:s2}:{}),...flPt}])
+        setArcs(p=>[...p,{...arc,...flPt}])
         resetFillet()
       }
       return
@@ -3690,12 +5405,18 @@ export default function App() {
     if (tool==='rotatecopy'&&!rotateCopyAccepted&&rotateCopySel.length>0) setRotateCopyAccepted(true)
     if (tool==='resize'&&!resizeAccepted&&resizeSel.length>0) setResizeAccepted(true)
     if (tool==='fillet'&&!filletAccepted&&filletSel.length===2) setFilletAccepted(true)
+    if (tool==='center'&&centerSel.length>0) commitCenter()
+    if (tool==='join3d'&&joinSel.length>=2) commitJoin()
   }
 
   function handleMouseMove(e){
     // Middle mouse pan is now handled by OrbitControls inside Viewport3D.
     // We just need world coordinates for tool logic.
     const sx=e.clientX,sy=e.clientY
+
+    // Fillet: raycasts solid edges directly (no sketch-plane projection involved)
+    if (tool==='fillet3d') { handleFillet3DHover(e); return }
+    if (tool==='measure') { handleMeasureHover(e); return }
 
     const worldPos=screenToWorld(sx,sy)
 
@@ -3731,19 +5452,6 @@ export default function App() {
   function handleKeyDown(e){
     if ((e.key==='t'||e.key==='T')&&!e.ctrlKey&&!e.shiftKey&&(tool==='line'||tool==='circle')){setTKeyDown(p=>!p);return}
     if ((e.key==='p'||e.key==='P')&&!e.ctrlKey&&!e.shiftKey&&tool==='line'){setPKeyDown(p=>!p);return}
-    if ((e.key==='h'||e.key==='H')&&!e.ctrlKey&&!e.shiftKey){
-      if (tool==='select'&&selection.length>0){
-        // Toggle dashed on selected entities
-        const newStyle=(lines[selection.find(s=>s.kind==='line')?.idx]?.style==='dashed')?null:'dashed'
-        commit(snapshot())
-        setLines(p=>p.map((l,i)=>selection.some(s=>s.kind==='line'&&s.idx===i)?{...l,style:newStyle||undefined}:l))
-        setCircles(p=>p.map((c,i)=>selection.some(s=>s.kind==='circle'&&s.idx===i)?{...c,style:newStyle||undefined}:c))
-        setArcs(p=>p.map((a,i)=>selection.some(s=>s.kind==='arc'&&s.idx===i)?{...a,style:newStyle||undefined}:a))
-        setSplines(p=>p.map((sp,i)=>selection.some(s=>s.kind==='spline'&&s.idx===i)?{...sp,style:newStyle||undefined}:sp))
-        return
-      }
-      else {setDrawStyle(p=>p==='dashed'?null:'dashed');return}
-      }
     if ((e.key==='d'||e.key==='D')&&!e.ctrlKey&&!e.shiftKey){
       if (tool==='select'&&selection.length>0){
         // Toggle construction on selected entities
@@ -3757,29 +5465,33 @@ export default function App() {
       }
       else {setDrawStyle(p=>p==='construction'?null:'construction');return}
       }
+    if ((e.key==='o'||e.key==='O')&&!e.ctrlKey&&!e.shiftKey&&tool==='select'&&selection.length>0){
+      // Center the selection's bounding box on the sketch origin — a
+      // prerequisite for accurate plane-mirroring later (mirroring only
+      // produces a clean, gapless result if the profile's centerline
+      // actually lands on the mirror plane's line, i.e. sketch (0,0)).
+      const bbox = selectionBBox(selection, lines, circles, arcs, splines)
+      if (bbox) {
+        const cx = (bbox.x1+bbox.x2)/2, cy = (bbox.y1+bbox.y2)/2
+        commit(snapshot())
+        const result = applySelectionTransform(selection, lines, circles, arcs, splines, {x:0,y:0}, 1, 1, -cx, -cy)
+        setLines(result.lines); setCircles(result.circles); setArcs(result.arcs); setSplines(result.splines)
+      }
+      return
+    }
     if (e.ctrlKey&&e.key==='z'){e.preventDefault();undo(snapshot(),restore);return}
     if (e.ctrlKey&&e.key==='y'){e.preventDefault();redo(snapshot(),restore);return}
     if (e.ctrlKey&&e.key==='s'){e.preventDefault();saveJSON(lines,circles,arcs,splines,dims);return}
     if ((e.key==='f'||e.key==='F')&&!e.ctrlKey){zoomToFit();return}
-    // Escape in sketch mode: finish the sketch (cancel any in-progress tool first)
+    // Escape in sketch mode: cancel whatever 2D tool is mid-interaction only
+    // (an in-progress line/circle/offset/etc.) — it no longer exits the sketch
+    // or cancels the feature. That's now the dedicated Cancel button next to
+    // Finish Sketch (see cancelFeature), so Escape is safe to hit repeatedly
+    // while drawing without losing the whole Cut/Extrude/Loft in progress.
     if (e.key==='Escape'&&sketchMode){
-      resetDrawState();resetSpline();resetOffset();resetMirror();resetMoveCopy()
+      resetDrawState();resetSpline();resetOffset();resetMirror();resetCenter();resetMoveCopy()
       resetRotateCopy();resetResize();resetFillet();resetText();resetSelection()
       resetJoin();resetDim()
-      if (extrudeTool) {
-        // Cancel the whole extrude/cutout operation — restore any hidden solid
-        if (hiddenEditSolidRef.current) {
-          setSolids(prev => [...prev, ...hiddenEditSolidRef.current])
-          hiddenEditSolidRef.current = null
-        }
-        setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
-        activePlaneRef.current = null
-        setExtrudeTool(null); setExtrudeState(null); setEditingFeatureId(null)
-        setLines([]); setCircles([]); setArcs([]); setSplines([])
-        viewport3dRef.current?.snapToIsometric()
-      } else {
-        handleFinishSketch()
-      }
       return
     }
     if (e.key==='Escape'&&extrudeTool){
@@ -3793,6 +5505,64 @@ export default function App() {
       return
     }
     if (extrudeState) { handleExtrudeDepthKey(e); return }
+
+    // Step 1 (face/plane pick) of extrude/cutout: Tab steps the green
+    // bottom-edge preview around the hovered face's boundary instead of only
+    // following the cursor — for edges the mouse can't easily get near. See
+    // Viewport3D.jsx's cycleFaceBottomEdge; Shift+Tab goes the other way.
+    if (e.key==='Tab' && extrudeTool && !extrudeState && !sketchMode) {
+      e.preventDefault()
+      viewport3dRef.current?.cycleFaceBottomEdge(e.shiftKey ? -1 : 1)
+      return
+    }
+
+    if ((e.key==='Enter'||e.key==='Tab')&&tool==='fillet3d'&&!fillet3dAccepted&&fillet3dSel.length>0){
+      // Promote from "still picking edges" to "radius popup" — mirrors the
+      // 2D Fillet tool's Tab-to-accept, generalized from exactly 2 to 1+.
+      e.preventDefault()
+      setFillet3dAccepted(true)
+      return
+    }
+    if (e.key==='Escape'&&tool==='fillet3d'){
+      // Cancel the current selection first (back to picking phase, or clear
+      // out of the radius popup); a second Escape (nothing selected) leaves
+      // the tool entirely.
+      if (fillet3dAccepted || fillet3dSel.length>0) { resetFillet3D(); return }
+      resetFillet3D(); setTool('select'); return
+    }
+    if (e.key==='Escape'&&tool==='mirror3d'){
+      // First Escape backs step 2 (plane pick) out to step 1 (still picking
+      // a source feature); a second Escape (nothing picked yet) leaves the tool.
+      if (mirror3dSourceFeatureId) { resetMirror3D(); return }
+      resetMirror3D(); setTool('select'); return
+    }
+    if (e.key==='Escape'&&tool==='measure'){
+      // First Escape clears the current result or a pending first point;
+      // a second Escape (nothing pending) leaves the tool.
+      if (measureP1 || measureResult) { resetMeasure(); return }
+      resetMeasure(); setTool('select'); return
+    }
+    if ((e.key==='Enter'||e.key==='Tab')&&tool==='join3d'&&joinSel.length>=2){
+      e.preventDefault()
+      commitJoin()
+      return
+    }
+    if (e.key==='Escape'&&tool==='join3d'){
+      if (joinSel.length>0) { resetJoin3D(); return }
+      resetJoin3D(); setTool('select'); return
+    }
+    if (e.key==='Escape'&&!sketchMode&&(tool==='loft3d'||loftState)){
+      // enterSketch() always resets `tool` to 'line' (the default 2D drawing
+      // tool) once a profile sketch starts, so tool==='loft3d' only holds at
+      // step 1 (still picking Profile 1's plane) — loftState is what stays
+      // true for the rest of the session (between-profiles popup included),
+      // hence checking both. First Escape backs out of an in-progress loft;
+      // a second Escape (nothing picked yet) leaves the tool. Escape while
+      // actively sketching a profile is handled by the sketchMode branch
+      // above, which reuses handleFinishSketch — same as clicking Finish Sketch.
+      if (loftState) { resetLoft3D(); return }
+      resetLoft3D(); setTool('select'); return
+    }
 
     if (tool==='trim'||tool==='delete'||tool==='extend'||tool==='trace'||tool==='text'||tool==='select'||tool==='join'){if(e.key==='Escape'){resetText();resetSelection();resetJoin();resetDim();setTool('line');return}}
 
@@ -3997,6 +5767,12 @@ export default function App() {
       return
     }
 
+    if (tool==='center'){
+      if (e.key==='Escape'){resetCenter();return}
+      if (e.key==='Tab'){e.preventDefault();commitCenter();return}
+      return
+    }
+
     if (tool==='movecopy'){
       if (e.key==='Escape'){resetMoveCopy();resetDrawState();return}
       if (!startPoint){
@@ -4060,10 +5836,15 @@ export default function App() {
         const s1=lines[filletSel[0].idx]?.style
         const s2=lines[filletSel[1].idx]?.style
         commit(snapshot())
+        // Same plane/facePlane tagging every other commit needs — see the
+        // matching comment on the Mirror tool's commit, same bug class.
+        // trimLine()/the new arc in filletMath.js drop it just like style did
+        // (hence the existing manual style patch-back below).
+        const flPt = planeTag()
         setLines(p=>[...p.filter((_,i)=>!filletSel.some(s=>s.idx===i)),
-          s1?{...newL1,style:s1}:newL1,
-          s2?{...newL2,style:s2}:newL2])
-        setArcs(p=>[...p,arc])
+          {...newL1,...(s1?{style:s1}:{}),...flPt},
+          {...newL2,...(s2?{style:s2}:{}),...flPt}])
+        setArcs(p=>[...p,{...arc,...flPt}])
         resetFillet()
         return
       }
@@ -4101,7 +5882,7 @@ export default function App() {
   const getStatusPrompt = () => {
     const C = {
       select:'#64B5F6', line:'#64B5F6', circle:'#2196F3', spline:'#FFB74D',
-      mirror:'#CE93D8', movecopy:'#FFB74D', rotatecopy:'#80DEEA',
+      mirror:'#CE93D8', center:'#9CCC65', movecopy:'#FFB74D', rotatecopy:'#80DEEA',
       resize:'#F48FB1', fillet:'#80CBC4', offset:'#A5D6A7',
       dim:'#F48FB1',    trim:'#FFAB91',   extend:'#80DEEA',
       delete:'#EF9A9A', join:'#26C6DA',   text:'#FFB74D',  trace:'#B0BEC5',
@@ -4109,13 +5890,19 @@ export default function App() {
     const c = C[tool] || '#aaa'
     const K = (k,l='') => ({k,l})
 
+    // All the 2D-tool branches below only make sense while actually
+    // sketching — `tool` (the 2D drawing-tool selection) doesn't get reset
+    // when leaving sketch mode, so without this guard a stale tool==='line'
+    // (etc.) would keep showing sketch prompts like "Click first point ·
+    // tangent/perpendicular" in the plain 3D viewer.
+    if (sketchMode) {
     if (tool==='select') {
       if (selectDimField) return { step:3, total:3, color:c,
         action:`✏ ${selectDimField}: ${selectDimInput||'_'}`,
         hints:[K('Tab','next field'), K('Enter','apply'), K('Esc')] }
       if (selection.length>0) return { step:2, total:3, color:c,
         action:`${selection.length} selected`,
-        hints:[K('Tab','edit dims'), K('H','dash'), K('D','construction'), K('Del','delete')] }
+        hints:[K('Tab','edit dims'), K('D','construction'), K('O','center origin'), K('Del','delete')] }
       return { step:1, total:3, color:c,
         action:'Click to select',
         hints:[K('Shift+click','add'), K('drag','window')] }
@@ -4197,6 +5984,15 @@ export default function App() {
       return { step:4, total:4, color:c,
         action:'Click mirror line pt 2',
         hints:[K('Esc')] }
+    }
+
+    if (tool==='center') {
+      if (centerSel.length===0) return { step:1, total:2, color:c,
+        action:'Click or drag to select',
+        hints:[K('Esc')] }
+      return { step:2, total:2, color:c,
+        action:`${centerSel.length} selected`,
+        hints:[K('Tab / right-click','center on origin'), K('click','toggle'), K('drag','add'), K('Esc')] }
     }
 
     if (tool==='movecopy') {
@@ -4301,9 +6097,10 @@ export default function App() {
       action:'Click for image insert point',
       hints:[] }
 
-    if (sketchMode) return { step:null, total:null, color: getPlaneColor(activePlane),
+    return { step:null, total:null, color: getPlaneColor(activePlane),
       action:`Sketching on ${getPlaneLabel(activePlane)}  ${getPlaneAxes(activePlane).h}  ${getPlaneAxes(activePlane).v}`,
       hints:[K('Esc','finish sketch')] }
+    }
 
     if (extrudeTool && !extrudeState) return { step:1, total:2,
       color: extrudeTool==='cutout'?'#e05a4e':'#3a7bd5',
@@ -4329,7 +6126,7 @@ export default function App() {
     ['text',       IconText,       'Text',           '#FF9800'],
     ['offset',     IconOffset,     'Offset',         '#4CAF50'],
     ['dim',        IconDim,        'Dimension',      '#E91E63'],
-    ['axis',       IconAxis,       'Axis (revolve)', '#333333'],
+    ['axis',       IconAxis,       'Revolve Axis',   '#E0E0E0'],
     ['trace',      IconTrace,      'Trace Image',    '#607D8B'],
   ]
 
@@ -4344,7 +6141,8 @@ export default function App() {
     ['movecopy',   IconMoveCopy,   'Move / Copy',    '#FF9800'],
     ['rotatecopy', IconRotateCopy, 'Rotate / Copy',  '#00BCD4'],
     ['resize',     IconResize,     'Resize / Scale', '#E91E63'],
-    ['mirror',     IconMirror,     'Mirror',         '#9C27B0'],
+    ['mirror',     IconMirror,     'Mirror',         '#8E65F3'],
+    ['center',     IconCenter,     'Centre',         '#9CCC65'],
   ]
 
   const btnBase={border:'none',borderRadius:5,cursor:'pointer',padding:4,display:'flex',alignItems:'center',justifyContent:'center',width:68,height:68,transition:'background 0.1s'}
@@ -4367,16 +6165,16 @@ export default function App() {
       )}
 
       {/* ══ LEFT SIDEBAR ══════════════════════════════════════════════════════ */}
-      <div style={{width:72,background:'#1a1a2e',display:'flex',flexDirection:'column',
+      <div style={{width: sketchMode ? 72 : 112, background:'#1a1a2e',display:'flex',flexDirection:'column',
         padding:'8px 4px',gap:4,overflowY:'auto',borderRight:'1px solid #2a2a4a',
-        transition:'background 0.3s'}}>
+        transition:'background 0.3s, width 0.2s'}}>
 
         {sketchMode ? (
           /* ── SKETCH sidebar: all 2D draw tools ── */
           <>
             {toolConfig.map(([t,Icon,title,activeColor])=>(
               <button key={t}
-                onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim()}}
+                onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim()}}
                 title={title}
                 style={{...btnBase,background:tool===t?activeColor+'33':'transparent',
                   outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
@@ -4387,60 +6185,66 @@ export default function App() {
         ) : (
           /* ── 3D sidebar: solid operation placeholders ── */
           <>
-            {/* SELECT — always present */}
-            <button
-              title="Select"
-              onClick={()=>{setTool('select');resetDrawState();resetSelection()}}
-              style={{...btnBase,background:tool==='select'?'#64B5F633':'transparent',
-                outline:tool==='select'?'2px solid #64B5F6':'none',outlineOffset:'-2px'}}>
-              <IconSelect active={tool==='select'}/>
-            </button>
-
-            <div style={{width:60,height:1,background:'#2a2a4a',margin:'4px auto'}}/>
-
-            {/* Solid operation placeholders — your retro icons will replace these */}
             {[
-              {id:'extrude', label:'EXTRUDE', color:'#3a7bd5'},
-              {id:'cutout',  label:'CUTOUT',  color:'#e05a4e'},
-              {id:'revolve', label:'REVOLVE', color:'#4caf7d'},
-              {id:'loft',    label:'LOFT',    color:'#f0a830'},
-            ].map(({id,label,color})=>(
+              {id:'extrude',  label:'EXTRUDE', color:'#FBDA2D'},
+              {id:'cutout',   label:'CUTOUT',  color:'#53D3E4'},
+              {id:'fillet3d', label:'FILLET',  color:'#A470F2'},
+              {id:'mirror3d', label:'MIRROR',  color:'#8E65F3'},
+              {id:'join3d',   label:'JOIN',    color:'#FFEE88'},
+              {id:'loft3d',   label:'LOFT',    color:'#33D5EC'},
+            ].map(({id,label,color})=>{
+              const isActive = id==='fillet3d' ? tool==='fillet3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d' : id==='loft3d' ? (tool==='loft3d' || !!loftState) : extrudeTool===id
+              return (
               <button key={id}
                 title={label}
-                onClick={()=>{ if(id==='extrude'||id==='cutout') activateExtrudeTool(id) }}
+                onClick={()=>{
+                  if (id==='extrude'||id==='cutout') activateExtrudeTool(id)
+                  else if (id==='fillet3d') activateFillet3DTool()
+                  else if (id==='mirror3d') activateMirror3DTool()
+                  else if (id==='join3d') activateJoin3DTool()
+                  else if (id==='loft3d') activateLoft3DTool()
+                }}
                 style={{...btnBase, flexDirection:'column', gap:2,
-                  background: extrudeTool===id ? color+'33' : 'transparent',
-                  outline: extrudeTool===id ? `2px solid ${color}` : `1px dashed ${color}55`,
+                  width:102, height:102,
+                  background: isActive ? color+'33' : 'transparent',
+                  outline: isActive ? `2px solid ${color}` : `1px dashed ${color}55`,
                   outlineOffset:'-2px',
-                  opacity: (id==='revolve'||id==='loft') ? 0.4 : 1,
-                  cursor: (id==='revolve'||id==='loft') ? 'not-allowed' : 'pointer',
                 }}>
-                {/* Placeholder icon — replace with your retro sprite */}
-                <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-                  <rect x="3" y="3" width="22" height="22" rx="3"
-                    stroke={color} strokeWidth="1.2" fill={color+'11'} strokeDasharray="3 2"/>
-                  <text x="14" y="17" textAnchor="middle"
-                    style={{fontSize:7, fontFamily:'monospace', fill:color, letterSpacing:0}}>
-                    {label.slice(0,3)}
-                  </text>
-                </svg>
-                <span style={{fontSize:7,fontFamily:'monospace',color,letterSpacing:'0.04em'}}>
+                {SOLID_ICON_COMPONENTS[id] ? (
+                  (() => { const Icon = SOLID_ICON_COMPONENTS[id]; return <Icon color={color}/> })()
+                ) : (
+                  /* Placeholder icon — no vector icon for this one yet */
+                  <svg width="70" height="70" viewBox="0 0 70 70" fill="none">
+                    <rect x="7.5" y="7.5" width="55" height="55" rx="7.5"
+                      stroke={color} strokeWidth="3" fill={color+'11'} strokeDasharray="7.5 5"/>
+                    <text x="35" y="42.5" textAnchor="middle"
+                      style={{fontSize:17.5, fontFamily:'monospace', fill:color, letterSpacing:0}}>
+                      {label.slice(0,3)}
+                    </text>
+                  </svg>
+                )}
+                <span style={{fontSize:10,fontFamily:'monospace',color,letterSpacing:'0.04em'}}>
                   {label}
                 </span>
               </button>
-            ))}
+              )
+            })}
 
             <div style={{flex:1}}/>
 
-            {/* MEASURE placeholder */}
-            <button title="Measure" style={{...btnBase, flexDirection:'column', gap:2,
-              background:'transparent', outline:'1px dashed #88889955', outlineOffset:'-2px', opacity:0.5}}>
-              <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-                <rect x="3" y="3" width="22" height="22" rx="3" stroke="#888" strokeWidth="1.2" fill="#88888811" strokeDasharray="3 2"/>
-                <text x="14" y="17" textAnchor="middle"
-                  style={{fontSize:7, fontFamily:'monospace', fill:'#888'}}>MEA</text>
-              </svg>
-              <span style={{fontSize:7,fontFamily:'monospace',color:'#666',letterSpacing:'0.04em'}}>MEASURE</span>
+            {/* MEASURE — click an edge for its length/diameter, or two points
+                for the distance between them. Esc clears the current result. */}
+            <button title="Measure" onClick={activateMeasureTool}
+              style={{...btnBase, flexDirection:'column', gap:2,
+                width:102, height:102,
+                background: tool==='measure' ? '#4FC3F733' : 'transparent',
+                outline: tool==='measure' ? '2px solid #4FC3F7' : '1px dashed #4FC3F755',
+                outlineOffset:'-2px',
+              }}>
+              <IconMeasure3D color="#4FC3F7"/>
+              <span style={{fontSize:10,fontFamily:'monospace',color:'#4FC3F7',letterSpacing:'0.04em'}}>
+                MEASURE
+              </span>
             </button>
           </>
         )}
@@ -4481,13 +6285,35 @@ export default function App() {
                 textTransform:'uppercase',letterSpacing:'0.1em',marginRight:2}}>Edit</span>
               {editConfig.map(([t,Icon,title,activeColor])=>(
                 <button key={t}
-                  onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim()}}
+                  onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim()}}
                   title={title}
                   style={{...btnBase,background:tool===t?activeColor+'33':'transparent',
                     outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
                   <Icon active={tool===t}/>
                 </button>
               ))}
+
+              {/* Include From Face — only meaningful when sketching on an
+                  actual solid face (a FacePlane), which is the only case
+                  with a boundary to copy; hidden on plain work-plane
+                  sketches (XY/XZ/YZ, activePlane is a string there). */}
+              {activePlane && typeof activePlane === 'object' && (
+                <>
+                  <div style={{width:1,height:48,background:'#2a2a4a',margin:'0 4px'}}/>
+                  <span style={{color:'#555',fontFamily:'monospace',fontSize:9,
+                    textTransform:'uppercase',letterSpacing:'0.1em',marginRight:2}}>Face</span>
+                  <button
+                    onClick={includeFaceGeometry}
+                    title="Include From Face — copy this face's boundary into the sketch"
+                    disabled={!faceRefSegments.length}
+                    style={{...btnBase,background:'transparent',
+                      outline:'1px dashed #4FC3F755',outlineOffset:'-2px',
+                      opacity:faceRefSegments.length?1:0.4,
+                      cursor:faceRefSegments.length?'pointer':'not-allowed'}}>
+                    <IconIncludeFace active={false}/>
+                  </button>
+                </>
+              )}
 
               <div style={{width:1,height:48,background:'#2a2a4a',margin:'0 4px'}}/>
 
@@ -4496,7 +6322,7 @@ export default function App() {
                 textTransform:'uppercase',letterSpacing:'0.1em',marginRight:2}}>Modify</span>
               {modifyConfig.map(([t,Icon,title,activeColor])=>(
                 <button key={t}
-                  onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim()}}
+                  onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim()}}
                   title={title}
                   style={{...btnBase,background:tool===t?activeColor+'33':'transparent',
                     outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
@@ -4506,9 +6332,28 @@ export default function App() {
 
               <div style={{flex:1}}/>
 
+              {/* CANCEL FEATURE — only for Cut/Extrude/Loft, which have a whole
+                  in-progress feature to abandon (a plain standalone sketch
+                  doesn't). Placed left of Finish so the two can't be confused. */}
+              {(extrudeTool || loftState) && (
+                <button
+                  title="Cancel — abandons this Cut/Extrude/Loft entirely"
+                  onClick={cancelFeature}
+                  style={{...btnBase,background:'#3a1a1a',outline:'2px solid #e05a4e',
+                    outlineOffset:'-2px',flexDirection:'column',gap:2,
+                    width:'auto',padding:'0 18px'}}>
+                  <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                    <line x1="4" y1="4" x2="16" y2="16" stroke="#e05a4e" strokeWidth="2.5" strokeLinecap="round"/>
+                    <line x1="16" y1="4" x2="4" y2="16" stroke="#e05a4e" strokeWidth="2.5" strokeLinecap="round"/>
+                  </svg>
+                  <span style={{fontSize:8,fontFamily:'monospace',color:'#e05a4e',
+                    letterSpacing:'0.05em',whiteSpace:'nowrap'}}>CANCEL</span>
+                </button>
+              )}
+
               {/* FINISH SKETCH — right-aligned */}
               <button
-                title="Finish Sketch  (Esc)"
+                title="Finish Sketch"
                 onClick={handleFinishSketch}
                 style={{...btnBase,background:'#1a3a2a',outline:'2px solid #69F0AE',
                   outlineOffset:'-2px',flexDirection:'column',gap:2,
@@ -4528,19 +6373,29 @@ export default function App() {
               <span style={{color:'#555',fontFamily:'monospace',fontSize:9,
                 textTransform:'uppercase',letterSpacing:'0.1em',marginRight:2}}>View</span>
               {[
-                {label:'TOP',  title:'Top view (XY)',  fn:()=>viewport3dRef.current?.snapToPlane('XY')},
-                {label:'FRONT',title:'Front view (XZ)', fn:()=>viewport3dRef.current?.snapToPlane('XZ')},
-                {label:'SIDE', title:'Side view (YZ)',  fn:()=>viewport3dRef.current?.snapToPlane('YZ')},
-                {label:'ISO',  title:'Isometric view',  fn:()=>viewport3dRef.current?.snapToIsometric()},
-              ].map(({label,title,fn})=>(
+                {id:'top',   label:'TOP',  title:'Top view (XY)',  fn:()=>viewport3dRef.current?.snapToPlane('XY')},
+                {id:'front', label:'FRONT',title:'Front view (XZ)', fn:()=>viewport3dRef.current?.snapToPlane('XZ')},
+                {id:'side',  label:'SIDE', title:'Side view (YZ)',  fn:()=>viewport3dRef.current?.snapToPlane('YZ')},
+                {id:'iso',   label:'ISO',  title:'Isometric view',  fn:()=>viewport3dRef.current?.snapToIsometric()},
+              ].map(({id,label,title,fn})=>(
                 <button key={label} title={title} onClick={fn}
                   style={{...btnBase,background:'transparent',
                     outline:'1px solid #2a2a4a',outlineOffset:'-2px',
-                    flexDirection:'column',gap:2,width:'auto',padding:'0 8px',height:48}}>
+                    flexDirection:'column',gap:2,width:'auto',padding:'0 10px',height:70}}>
+                  <div style={viewOpIconStyle(id)}/>
                   <span style={{fontSize:9,fontFamily:'monospace',color:'#6688aa',
                     letterSpacing:'0.06em'}}>{label}</span>
                 </button>
               ))}
+              <div style={{width:1,height:44,background:'#2a2a4a',margin:'0 6px'}}/>
+              <button key="fit" title="Zoom to fit (F)" onClick={zoomToFit}
+                style={{...btnBase,background:'transparent',
+                  outline:'1px solid #2a2a4a',outlineOffset:'-2px',
+                  flexDirection:'column',gap:2,width:'auto',padding:'0 10px',height:70}}>
+                <IconFitView/>
+                <span style={{fontSize:9,fontFamily:'monospace',color:'#6688aa',
+                  letterSpacing:'0.06em'}}>FIT</span>
+              </button>
 
               <div style={{flex:1}}/>
             </>
@@ -4579,11 +6434,14 @@ export default function App() {
             onScaleChange={handleScaleChange}
             onPlaneClick={handlePlaneClick}
             onFaceClick={handleFaceClick}
-            sketchArmed={(!!extrudeTool && !extrudeState) && !sketchMode}
-            showWorkPlanes={!sketchMode}
+            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode) || (tool==='mirror3d' && !!mirror3dSourceFeatureId) || (tool==='loft3d' && !loftState)}
+            extrudeArmed={!!extrudeState}
+            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure'}
             activePlane={activePlane}
             sketchMode={sketchMode}
             extrudeTool={extrudeTool}
+            filletActive={tool==='fillet3d'}
+            measureActive={tool==='measure'}
             onClick={handleClick}
             onDoubleClick={handleDoubleClick}
             onContextMenu={handleContextMenu}
@@ -4645,62 +6503,107 @@ export default function App() {
                 setExtrudeState(null)
                 setExtrudeHandlePos(null)
                 setLines([]); setCircles([]); setArcs([]); setSplines([])
-                viewport3dRef.current?.snapToIsometric()
+                viewport3dRef.current?.restoreSavedView()
               }
+            }}
+          />
+
+          {/* ── SmartStep bar: overlays bottom of viewport during Mirror3D ── */}
+          <SmartStepBar
+            op={tool==='mirror3d' ? 'MIRROR' : null}
+            steps={[{ id:1, label:'Pick Feature' }, { id:2, label:'Pick Plane' }]}
+            currentStep={mirror3dSourceFeatureId ? 2 : 1}
+            color="#8E65F3"
+            onStepBack={step => {
+              if (step === 1) resetMirror3D()   // back to step 1 — stays in the tool
+            }}
+          />
+
+          {/* ── SmartStep bar: overlays bottom of viewport during Join3D ── */}
+          <SmartStepBar
+            op={tool==='join3d' ? 'JOIN' : null}
+            steps={[{ id:1, label:'Select Features' }]}
+            currentStep={1}
+            color="#FFEE88"
+            hint={joinSel.length>0
+              ? `${joinSel.length} selected · Enter/Tab/right-click to join`
+              : 'Select 2+ features in the tree'}
+            onStepBack={()=>{}}
+          />
+
+          {/* ── SmartStep bar: overlays bottom of viewport during Loft ── */}
+          <SmartStepBar
+            op={(tool==='loft3d' || loftState) ? 'LOFT' : null}
+            steps={[{ id:1, label:'Pick Start Plane' }, { id:2, label:'Sketch Profiles' }]}
+            currentStep={loftState ? 2 : 1}
+            color="#33D5EC"
+            hint={loftState
+              ? `Profile ${loftState.currentIdx+1} of ${Math.max(loftState.profiles.length, loftState.currentIdx+1)}${sketchMode ? ' · sketching' : ''}`
+              : 'Click a work plane or face'}
+            onStepBack={step => {
+              if (step === 1) resetLoft3D()
             }}
           />
         </div>
         <div style={{height:52,background:'#16162a',display:'flex',alignItems:'center',padding:'0 8px',gap:4,flexShrink:0,borderTop:'2px solid #2a2a4a'}}>
-          <button onClick={()=>undo(snapshot(),restore)} title="Undo (Ctrl+Z)" disabled={!canUndo}
-            style={{...btnBase,opacity:canUndo?1:0.3,background:'transparent',border:'none',cursor:canUndo?'pointer':'default'}}>
-            <IconUndo active={canUndo}/>
-          </button>
-          <button onClick={()=>redo(snapshot(),restore)} title="Redo (Ctrl+Y)" disabled={!canRedo}
-            style={{...btnBase,opacity:canRedo?1:0.3,background:'transparent',border:'none',cursor:canRedo?'pointer':'default'}}>
-            <IconRedo active={canRedo}/>
-          </button>
-          <button onClick={zoomToFit} title="Zoom to fit (F)" style={{...btnBase,background:'transparent',border:'none'}}>
-            <IconFitView/>
-          </button>
-          <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
-          <button onClick={()=>saveJSON(lines,circles,arcs,splines,dims)} title="Save (Ctrl+S)" style={{...btnBase,background:'transparent',border:'none'}}>
-            <IconSave/>
-          </button>
-          <button onClick={()=>loadFileRef.current.click()} title="Load drawing" style={{...btnBase,background:'transparent',border:'none'}}>
-            <IconLoad/>
-          </button>
-          <button onClick={()=>setPageSetupOpen(true)} title="Page Setup & Export PDF" style={{...btnBase,background:'transparent',border:'none'}}>
-            <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="2" width="13" height="18" rx="1.5" stroke="#aaa" strokeWidth="1.5"/><line x1="6" y1="7" x2="13" y2="7" stroke="#aaa" strokeWidth="1.2"/><line x1="6" y1="10" x2="13" y2="10" stroke="#aaa" strokeWidth="1.2"/><line x1="6" y1="13" x2="11" y2="13" stroke="#aaa" strokeWidth="1.2"/><rect x="12" y="13" width="7" height="7" rx="1" fill="#E53935"/><text x="13.5" y="19" fontSize="5" fill="white" fontFamily="monospace">PDF</text></svg>
-          </button>
-          <label title="Import DXF file" style={{...btnBase,background:'transparent',border:'none',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>
-            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-              <rect x="3" y="2" width="11" height="15" rx="1" stroke="#aaa" strokeWidth="1.5"/>
-              <path d="M10 2v5h4" stroke="#aaa" strokeWidth="1.2" fill="none"/>
-              <text x="3.5" y="19" fontSize="5" fill="#4CAF50" fontFamily="monospace" fontWeight="bold">DXF</text>
-              <path d="M16 13l3 3-3 3" stroke="#4CAF50" strokeWidth="1.5" strokeLinecap="round" fill="none"/>
-            </svg>
-            <input type="file" accept=".dxf" style={{display:'none'}} onChange={async e=>{
-              const file=e.target.files?.[0];if(!file)return
-              try{
-                const text=await file.text()
-                const result=parseDXF(text,2)
-                commit(snapshot())
-                setLines(p=>[...p,...result.lines])
-                setCircles(p=>[...p,...result.circles])
-                setArcs(p=>[...p,...result.arcs])
-                setSplines(p=>[...p,...result.splines])
-                const total=result.lines.length+result.circles.length+result.arcs.length+result.splines.length
-                setLoadError(null)
-                alert(`DXF imported: ${total} entities (${result.lines.length} lines, ${result.circles.length} circles, ${result.arcs.length} arcs, ${result.splines.length} polylines)`)
-              }catch(err){
-                setLoadError('DXF import failed: '+err.message)
-              }
-              e.target.value=''
-            }}/>
-          </label>
-          <button onClick={()=>exportDXF(lines,circles,arcs,splines)} title="Export DXF" style={{...btnBase,background:'transparent',border:'none'}}>
-            <IconDXF/>
-          </button>
+          {/* Undo/Redo/Save/Load/PDF/DXF only mean anything for the 2D sketch
+              buffer (snapshot()/saveJSON() below only capture lines/circles/
+              arcs/splines/dims, not the solid feature tree) — showing them
+              outside sketch mode would silently do nothing (or worse, look
+              like it undid/saved a solid operation when it didn't). Fit moved
+              to the 3D top toolbar's View row (see zoomToFit, now solids-aware). */}
+          {sketchMode && (
+            <>
+              <button onClick={()=>undo(snapshot(),restore)} title="Undo (Ctrl+Z)" disabled={!canUndo}
+                style={{...btnBase,opacity:canUndo?1:0.3,background:'transparent',border:'none',cursor:canUndo?'pointer':'default'}}>
+                <IconUndo active={canUndo}/>
+              </button>
+              <button onClick={()=>redo(snapshot(),restore)} title="Redo (Ctrl+Y)" disabled={!canRedo}
+                style={{...btnBase,opacity:canRedo?1:0.3,background:'transparent',border:'none',cursor:canRedo?'pointer':'default'}}>
+                <IconRedo active={canRedo}/>
+              </button>
+              <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
+              <button onClick={()=>saveJSON(lines,circles,arcs,splines,dims)} title="Save (Ctrl+S)" style={{...btnBase,background:'transparent',border:'none'}}>
+                <IconSave/>
+              </button>
+              <button onClick={()=>loadFileRef.current.click()} title="Load drawing" style={{...btnBase,background:'transparent',border:'none'}}>
+                <IconLoad/>
+              </button>
+              <button onClick={()=>setPageSetupOpen(true)} title="Page Setup & Export PDF" style={{...btnBase,background:'transparent',border:'none'}}>
+                <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="2" width="13" height="18" rx="1.5" stroke="#aaa" strokeWidth="1.5"/><line x1="6" y1="7" x2="13" y2="7" stroke="#aaa" strokeWidth="1.2"/><line x1="6" y1="10" x2="13" y2="10" stroke="#aaa" strokeWidth="1.2"/><line x1="6" y1="13" x2="11" y2="13" stroke="#aaa" strokeWidth="1.2"/><rect x="12" y="13" width="7" height="7" rx="1" fill="#E53935"/><text x="13.5" y="19" fontSize="5" fill="white" fontFamily="monospace">PDF</text></svg>
+              </button>
+              <label title="Import DXF file" style={{...btnBase,background:'transparent',border:'none',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>
+                <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                  <rect x="3" y="2" width="11" height="15" rx="1" stroke="#aaa" strokeWidth="1.5"/>
+                  <path d="M10 2v5h4" stroke="#aaa" strokeWidth="1.2" fill="none"/>
+                  <text x="3.5" y="19" fontSize="5" fill="#4CAF50" fontFamily="monospace" fontWeight="bold">DXF</text>
+                  <path d="M16 13l3 3-3 3" stroke="#4CAF50" strokeWidth="1.5" strokeLinecap="round" fill="none"/>
+                </svg>
+                <input type="file" accept=".dxf" style={{display:'none'}} onChange={async e=>{
+                  const file=e.target.files?.[0];if(!file)return
+                  try{
+                    const text=await file.text()
+                    const result=parseDXF(text,2)
+                    commit(snapshot())
+                    setLines(p=>[...p,...result.lines])
+                    setCircles(p=>[...p,...result.circles])
+                    setArcs(p=>[...p,...result.arcs])
+                    setSplines(p=>[...p,...result.splines])
+                    const total=result.lines.length+result.circles.length+result.arcs.length+result.splines.length
+                    setLoadError(null)
+                    alert(`DXF imported: ${total} entities (${result.lines.length} lines, ${result.circles.length} circles, ${result.arcs.length} arcs, ${result.splines.length} polylines)`)
+                  }catch(err){
+                    setLoadError('DXF import failed: '+err.message)
+                  }
+                  e.target.value=''
+                }}/>
+              </label>
+              <button onClick={()=>exportDXF(lines,circles,arcs,splines)} title="Export DXF" style={{...btnBase,background:'transparent',border:'none'}}>
+                <IconDXF/>
+              </button>
+              <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
+            </>
+          )}
           <button onClick={handleExportSTL} title="Export STL (for 3D printing — fuses all bodies into one)"
             style={{...btnBase,background:'transparent',border:'none'}}>
             <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
@@ -4710,7 +6613,8 @@ export default function App() {
             </svg>
           </button>
           <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
-          {/* Grid toggle */}
+          {/* Grid toggle — stays visible in 3D mode too: gridSnap/gridSizeMm
+              also drive the extrude/cutout hover-follow depth snapping. */}
           <button
             onClick={()=>setGridVisible(p=>!p)}
             title={gridVisible?'Hide grid':'Show grid'}
@@ -4743,25 +6647,28 @@ export default function App() {
             <span style={{fontSize:14,lineHeight:1}}>⊠</span>
             <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em'}}>SNAP</span>
           </button>
-          <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
-          {/* Line style buttons */}
-          {[
-            {s:null,        label:'FIRM',    title:'Normal line',        color:'#aaa',    line:'——'},
-            {s:'dashed',    label:'DASH',    title:'Dashed line (H)',    color:'#FF9800', line:'- -'},
-            {s:'construction',label:'CONST', title:'Construction (D)',   color:'#9E9E9E', line:'···'},
-          ].map(({s,label,title,color,line})=>(
-            <button key={s||'normal'} onClick={()=>setDrawStyle(s)} title={title}
-              style={{
-                display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',
-                background: drawStyle===s?color+'33':'#1a1a2e',
-                border:`2px solid ${drawStyle===s?color:'#3a3a5a'}`,
-                color: drawStyle===s?color:'#666',
-                borderRadius:5,padding:'3px 8px',cursor:'pointer',gap:1,
-              }}>
-              <span style={{fontSize:11,fontFamily:'monospace',letterSpacing:'0.1em',lineHeight:1}}>{line}</span>
-              <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em'}}>{label}</span>
-            </button>
-          ))}
+          {sketchMode && (
+            <>
+              <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
+              {/* Line style buttons — meaningless outside a sketch */}
+              {[
+                {s:null,        label:'FIRM',    title:'Normal line',        color:'#aaa',    line:'——'},
+                {s:'construction',label:'CONST', title:'Construction (D) — reference geometry, excluded from the extruded/cut solid',   color:'#9E9E9E', line:'···'},
+              ].map(({s,label,title,color,line})=>(
+                <button key={s||'normal'} onClick={()=>setDrawStyle(s)} title={title}
+                  style={{
+                    display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',
+                    background: drawStyle===s?color+'33':'#1a1a2e',
+                    border:`2px solid ${drawStyle===s?color:'#3a3a5a'}`,
+                    color: drawStyle===s?color:'#666',
+                    borderRadius:5,padding:'3px 8px',cursor:'pointer',gap:1,
+                  }}>
+                  <span style={{fontSize:11,fontFamily:'monospace',letterSpacing:'0.1em',lineHeight:1}}>{line}</span>
+                  <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em'}}>{label}</span>
+                </button>
+              ))}
+            </>
+          )}
           <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
           {(()=>{
             const p = getStatusPrompt()
@@ -4862,7 +6769,12 @@ export default function App() {
               </div>
             )
           })()}
-          <div style={{color:'#777',fontFamily:'monospace',fontSize:11,paddingLeft:8,borderLeft:'1px solid #2a2a4a'}}>{zoomPct}%</div>
+          {/* viewTransform.scale is the 2D sketch pan/zoom — meaningless
+              while orbiting the 3D camera, which uses a separate orthographic
+              frustum with no equivalent "zoom %" readout yet. */}
+          {sketchMode && (
+            <div style={{color:'#777',fontFamily:'monospace',fontSize:11,paddingLeft:8,borderLeft:'1px solid #2a2a4a'}}>{zoomPct}%</div>
+          )}
           {/* OCC ready indicator */}
           <div style={{
             marginLeft:8, paddingLeft:8, borderLeft:'1px solid #2a2a4a',
@@ -4887,12 +6799,12 @@ export default function App() {
           left: extrudeHandlePos.x + 20,
           top:  extrudeHandlePos.y - 20,
           zIndex: 1000,
-          background: 'rgba(15,20,40,0.95)',
-          border: `1.5px solid ${extrudeTool==='cutout' ? '#e05a4e' : '#3a7bd5'}`,
-          borderRadius: 8,
+          background: '#000',
+          border: `1.5px solid ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'}`,
+          borderRadius: 2,
           padding: '10px 14px',
           minWidth: 180,
-          boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
+          boxShadow: `0 0 14px ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'}77, 0 0 3px ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'} inset`,
           fontFamily: 'monospace',
         }}>
           {extrudeState.revolveAxis ? (
@@ -4911,18 +6823,19 @@ export default function App() {
                     title={label==='CW' ? 'Clockwise' : 'Counterclockwise'}
                     style={{
                       flex:1, padding:'4px 0', fontSize:12, cursor:'pointer',
-                      background: extrudeState.revolveReverse===k ? (extrudeTool==='cutout' ? '#e05a4e' : '#3a7bd5') : '#1e1e38',
-                      color: extrudeState.revolveReverse===k ? '#fff' : '#6688aa',
-                      border:`1px solid ${extrudeState.revolveReverse===k?(extrudeTool==='cutout' ? '#ff7a6e' : '#5a9bf5'):'#2a3a5a'}`,
-                      borderRadius: 4, fontFamily:'monospace', fontWeight:'bold',
+                      background: extrudeState.revolveReverse===k ? (extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff') : '#050505',
+                      color: extrudeState.revolveReverse===k ? '#000' : (extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'),
+                      border:`1px solid ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'}`,
+                      borderRadius: 2, fontFamily:'monospace', fontWeight:'bold', letterSpacing:'0.05em',
+                      textShadow: extrudeState.revolveReverse===k ? 'none' : `0 0 4px ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'}`,
                     }}
                   >{label}</button>
                 ))}
               </div>
               <div style={{display:'flex', alignItems:'center', gap:8}}>
                 <div style={{
-                  flex:1, background:'#0a0e1a', border:'1px solid #2a3a5a',
-                  borderRadius:4, padding:'4px 8px',
+                  flex:1, background:'#000', border:`1px solid ${extrudeTool==='cutout' ? '#FF3B5C55' : '#3ad6ff55'}`,
+                  borderRadius:2, padding:'4px 8px',
                   display:'flex', alignItems:'center', justifyContent:'space-between',
                 }}>
                   <input
@@ -4937,11 +6850,13 @@ export default function App() {
                     onKeyDown={e=>{ e.stopPropagation(); handleExtrudeDepthKey(e) }}
                     style={{
                       background:'none', border:'none', outline:'none',
-                      color:'#dce8ff', fontFamily:'monospace', fontSize:16,
+                      color: extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff',
+                      textShadow: `0 0 5px ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'}`,
+                      fontFamily:'monospace', fontSize:16,
                       fontWeight:'bold', width:70,
                     }}
                   />
-                  <span style={{color:'#6688aa', fontSize:12}}>°</span>
+                  <span style={{color:'#556', fontSize:12}}>°</span>
                 </div>
                 <button
                   onClick={()=>{
@@ -4953,43 +6868,49 @@ export default function App() {
                     commitExtrude()
                   }}
                   style={{
-                    padding:'4px 10px', background: extrudeTool==='cutout' ? '#e05a4e' : '#3a7bd5', color:'#fff',
-                    border:'none', borderRadius:4, cursor:'pointer',
+                    padding:'4px 10px', background: extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff', color:'#000',
+                    border:'none', borderRadius:2, cursor:'pointer',
                     fontFamily:'monospace', fontSize:12, fontWeight:'bold',
+                    boxShadow: `0 0 6px ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'}`,
                   }}
                 >↵</button>
               </div>
-              <div style={{color:'#445566', fontSize:10, marginTop:6, textAlign:'center'}}>
+              <div style={{color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em'}}>
                 {extrudeTool==='cutout' ? 'Revolve cutout angle' : 'Revolve angle'} · ↵ to accept · Esc to cancel
               </div>
             </>
           ) : (
             <>
-              {/* Symmetry toggle */}
+              {/* Extent mode — One Way (direction/sign follows which side of the
+                  plane the mouse is hovering, see handleExtrudeDragMove) vs
+                  Symmetric (grows equally both ways, side ignored). */}
               <div style={{display:'flex', alignItems:'center', gap:6, marginBottom:8}}>
                 {[
-                  {k:'front', icon:'▶',  label:'Front'},
-                  {k:'both',  icon:'◀▶', label:'Symmetric'},
-                  {k:'back',  icon:'◀',  label:'Back'},
-                ].map(({k,icon,label}) => (
-                  <button key={k}
-                    onClick={()=>setExtrudeState(prev=>({...prev, direction:k}))}
-                    title={label}
-                    style={{
-                      flex:1, padding:'4px 0', fontSize:13, cursor:'pointer',
-                      background: extrudeState.direction===k ? '#3a7bd5' : '#1e1e38',
-                      color: extrudeState.direction===k ? '#fff' : '#6688aa',
-                      border:`1px solid ${extrudeState.direction===k?'#5a9bf5':'#2a3a5a'}`,
-                      borderRadius: 4,
-                    }}
-                  >{icon}</button>
-                ))}
+                  {k:'oneway', icon:'▶',  label:'One Way — depth follows the mouse; hover either side of the plane to flip direction'},
+                  {k:'both',   icon:'◀▶', label:'Symmetric — grows equally on both sides'},
+                ].map(({k,icon,label}) => {
+                  const active = k==='both' ? extrudeState.direction==='both' : extrudeState.direction!=='both'
+                  return (
+                    <button key={k}
+                      onClick={()=>setExtrudeState(prev=>({...prev, direction: k==='both' ? 'both' : 'front'}))}
+                      title={label}
+                      style={{
+                        flex:1, padding:'4px 0', fontSize:13, cursor:'pointer',
+                        background: active ? '#3ad6ff' : '#050505',
+                        color: active ? '#000' : '#3ad6ff',
+                        border:'1px solid #3ad6ff',
+                        borderRadius: 2,
+                        textShadow: active ? 'none' : '0 0 4px #3ad6ff',
+                      }}
+                    >{icon}</button>
+                  )
+                })}
               </div>
               {/* Distance display + input */}
               <div style={{display:'flex', alignItems:'center', gap:8}}>
                 <div style={{
-                  flex:1, background:'#0a0e1a', border:'1px solid #2a3a5a',
-                  borderRadius:4, padding:'4px 8px',
+                  flex:1, background:'#000', border:'1px solid #3ad6ff55',
+                  borderRadius:2, padding:'4px 8px',
                   display:'flex', alignItems:'center', justifyContent:'space-between',
                 }}>
                   <input
@@ -4999,11 +6920,12 @@ export default function App() {
                     onKeyDown={e=>{ e.stopPropagation(); handleExtrudeDepthKey(e) }}
                     style={{
                       background:'none', border:'none', outline:'none',
-                      color:'#dce8ff', fontFamily:'monospace', fontSize:16,
+                      color:'#3ad6ff', textShadow:'0 0 5px #3ad6ff',
+                      fontFamily:'monospace', fontSize:16,
                       fontWeight:'bold', width:70,
                     }}
                   />
-                  <span style={{color:'#6688aa', fontSize:12}}>mm</span>
+                  <span style={{color:'#556', fontSize:12}}>mm</span>
                 </div>
                 <button
                   onClick={()=>{
@@ -5014,14 +6936,15 @@ export default function App() {
                     commitExtrude()
                   }}
                   style={{
-                    padding:'4px 10px', background:'#3a7bd5', color:'#fff',
-                    border:'none', borderRadius:4, cursor:'pointer',
+                    padding:'4px 10px', background:'#3ad6ff', color:'#000',
+                    border:'none', borderRadius:2, cursor:'pointer',
                     fontFamily:'monospace', fontSize:12, fontWeight:'bold',
+                    boxShadow:'0 0 6px #3ad6ff',
                   }}
                 >↵</button>
               </div>
-              <div style={{color:'#445566', fontSize:10, marginTop:6, textAlign:'center'}}>
-                Enter depth · click or ↵ to accept · Esc to cancel
+              <div style={{color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em'}}>
+                Move mouse to set depth{gridSnap ? ` (snap ${gridSizeMm}mm)` : ''} · type or ↵ to accept · Esc to cancel
               </div>
             </>
           )}
@@ -5035,11 +6958,11 @@ export default function App() {
           left: extrudeHandlePos.x + 20,
           top:  extrudeHandlePos.y - 20,
           zIndex: 1000,
-          background: 'rgba(15,20,40,0.95)',
-          border: '1.5px solid #e05a4e',
-          borderRadius: 8,
+          background: '#000',
+          border: '1.5px solid #FF3B5C',
+          borderRadius: 2,
           padding: '10px 14px',
-          boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
+          boxShadow: '0 0 14px #FF3B5C77, 0 0 3px #FF3B5C inset',
           fontFamily: 'monospace',
         }}>
           <div style={{display:'grid', gridTemplateColumns:'auto 1fr', gap:8}}>
@@ -5056,10 +6979,11 @@ export default function App() {
                     onClick={()=>setExtrudeState(prev=>({...prev, extentMode:k}))}
                     style={{
                       padding:'6px 12px', cursor:'pointer', fontSize:15,
-                      background: active ? '#e05a4e' : '#1e1e38',
-                      color: active ? '#fff' : '#6688aa',
-                      border:`1px solid ${active?'#ff7a6e':'#2a3a5a'}`,
-                      borderRadius:4, fontFamily:'monospace',
+                      background: active ? '#FF3B5C' : '#050505',
+                      color: active ? '#000' : '#FF3B5C',
+                      border:'1px solid #FF3B5C',
+                      borderRadius:2, fontFamily:'monospace',
+                      textShadow: active ? 'none' : '0 0 4px #FF3B5C',
                     }}
                   >{icon}</button>
                 )
@@ -5069,33 +6993,38 @@ export default function App() {
             {/* Right column: direction + depth */}
             <div style={{display:'flex', flexDirection:'column', gap:6}}>
 
-              {/* Direction buttons */}
+              {/* Extent mode — One Way (direction/sign follows which side of
+                  the plane the mouse is hovering) vs Symmetric (grows equally
+                  both ways, side ignored) — same concept as the extrude popup. */}
               <div style={{display:'flex', gap:4}}>
                 {[
-                  {k:'front', icon:'▶',  label:'Front'},
-                  {k:'both',  icon:'◀▶', label:'Symmetric'},
-                  {k:'back',  icon:'◀',  label:'Back'},
-                ].map(({k,icon,label}) => (
-                  <button key={k}
-                    onClick={()=>setExtrudeState(prev=>({...prev, direction:k}))}
-                    title={label}
-                    style={{
-                      flex:1, padding:'4px 0', fontSize:13, cursor:'pointer',
-                      background: extrudeState.direction===k ? '#e05a4e' : '#1e1e38',
-                      color: extrudeState.direction===k ? '#fff' : '#6688aa',
-                      border:`1px solid ${extrudeState.direction===k?'#ff7a6e':'#2a3a5a'}`,
-                      borderRadius:4,
-                    }}
-                  >{icon}</button>
-                ))}
+                  {k:'oneway', icon:'▶',  label:'One Way — depth follows the mouse; hover either side of the plane to flip direction'},
+                  {k:'both',   icon:'◀▶', label:'Symmetric — grows equally on both sides'},
+                ].map(({k,icon,label}) => {
+                  const active = k==='both' ? extrudeState.direction==='both' : extrudeState.direction!=='both'
+                  return (
+                    <button key={k}
+                      onClick={()=>setExtrudeState(prev=>({...prev, direction: k==='both' ? 'both' : 'front'}))}
+                      title={label}
+                      style={{
+                        flex:1, padding:'4px 0', fontSize:13, cursor:'pointer',
+                        background: active ? '#FF3B5C' : '#050505',
+                        color: active ? '#000' : '#FF3B5C',
+                        border:'1px solid #FF3B5C',
+                        borderRadius:2,
+                        textShadow: active ? 'none' : '0 0 4px #FF3B5C',
+                      }}
+                    >{icon}</button>
+                  )
+                })}
               </div>
 
               {/* Depth input (disabled for through-all) */}
               <div style={{display:'flex', gap:6, alignItems:'center'}}>
                 <div style={{
-                  flex:1, background:'#0a0e1a',
-                  border:`1px solid ${extrudeState.extentMode==='through'?'#1a2a3a':'#2a3a5a'}`,
-                  borderRadius:4, padding:'4px 8px',
+                  flex:1, background:'#000',
+                  border:`1px solid ${extrudeState.extentMode==='through'?'#3a1520':'#FF3B5C55'}`,
+                  borderRadius:2, padding:'4px 8px',
                   display:'flex', alignItems:'center', justifyContent:'space-between',
                   opacity: extrudeState.extentMode==='through' ? 0.35 : 1,
                 }}>
@@ -5107,11 +7036,12 @@ export default function App() {
                     onKeyDown={e=>{ e.stopPropagation(); if(extrudeState.extentMode!=='through') handleExtrudeDepthKey(e) }}
                     style={{
                       background:'none', border:'none', outline:'none',
-                      color: extrudeState.extentMode==='through' ? '#445566' : '#dce8ff',
+                      color: extrudeState.extentMode==='through' ? '#553' : '#FF3B5C',
+                      textShadow: extrudeState.extentMode==='through' ? 'none' : '0 0 5px #FF3B5C',
                       fontFamily:'monospace', fontSize:16, fontWeight:'bold', width:70,
                     }}
                   />
-                  <span style={{color:'#6688aa', fontSize:12}}>mm</span>
+                  <span style={{color:'#556', fontSize:12}}>mm</span>
                 </div>
                 <button
                   onClick={()=>{
@@ -5122,17 +7052,262 @@ export default function App() {
                     commitExtrude()
                   }}
                   style={{
-                    padding:'4px 10px', background:'#e05a4e', color:'#fff',
-                    border:'none', borderRadius:4, cursor:'pointer',
+                    padding:'4px 10px', background:'#FF3B5C', color:'#000',
+                    border:'none', borderRadius:2, cursor:'pointer',
                     fontFamily:'monospace', fontSize:12, fontWeight:'bold',
+                    boxShadow:'0 0 6px #FF3B5C',
                   }}
                 >↵</button>
               </div>
 
             </div>
           </div>
+          <div style={{color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em'}}>
+            {extrudeState.extentMode==='through'
+              ? 'Cuts through entire solid'
+              : `Move mouse to set depth${gridSnap ? ` (snap ${gridSizeMm}mm)` : ''} · type or ↵ to accept`} · Esc to cancel
+          </div>
+        </div>
+      )}
+
+      {/* ── Loft: persistent top banner ──────────────────────────────────────
+          Shown the whole time a loft is in progress (from the moment Profile
+          1's plane is picked until Finish/cancel), anchored to the TOP of the
+          viewport — not tied to the profile's screen position like the old
+          popup was, so it's always in the same, discoverable spot regardless
+          of where/how big the sketch is. While actively sketching, it's just
+          the "Loft Profile N" label; once a profile is finished (Finish
+          Sketch, same trigger every sketch flow uses), it also shows the
+          distance-to-next input and Previous/Next/Finish controls. */}
+      {loftState && (
+        <div style={{
+          position: 'absolute',
+          top: 70, left: sketchMode ? 72 : 112, right: 0,
+          zIndex: 300,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 14,
+          padding: '8px 16px',
+          background: 'rgba(15,20,40,0.95)',
+          borderBottom: '1.5px solid #33D5EC',
+          fontFamily: 'monospace',
+          pointerEvents: 'all',
+        }}>
+          <div style={{color:'#33D5EC', fontSize:13, fontWeight:'bold', letterSpacing:'0.04em'}}>
+            LOFT · PROFILE {loftState.currentIdx+1}
+          </div>
+
+          {sketchMode ? (
+            <div style={{color:'#6688aa', fontSize:11}}>
+              Sketch a closed profile, then Finish Sketch
+            </div>
+          ) : (
+            <>
+              <div style={{display:'flex', gap:6, alignItems:'center'}}>
+                <span style={{color:'#6688aa', fontSize:11}}>Distance to next</span>
+                <div style={{
+                  background:'#0a0e1a', border:'1px solid #2a3a5a', borderRadius:4,
+                  padding:'2px 8px', display:'flex', alignItems:'center', gap:4,
+                }}>
+                  <input
+                    autoFocus
+                    value={loftState.distanceInput}
+                    onChange={e=>setLoftState(prev=>({...prev, distanceInput:e.target.value}))}
+                    onKeyDown={e=>{
+                      e.stopPropagation()
+                      if (e.key==='Enter') loftNextProfile()
+                      else if (e.key==='Escape') resetLoft3D()
+                    }}
+                    style={{
+                      background:'none', border:'none', outline:'none',
+                      color:'#dce8ff', fontFamily:'monospace', fontSize:13, fontWeight:'bold', width:46,
+                    }}
+                  />
+                  <span style={{color:'#6688aa', fontSize:11}}>mm</span>
+                </div>
+              </div>
+              <div style={{display:'flex', gap:6}}>
+                <button
+                  onClick={loftPreviousProfile}
+                  disabled={loftState.currentIdx===0}
+                  title="Previous profile"
+                  style={{
+                    padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold',
+                    background:'#1e1e38', color: loftState.currentIdx===0 ? '#334455' : '#6688aa',
+                    border:'1px solid #2a3a5a', borderRadius:4,
+                    cursor: loftState.currentIdx===0 ? 'default' : 'pointer',
+                  }}
+                >◀ Prev</button>
+                <button
+                  onClick={loftNextProfile}
+                  title="Next profile"
+                  style={{
+                    padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold',
+                    background:'#33D5EC', color:'#0a0e1a', border:'none', borderRadius:4, cursor:'pointer',
+                  }}
+                >Next ▶</button>
+                <button
+                  onClick={commitLoft}
+                  disabled={loftState.profiles.filter(Boolean).length < 2}
+                  title="Finish loft"
+                  style={{
+                    padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold',
+                    background: loftState.profiles.filter(Boolean).length < 2 ? '#1e1e38' : '#4caf50',
+                    color: loftState.profiles.filter(Boolean).length < 2 ? '#334455' : '#fff',
+                    border:'none', borderRadius:4,
+                    cursor: loftState.profiles.filter(Boolean).length < 2 ? 'default' : 'pointer',
+                  }}
+                >✓ Finish</button>
+              </div>
+              <div style={{color:'#445566', fontSize:10}}>
+                {loftState.profiles.filter(Boolean).length < 2 ? 'Need 2+ profiles to finish' : 'Esc to cancel'}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── Fillet: "still picking edges" hint (shown before Enter/Tab accepts) ── */}
+      {tool==='fillet3d' && !fillet3dAccepted && fillet3dSel.length>0 && fillet3dHandlePos && (
+        <div style={{
+          position: 'fixed',
+          left: fillet3dHandlePos.x,
+          top:  fillet3dHandlePos.y,
+          zIndex: 1000,
+          background: 'rgba(15,20,40,0.95)',
+          border: '1.5px solid #9c6ade',
+          borderRadius: 8,
+          padding: '6px 12px',
+          boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
+          fontFamily: 'monospace',
+          fontSize: 11,
+          color: '#dce8ff',
+          whiteSpace: 'nowrap',
+        }}>
+          {fillet3dSel.length} edge{fillet3dSel.length!==1?'s':''} selected · ↵ to set radius · Esc to clear
+        </div>
+      )}
+
+      {/* ── Fillet popup (radius only — edges already picked) ─────────────── */}
+      {fillet3dAccepted && fillet3dHandlePos && (
+        <div style={{
+          position: 'fixed',
+          left: fillet3dHandlePos.x,
+          top:  fillet3dHandlePos.y,
+          zIndex: 1000,
+          background: 'rgba(15,20,40,0.95)',
+          border: '1.5px solid #9c6ade',
+          borderRadius: 8,
+          padding: '10px 14px',
+          minWidth: 180,
+          boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
+          fontFamily: 'monospace',
+        }}>
+          <div style={{display:'flex', alignItems:'center', gap:8}}>
+            <div style={{
+              flex:1, background:'#0a0e1a', border:'1px solid #2a3a5a',
+              borderRadius:4, padding:'4px 8px',
+              display:'flex', alignItems:'center', justifyContent:'space-between',
+            }}>
+              <input
+                autoFocus
+                value={fillet3dRadiusInput}
+                onChange={e=>setFillet3dRadiusInput(e.target.value)}
+                onKeyDown={e=>{
+                  e.stopPropagation()
+                  if (e.key==='Enter') commitFillet3D()
+                  else if (e.key==='Escape') resetFillet3D()
+                }}
+                style={{
+                  background:'none', border:'none', outline:'none',
+                  color:'#dce8ff', fontFamily:'monospace', fontSize:16,
+                  fontWeight:'bold', width:70,
+                }}
+              />
+              <span style={{color:'#6688aa', fontSize:12}}>mm</span>
+            </div>
+            <button
+              onClick={()=>commitFillet3D()}
+              style={{
+                padding:'4px 10px', background:'#9c6ade', color:'#fff',
+                border:'none', borderRadius:4, cursor:'pointer',
+                fontFamily:'monospace', fontSize:12, fontWeight:'bold',
+              }}
+            >↵</button>
+          </div>
           <div style={{color:'#445566', fontSize:10, marginTop:6, textAlign:'center'}}>
-            {extrudeState.extentMode==='through' ? 'Cuts through entire solid' : 'Enter depth · click or ↵ to accept'} · Esc to cancel
+            Fillet radius{fillet3dSel.length>1 ? ` · ${fillet3dSel.length} edges` : ''} · ↵ to accept · Esc to cancel
+          </div>
+        </div>
+      )}
+
+      {/* ── Measure: "click second point" hint (pending distance pick) ───── */}
+      {tool==='measure' && measureP1 && !measureResult && measureHandlePos && (
+        <div style={{
+          position: 'fixed',
+          left: measureHandlePos.x,
+          top:  measureHandlePos.y,
+          zIndex: 1000,
+          background: 'rgba(15,20,40,0.95)',
+          border: '1.5px solid #4FC3F7',
+          borderRadius: 8,
+          padding: '6px 12px',
+          boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
+          fontFamily: 'monospace',
+          fontSize: 11,
+          color: '#dce8ff',
+          whiteSpace: 'nowrap',
+        }}>
+          Click second point · Esc to cancel
+        </div>
+      )}
+
+      {/* ── Measure result popup ──────────────────────────────────────────── */}
+      {tool==='measure' && measureResult && measureHandlePos && (
+        <div style={{
+          position: 'fixed',
+          left: measureHandlePos.x,
+          top:  measureHandlePos.y,
+          zIndex: 1000,
+          background: 'rgba(15,20,40,0.95)',
+          border: '1.5px solid #4FC3F7',
+          borderRadius: 8,
+          padding: '10px 14px',
+          minWidth: 170,
+          boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
+          fontFamily: 'monospace',
+        }}>
+          {measureResult.kind === 'straight' && (
+            <div style={{color:'#dce8ff', fontSize:16, fontWeight:'bold'}}>
+              Length: {measureResult.length.toFixed(2)} mm
+            </div>
+          )}
+          {measureResult.kind === 'circular' && (
+            <>
+              <div style={{color:'#dce8ff', fontSize:16, fontWeight:'bold'}}>
+                ⌀ {measureResult.diameter.toFixed(2)} mm
+              </div>
+              <div style={{color:'#6688aa', fontSize:11, marginTop:2}}>
+                R {measureResult.radius.toFixed(2)} mm
+              </div>
+            </>
+          )}
+          {measureResult.kind === 'curve' && (
+            <div style={{color:'#dce8ff', fontSize:16, fontWeight:'bold'}}>
+              Length: {measureResult.length.toFixed(2)} mm{' '}
+              <span style={{fontSize:10, color:'#6688aa', fontWeight:'normal'}}>(curve)</span>
+            </div>
+          )}
+          {measureResult.kind === 'distance' && (
+            <>
+              <div style={{color:'#dce8ff', fontSize:16, fontWeight:'bold'}}>
+                Distance: {measureResult.distance.toFixed(2)} mm
+              </div>
+              <div style={{color:'#6688aa', fontSize:10, marginTop:2}}>
+                ΔX {measureResult.dx.toFixed(2)} · ΔY {measureResult.dy.toFixed(2)} · ΔZ {measureResult.dz.toFixed(2)}
+              </div>
+            </>
+          )}
+          <div style={{color:'#445566', fontSize:10, marginTop:6, textAlign:'center'}}>
+            Esc to clear · click new geometry to remeasure
           </div>
         </div>
       )}
@@ -5148,6 +7323,13 @@ export default function App() {
         onRename={handleRenameFeature}
         onEditDepth={handleEditExtrudeDepth}
         onEditExtent={handleEditExtent}
+        onEditFilletRadius={handleEditFilletRadius}
+        mirrorPickActive={tool==='mirror3d' && !mirror3dSourceFeatureId}
+        onPickMirrorSource={handlePickMirror3DSource}
+        joinPickActive={tool==='join3d'}
+        joinSel={joinSel}
+        onToggleJoinMember={handleToggleJoinMember}
+        onEditLoft={handleEditLoft}
       />
 
       {/* Hidden file input */}
@@ -5173,10 +7355,17 @@ export default function App() {
         <TracerPanel
           insertPt={traceInsertPt}
           onImport={({lines:iLines,circles:iCircles,arcs:iArcs})=>{
+            // Same planeTag() fix as TextPanel's onImport below — without it,
+            // traced geometry has no plane/facePlane info and silently
+            // defaults to XY everywhere it's consumed, so tracing while
+            // sketching on XZ/YZ/a face would draw fine (the overlay ignores
+            // plane) but get excluded from detectProfiles at Finish Sketch —
+            // a "no profile found" with no obvious cause.
+            const tag = planeTag()
             commit(snapshot())
-            setLines(p=>[...p,...iLines])
-            setCircles(p=>[...p,...iCircles])
-            setArcs(p=>[...p,...iArcs])
+            setLines(p=>[...p,...iLines.map(l=>({...l,...tag}))])
+            setCircles(p=>[...p,...iCircles.map(c=>({...c,...tag}))])
+            setArcs(p=>[...p,...iArcs.map(a=>({...a,...tag}))])
             resetTrace();setTool('select')
           }}
           onClose={()=>{resetTrace();setTool('select')}}

@@ -15,12 +15,20 @@ export function tOnSeg(px,py,x1,y1,x2,y2) {
 }
 
 // Now accepts optional splines so crossings with splines are treated as trim boundaries
+// Loft's previous-profile ghost geometry (entity.ghostRef===true, see
+// injectLoftGhost in App3D.jsx) is injected into these same lines/circles/arcs
+// arrays so it renders dimmed and stays snap-able while sketching the NEXT
+// profile — but it belongs to a different profile's sketch and must stay
+// read-only here: every forEach below skips ghostRef entities so Trim/Delete
+// can never target them (indices into the real arrays are preserved since
+// we skip-in-place rather than filtering the array first).
 export function computeTrimPreview(mouse,lines,circles,arcs,splines=[]) {
   const td=TRIM_DIST/zoomRef.scale
   let bestDist=td+1,target=null
-  lines.forEach((l,idx)=>{const d=distToSeg(mouse.x,mouse.y,l.x1,l.y1,l.x2,l.y2);if(d<bestDist){bestDist=d;target={kind:'line',idx}}})
-  circles.forEach((c,idx)=>{const d=Math.abs(Math.hypot(mouse.x-c.cx,mouse.y-c.cy)-c.r);if(d<bestDist){bestDist=d;target={kind:'circle',idx}}})
+  lines.forEach((l,idx)=>{if(l.ghostRef)return;const d=distToSeg(mouse.x,mouse.y,l.x1,l.y1,l.x2,l.y2);if(d<bestDist){bestDist=d;target={kind:'line',idx}}})
+  circles.forEach((c,idx)=>{if(c.ghostRef)return;const d=Math.abs(Math.hypot(mouse.x-c.cx,mouse.y-c.cy)-c.r);if(d<bestDist){bestDist=d;target={kind:'circle',idx}}})
   arcs.forEach((arc,idx)=>{
+    if (arc.ghostRef) return
     const angle=norm2pi(Math.atan2(mouse.y-arc.cy,mouse.x-arc.cx))
     if (!angleOnArc(angle,arc.startAngle,arc.endAngle)) return
     const d=Math.abs(Math.hypot(mouse.x-arc.cx,mouse.y-arc.cy)-arc.r)
@@ -91,9 +99,10 @@ export function performTrim(preview,lines,circles,arcs) {
 export function computeDeletePreview(mouse,lines,circles,arcs) {
   const dd=DELETE_DIST/zoomRef.scale
   let best=null,bestDist=dd+1
-  lines.forEach((l,idx)=>{const d=distToSeg(mouse.x,mouse.y,l.x1,l.y1,l.x2,l.y2);if(d<bestDist){bestDist=d;best={kind:'line',idx}}})
-  circles.forEach((c,idx)=>{const d=Math.abs(Math.hypot(mouse.x-c.cx,mouse.y-c.cy)-c.r);if(d<bestDist){bestDist=d;best={kind:'circle',idx}}})
+  lines.forEach((l,idx)=>{if(l.ghostRef)return;const d=distToSeg(mouse.x,mouse.y,l.x1,l.y1,l.x2,l.y2);if(d<bestDist){bestDist=d;best={kind:'line',idx}}})
+  circles.forEach((c,idx)=>{if(c.ghostRef)return;const d=Math.abs(Math.hypot(mouse.x-c.cx,mouse.y-c.cy)-c.r);if(d<bestDist){bestDist=d;best={kind:'circle',idx}}})
   arcs.forEach((arc,idx)=>{
+    if (arc.ghostRef) return
     const angle=norm2pi(Math.atan2(mouse.y-arc.cy,mouse.x-arc.cx))
     if (!angleOnArc(angle,arc.startAngle,arc.endAngle)) return
     const d=Math.abs(Math.hypot(mouse.x-arc.cx,mouse.y-arc.cy)-arc.r)

@@ -30,13 +30,26 @@ const CLOSE_TOL = 4   // world units — endpoints within this distance are "con
  * {x, y} sketch-space points (the shape outline, CCW preferred).
  */
 export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
+  // Construction geometry (style==='construction') is reference-only, same as
+  // real CAD convention — it's meant for snapping/layout aid while sketching,
+  // never for the extruded/cut solid itself, so it's excluded here rather
+  // than at each call site (every caller wants this, unlike e.g. ghostRef
+  // exclusion which is specific to the loft-profile-editing flow and stays
+  // filtered at that call site in App3D.jsx).
+  const notConstruction = e => e.style !== 'construction'
   // Filter to this plane only
-  const planeLines   = lines  .filter(l => (l.plane || 'XY') === planeId)
-  const planeArcs    = arcs   .filter(a => (a.plane || 'XY') === planeId)
-  const planeCircles = circles.filter(c => (c.plane || 'XY') === planeId)
-  const planeSplines = splines.filter(sp => (sp.plane || 'XY') === planeId && sp.closed)
+  const planeLines   = lines  .filter(l => (l.plane || 'XY') === planeId && notConstruction(l))
+  const planeArcs    = arcs   .filter(a => (a.plane || 'XY') === planeId && notConstruction(a))
+  const planeCircles = circles.filter(c => (c.plane || 'XY') === planeId && notConstruction(c))
+  const planeSplines = splines.filter(sp => (sp.plane || 'XY') === planeId && sp.closed && notConstruction(sp))
+  // Open splines (unlike closed ones, see below) aren't a profile on their own —
+  // they're a connectable SEGMENT, just like a line or arc, whose two ends can
+  // join up with lines/arcs/other splines to form one composite closed loop.
+  const planeOpenSplines = splines.filter(sp =>
+    (sp.plane || 'XY') === planeId && !sp.closed && sp.points && sp.points.length >= 2 && notConstruction(sp))
 
-  if (planeLines.length === 0 && planeArcs.length === 0 && planeCircles.length === 0 && planeSplines.length === 0) return []
+  if (planeLines.length === 0 && planeArcs.length === 0 && planeCircles.length === 0
+      && planeSplines.length === 0 && planeOpenSplines.length === 0) return []
 
   // Build segment list: each has {p1:{x,y}, p2:{x,y}, kind, ref}
   const segs = []
@@ -47,6 +60,11 @@ export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
     const p1 = { x: a.cx+Math.cos(a.startAngle)*a.r, y: a.cy+Math.sin(a.startAngle)*a.r }
     const p2 = { x: a.cx+Math.cos(a.endAngle  )*a.r, y: a.cy+Math.sin(a.endAngle  )*a.r }
     segs.push({ p1, p2, kind:'arc', ref:a })
+  })
+  planeOpenSplines.forEach(sp => {
+    const p1 = sp.points[0]
+    const p2 = sp.points[sp.points.length-1]
+    segs.push({ p1:{x:p1.x,y:p1.y}, p2:{x:p2.x,y:p2.y}, kind:'spline', ref:sp })
   })
 
   // Union-find: merge endpoints that are within CLOSE_TOL of each other
@@ -115,6 +133,39 @@ export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
       const forward = (na === prevNode)
       if (seg.kind === 'line') {
         pts.push(forward ? {...nodes[na]} : {...nodes[nb]})
+      } else if (seg.kind === 'spline') {
+        // Open spline used as one segment of a mixed line/arc/spline loop —
+        // sample its curve (or use its polyline points directly), snapping
+        // the entry point to the union-find-merged node so it lines up
+        // exactly with whatever line/arc endpoint it's joined to (same
+        // benefit the 'line' case gets from using nodes[na]/nodes[nb]
+        // instead of the raw endpoint). The exit point is intentionally
+        // dropped — it's supplied by whichever segment comes next, same
+        // convention as the arc case never sampling its own end angle.
+        const sp = seg.ref
+        const raw = sp.polyline ? sp.points.map(p=>({x:p.x,y:p.y})) : sampleSpline(sp.points, false, 16)
+        const ordered = forward ? raw : [...raw].reverse()
+        ordered[0] = forward ? {...nodes[na]} : {...nodes[nb]}
+        const startIdx = pts.length
+        for (let i=0; i<ordered.length-1; i++) pts.push(ordered[i])
+        // Real curve metadata for cadWorker.js's makeProfile — the ORIGINAL
+        // un-sampled control points (not the sampled `ordered` above), in the
+        // same traversal direction, so the solid gets an exact curve instead
+        // of the ~16-per-segment polygon approximation. Skipped for polyline
+        // splines (Trim output, Text/font outlines) — those have no Catmull-Rom
+        // control points to rebuild from, so they keep today's straight-line behavior.
+        if (!sp.polyline) {
+          if (!pts.curveSegments) pts.curveSegments = []
+          const controlPoints = (forward ? sp.points : [...sp.points].reverse()).map(p=>({x:p.x,y:p.y}))
+          // Snap BOTH ends to the merged node coordinates, same as `ordered[0]`
+          // above — otherwise the curve's true (un-merged) far endpoint could
+          // sit up to CLOSE_TOL away from the node the next segment actually
+          // starts from, leaving a tiny extra straight seam edge right where
+          // this feature is meant to remove them.
+          controlPoints[0] = forward ? {...nodes[na]} : {...nodes[nb]}
+          controlPoints[controlPoints.length-1] = forward ? {...nodes[nb]} : {...nodes[na]}
+          pts.curveSegments.push({ type:'spline', startIdx, count: ordered.length-1, controlPoints })
+        }
       } else {
         // Arc — sample intermediate points
         const arc = seg.ref
@@ -123,10 +174,16 @@ export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
         if (forward && a1 < a0) a1 += Math.PI*2
         if (!forward && a0 < a1) a0 += Math.PI*2
         const steps = Math.max(4, Math.round(Math.abs(a1-a0) / (Math.PI/16)))
+        const startIdx = pts.length
         for (let i=0; i<steps; i++) {
           const a = a0 + (a1-a0)*i/steps
           pts.push({ x: arc.cx+Math.cos(a)*arc.r, y: arc.cy+Math.sin(a)*arc.r })
         }
+        // Real curve metadata — a0/a1 already account for direction (swept
+        // the traversal way), so the worker just needs to rebuild the same
+        // circular arc instead of the faceted polygon approximation above.
+        if (!pts.curveSegments) pts.curveSegments = []
+        pts.curveSegments.push({ type:'arc', startIdx, count: steps, cx:arc.cx, cy:arc.cy, r:arc.r, startAngle:a0, endAngle:a1 })
       }
       prevNode = forward ? nb : na
     })
@@ -161,6 +218,14 @@ export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
     const pts = sp.polyline ? sp.points.map(p=>({...p})) : sampleSpline(sp.points, true, 16)
     if (pts.length < 3) return
     if (sp.textId) pts.textId = sp.textId
+    // Real curve metadata (see the mixed-loop walker above for the full
+    // rationale) — the whole profile is one closed hand-drawn curve, so it's
+    // a single segment spanning the entire pts array. Skipped for polyline
+    // splines (always the case for Text/font-outline imports, which is the
+    // only source of closed splines today besides freehand closed drawing).
+    if (!sp.polyline) {
+      pts.curveSegments = [{ type:'spline', startIdx:0, count: pts.length, controlPoints: sp.points.map(p=>({x:p.x,y:p.y})) }]
+    }
     profiles.push(pts)
   })
 

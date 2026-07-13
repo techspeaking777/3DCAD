@@ -18,10 +18,11 @@ const SCALE = 2   // replicad outputs mm; scene is in px (1mm = 2px)
 // why a plain module-level Vector2 is used instead of prop drilling.
 export const EDGE_LINE_RESOLUTION = new THREE.Vector2(800, 600)
 
-export function replicadMeshToThree(meshData, color = '#3a7bd5') {
+export function replicadMeshToThree(meshData, color = '#3a7bd5', solidId = null) {
   const { faces, edges } = meshData
   const group = new THREE.Group()
   group.userData.isReplicadSolid = true
+  group.userData.solidId = solidId
 
   // ── Face mesh ──────────────────────────────────────────────────────────────
   if (faces) {
@@ -62,10 +63,12 @@ export function replicadMeshToThree(meshData, color = '#3a7bd5') {
   // ── Edge lines ─────────────────────────────────────────────────────────────
   // replicad's shape.meshEdges() returns { lines: number[], edgeGroups: [...] } —
   // `lines` is ALREADY a flat array of consecutive point-pairs (6 numbers per
-  // segment: x,y,z,x,y,z), the exact format LineSegmentsGeometry wants. edgeGroups
-  // only matters if you need per-edge identity (e.g. hover/pick a single edge),
-  // which isn't needed here. (Previously this assumed `edges` was an array of
-  // {vertices:[...]} objects, which never matched — edges silently never rendered.)
+  // segment: x,y,z,x,y,z), the exact format LineSegmentsGeometry wants.
+  // edgeGroups[i] = {start, count, edgeId} — start/count are POINT indices (not
+  // floats, not segments) marking the contiguous range within `lines` that
+  // belongs to one real OCC edge. Stored on userData so the fillet tool's edge
+  // raycast can map a hit segment back to the FULL edge polyline to highlight
+  // (see Viewport3D's raycastSolidEdges), not just the single hit point.
   if (edges?.lines?.length > 0) {
     const edgePoints = edges.lines.map(v => v * SCALE)
     // Plain THREE.LineSegments ignores linewidth on most GPUs/browsers (the same
@@ -83,10 +86,15 @@ export function replicadMeshToThree(meshData, color = '#3a7bd5') {
     edgeLines.renderOrder = 5
     // LineSegments2 extends THREE.Mesh (isMesh===true) and implements its own
     // raycast() for the thick screen-space line quads. Face-click/hover picking
-    // filters hits with `h.object.isMesh`, so without this the edge overlay could
-    // shadow the real face mesh underneath it. Edges were never meant to be
-    // clickable, so just disable raycasting on this object entirely.
-    edgeLines.raycast = () => {}
+    // filters hits with `h.object.isMesh`, so ordinarily the edge overlay could
+    // shadow the real face mesh underneath it — the fillet tool's dedicated
+    // edge-raycasting pass (Viewport3D's raycastSolidEdges) is the only thing
+    // meant to hit these; everything else must keep excluding them via the
+    // isSolidEdge tag below.
+    edgeLines.userData.isSolidEdge = true
+    edgeLines.userData.solidId = solidId
+    edgeLines.userData.edgeGroups = edges.edgeGroups || []
+    edgeLines.userData.edgePoints = edgePoints
     group.add(edgeLines)
   }
   return group

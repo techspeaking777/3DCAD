@@ -169,7 +169,7 @@ function transformEntity(kind, entity, anchor, sx, sy, dx, dy) {
   if (kind === 'line') {
     const p1 = tp(entity.x1, entity.y1, anchor, sx, sy, dx, dy)
     const p2 = tp(entity.x2, entity.y2, anchor, sx, sy, dx, dy)
-    return { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, ...(entity.style?{style:entity.style}:{}) }
+    return { ...entity, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y }
   }
   if (kind === 'circle') {
     const c = tp(entity.cx, entity.cy, anchor, sx, sy, dx, dy)
@@ -180,7 +180,7 @@ function transformEntity(kind, entity, anchor, sx, sy, dx, dy) {
              : (adx > ady) ? sx
              : (ady > adx) ? sy
              : Math.sqrt(sx * sy)  // equidistant — geometric mean
-    return { cx: c.x, cy: c.y, r: entity.r * rs, ...(entity.style?{style:entity.style}:{}) }
+    return { ...entity, cx: c.x, cy: c.y, r: entity.r * rs }
   }
   if (kind === 'arc') {
     const c = tp(entity.cx, entity.cy, anchor, sx, sy, dx, dy)
@@ -190,9 +190,7 @@ function transformEntity(kind, entity, anchor, sx, sy, dx, dy) {
              : (adx > ady) ? sx
              : (ady > adx) ? sy
              : Math.sqrt(sx * sy)
-    return { cx: c.x, cy: c.y, r: entity.r * rs,
-             startAngle: entity.startAngle, endAngle: entity.endAngle,
-             ...(entity.style?{style:entity.style}:{}) }
+    return { ...entity, cx: c.x, cy: c.y, r: entity.r * rs }
   }
   if (kind === 'spline') {
     return {

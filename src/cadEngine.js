@@ -38,6 +38,15 @@ class CadEngine {
           return
         }
 
+        if (type === 'error' && id === null) {
+          // OCC failed to initialize (cadWorker.js's initOC().catch posts this
+          // with id:null since there's no per-request id yet). Without this,
+          // _readyPromise never resolves OR rejects — every _send() call
+          // awaits it forever with no visible error, just a silent hang.
+          reject(new Error(message || 'CAD worker failed to initialize'))
+          return
+        }
+
         const pending = this._pending.get(id)
         if (!pending) return
         this._pending.delete(id)
@@ -81,14 +90,23 @@ class CadEngine {
     return this._send('cutout', params)
   }
 
-  /** Extrude with automatic edge fillets. */
-  async filletedExtrude(params) {
-    return this._send('fillet', params)
+  /** Round one or more edges of an existing solid — params: {solidId, edgePoints:[[x,y,z],...] (mm), radius, base?}. */
+  async fillet3d(params) {
+    return this._send('fillet3d', params)
   }
 
   /** Revolve a 2D profile around an axis line (drawn in the same sketch) to a solid. */
   async revolve(params) {
     return this._send('revolve', params)
+  }
+
+  /**
+   * Loft a solid through 2+ profiles sketched on parallel planes that share
+   * one normal/uAxis basis. params: {solidId, profiles:[{pts,circle,offsetMm},...],
+   * normal, origin, uAxis, ruled?}.
+   */
+  async loft(params) {
+    return this._send('loft', params)
   }
 
   /** Rebuild a base extrude and subtract one or more cut volumes. */
@@ -97,10 +115,30 @@ class CadEngine {
   }
 
   /**
+   * Mirror a solid's full rebuilt chain across a plane — cold-rebuilds the
+   * source fresh every time rather than trusting any cache (this is the
+   * app's first cross-solid dependency). params: {solidId, base, ops,
+   * plane: {kind:'workplane', planeId} | {kind:'face', origin, normal, uAxis}}.
+   */
+  async mirrorShape(params) {
+    return this._send('mirrorShape', params)
+  }
+
+  /**
+   * Boolean-union several existing solids into one new solid. params:
+   * {solidId, members: [{solidId, base, ops}, ...]} — base/ops are the same
+   * shape buildBaseWorkerParams()/buildSolidOpsForWorker() already produce,
+   * used only as a cold-rebuild fallback if a member isn't in shapeStore.
+   */
+  async joinShapes(params) {
+    return this._send('joinShapes', params)
+  }
+
+  /**
    * Fuse every top-level solid (cutouts already baked in) into one body and
    * export it as a single STL Blob — for 3D printing, which needs one
    * continuous manifold mesh, not several independently-overlapping bodies.
-   * params.solids: [{ solidId, base: {...extrude params}, cuts: [{...cut params}] }]
+   * params.solids: [{ solidId, base: {...extrude/revolve params}, ops: [{type:'cut',params}|{type:'fillet',radius,edgePoint}] }]
    */
   async exportSTL(params) {
     return this._send('exportSTL', params)

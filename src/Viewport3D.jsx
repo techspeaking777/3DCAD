@@ -7,8 +7,9 @@
  *
  * Phase 2 Step 2 — Camera tween
  * ──────────────────────────────
- * snapToPlane(planeId)  — smoothly animates camera to look straight at a work plane
- * snapToIsometric()     — smoothly animates back to the saved pre-sketch orbit state
+ * snapToPlane(planeId)   — smoothly animates camera to look straight at a work plane
+ * snapToIsometric()      — smoothly animates to a fixed canonical isometric view
+ * restoreSavedView()     — smoothly animates back to the saved pre-sketch orbit state
  *
  * The tween runs inside the existing RAF loop using a simple easeInOutCubic.
  * OrbitControls are disabled during the tween and re-enabled when it finishes.
@@ -18,10 +19,11 @@
  *   screenToWorld(clientX, clientY) → {x,y}
  *   zoomToFit()
  *   getScale()
- *   getOverlayCtx()    → { ctx, sc }
+ *   getOverlayCtx()      → { ctx, sc }
  *   clearOverlay()
- *   snapToPlane(id)    → Promise  (resolves when tween finishes)
- *   snapToIsometric()  → Promise
+ *   snapToPlane(id)      → Promise  (resolves when tween finishes)
+ *   snapToIsometric()    → Promise
+ *   restoreSavedView()   → Promise
  *   getDomElement()
  */
 
@@ -33,7 +35,23 @@ import { LineGeometry } from 'three/addons/lines/LineGeometry.js'
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
 import { createWorkPlanes, hitTestPlanes, setPlaneHover, setPlaneActive, setWorkPlanesVisible } from './WorkPlanes.js'
 import { SKETCH_PLANES } from './SketchPlane.js'
-import { faceHitToPlane } from './FacePlane.js'
+import { faceHitToPlane, previewBottomEdge, faceBoundarySegments } from './FacePlane.js'
+
+// Averages the 3 vertex normals of a hovered face's hit triangle, world-space —
+// same convention faceHitToPlane uses, factored out so both the per-frame
+// highlight and the keyboard-driven Tab cycling (which runs outside animate())
+// compute the exact same normal for a given hover state.
+function getHoveredFaceNormal(hf) {
+  const geo = hf.mesh.geometry
+  const face = hf.hit.face
+  const normals = geo?.attributes?.normal
+  if (!face) return null
+  if (!normals) return face.normal.clone().transformDirection(hf.mesh.matrixWorld).normalize()
+  const na = new THREE.Vector3(normals.getX(face.a), normals.getY(face.a), normals.getZ(face.a))
+  const nb = new THREE.Vector3(normals.getX(face.b), normals.getY(face.b), normals.getZ(face.b))
+  const nc = new THREE.Vector3(normals.getX(face.c), normals.getY(face.c), normals.getZ(face.c))
+  return na.add(nb).add(nc).divideScalar(3).transformDirection(hf.mesh.matrixWorld).normalize()
+}
 import { detectProfiles } from './tools/extrudeMath.js'
 import { EDGE_LINE_RESOLUTION } from './cadMesh.js'
 
@@ -71,6 +89,15 @@ const PLANE_VIEWS = {
     up:       new THREE.Vector3(  0, 0, 1),
     target:   new THREE.Vector3(  0, 0, 0),
   },
+}
+
+// Fixed canonical isometric view — front-right-top corner, same distance-800
+// convention as PLANE_VIEWS so switching between TOP/FRONT/SIDE/ISO doesn't
+// jump zoom level. Matches the camera's own default startup framing.
+const ISO_VIEW = {
+  position: new THREE.Vector3(1, -1, 1).normalize().multiplyScalar(800),
+  up:       new THREE.Vector3(0,  0, 1),
+  target:   new THREE.Vector3(0,  0, 0),
 }
 
 const TWEEN_MS = 420   // animation duration in milliseconds
@@ -304,10 +331,13 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     onPlaneClick,
     onFaceClick,          // called with FacePlane when a solid face is clicked
     sketchArmed = false,
+    extrudeArmed   = false,  // true once a profile is picked (Phase 2/3) — see extrudeArmedRef
     showWorkPlanes = true,
     activePlane    = null,
     sketchMode     = false,
     extrudeTool    = null,   // 'extrude'|'cutout' — bypasses work plane click
+    filletActive   = false,  // true while the fillet edge-pick tool is active
+    measureActive  = false,  // true while the measure tool is active (reuses fillet's edge-highlight machinery, see measureActiveRef)
   } = props
 
   const mountRef   = useRef(null)
@@ -319,6 +349,43 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   // Face hover state
   const hoveredFaceRef   = useRef(null)  // { mesh, origMat }
   const sketchArmedRef   = useRef(false)
+  // Extrude/cutout Phase 2/3 (a profile is picked, awaiting the commit
+  // click) — see the work-plane hover/click gates below for why this is
+  // tracked separately from sketchArmedRef (that one also covers the
+  // legitimate "no tool active, click a bare work plane to start a fresh
+  // sketch" case, which must NOT be blocked the way Phase 2/3 needs to be).
+  const extrudeArmedRef  = useRef(false)
+  // Tab-cycled bottom-edge override (see cycleFaceBottomEdge) — null means
+  // "follow the cursor" (previewBottomEdge), a number is an index into that
+  // face's faceBoundarySegments() list. Reset whenever the hovered face's
+  // normal drifts (moved to a genuinely different face) or hover is cleared.
+  const tabEdgeIndexRef  = useRef(null)
+  const tabEdgeNormalRef = useRef(null)
+  // Fillet edge highlight state — drawn every frame in animate() (reprojected
+  // fresh each frame so it tracks camera orbit/zoom, same convention as the
+  // face-hover highlight below). Two separate refs: the edge currently under
+  // the mouse (set by raycastSolidEdges), and the full multi-edge selection
+  // set (set by setSelectedEdges) — drawn in different colors so hover vs.
+  // "already picked" reads clearly, same distinction the 2D tools' selection
+  // highlighting already makes (isXxxHov vs isXxxSel).
+  const hoverEdgeHighlightRef    = useRef(null)  // { points: number[], matrixWorld } | null
+  const selectedEdgeHighlightsRef = useRef([])   // [{ points: number[], matrixWorld }]
+  const filletActiveRef  = useRef(false)
+  const measureActiveRef = useRef(false)
+  // Whole-solid highlight (Mirror tool step 1: "this is the solid you're
+  // about to mirror") — tracks the currently-glowing mesh so it can be reset
+  // before highlighting a different one, or cleared outright.
+  const highlightedSolidMeshRef = useRef(null)
+  // Mirror tool step 1, cutout source specifically: a cutout is often a small
+  // detail on a large body, so glowing the whole solid is less useful than
+  // showing exactly where the cutout itself sits — a flat outline+fill at the
+  // cutout's own entry plane, reprojected every frame like the other overlay
+  // highlights. World-space THREE.Vector3[] | null.
+  const highlightedProfileRef = useRef(null)
+  // Join tool: every currently-selected member solid glows at once (unlike
+  // Mirror's single highlightSolid, Join is a multi-select) — array of
+  // faceMesh objects, same reset-to-black-emissive convention as highlightSolid.
+  const highlightedJoinMeshesRef = useRef([])
 
   // ── init ──────────────────────────────────────────────────────────────────
 
@@ -351,7 +418,20 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.screenSpacePanning=true; controls.enableDamping=true; controls.dampingFactor=0.12
     controls.zoomSpeed=1.2; controls.rotateSpeed=0.6
-    controls.mouseButtons={ LEFT:THREE.MOUSE.PAN, MIDDLE:THREE.MOUSE.DOLLY, RIGHT:THREE.MOUSE.ROTATE }
+    // LEFT is left unbound (null) deliberately — it used to be PAN, but since
+    // OrbitControls listens on the same canvas element sketch tools draw over,
+    // a left-drag triggered camera pan AND the tool's own drag logic (e.g.
+    // Select's drag-select/drag-handle) at the same time, and the camera pan
+    // visually won. Freeing LEFT entirely is what actually fixes drag-select.
+    // MIDDLE is ROTATE, which OrbitControls itself automatically swaps to PAN
+    // when Shift (or Ctrl/Meta) is held during mousedown — built into its own
+    // onMouseDown switch, no extra listeners needed (and adding our own would
+    // double-apply the shiftKey check and invert the result). RIGHT stays
+    // ROTATE too, harmless alongside every tool's right-click-to-accept (a
+    // plain click doesn't drag, so no camera movement happens before the
+    // app's own contextmenu handler fires). Scroll wheel already dollies by
+    // default, independent of this mapping.
+    controls.mouseButtons={ LEFT:null, MIDDLE:THREE.MOUSE.ROTATE, RIGHT:THREE.MOUSE.ROTATE }
 
     const grid = buildGrid()
     grid.visible = false   // hidden by default — white background, no grid
@@ -426,19 +506,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
           if (face && geo.attributes.position) {
             const pos = geo.attributes.position
             const normals = geo.attributes.normal
-            // Get face normal: prefer stored vertex normal (more accurate for ExtrudeGeometry)
-            let faceNormal
-            if (normals) {
-              // Average the 3 vertex normals of the hit face for robustness
-              const na = new THREE.Vector3(normals.getX(face.a),normals.getY(face.a),normals.getZ(face.a))
-              const nb = new THREE.Vector3(normals.getX(face.b),normals.getY(face.b),normals.getZ(face.b))
-              const nc = new THREE.Vector3(normals.getX(face.c),normals.getY(face.c),normals.getZ(face.c))
-              faceNormal = na.add(nb).add(nc).divideScalar(3)
-                .transformDirection(hf.mesh.matrixWorld).normalize()
-            } else {
-              faceNormal = face.normal.clone()
-                .transformDirection(hf.mesh.matrixWorld).normalize()
-            }
+            const faceNormal = getHoveredFaceNormal(hf)
             const rect2 = mountRef.current?.getBoundingClientRect()
             const W = rect2?.width || oc.width
             const H = rect2?.height || oc.height
@@ -515,6 +583,43 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
             ctx2.lineWidth = 2
             ctx2.stroke()
 
+            // If Tab-cycling (cycleFaceBottomEdge) picked an edge, that overrides
+            // the cursor-nearest one — but only while still on the same face; a
+            // normal that's drifted means the mouse moved to a genuinely
+            // different face, so fall back to cursor-tracking for it.
+            if (tabEdgeIndexRef.current !== null &&
+                (!tabEdgeNormalRef.current || tabEdgeNormalRef.current.dot(faceNormal) < 0.999)) {
+              tabEdgeIndexRef.current = null
+            }
+
+            // Preview which boundary edge is nearest the cursor right now (or,
+            // if Tab-cycled, whichever edge that selected) — this is the edge
+            // that will become the sketch's bottom/horizontal reference if the
+            // face is clicked now (see FacePlane.js's faceHitToPlane, which
+            // picks the same edge — or honors the same override — at click time).
+            let bottomEdge
+            if (tabEdgeIndexRef.current !== null) {
+              const segs = faceBoundarySegments({ object: hf.mesh, point: hf.hit.point }, faceNormal)
+              bottomEdge = segs.length ? segs[tabEdgeIndexRef.current % segs.length] : null
+            } else {
+              bottomEdge = previewBottomEdge({ object: hf.mesh, point: hf.hit.point }, faceNormal)
+            }
+            if (bottomEdge) {
+              const toScreenWorld = v => {
+                const p = v.clone().project(cam)
+                return { x:(p.x+1)/2*W, y:(-p.y+1)/2*H }
+              }
+              const bp1 = toScreenWorld(bottomEdge.a)
+              const bp2 = toScreenWorld(bottomEdge.b)
+              ctx2.beginPath()
+              ctx2.moveTo(bp1.x, bp1.y)
+              ctx2.lineTo(bp2.x, bp2.y)
+              ctx2.strokeStyle = '#4caf50'
+              ctx2.lineWidth = 4
+              ctx2.lineCap = 'round'
+              ctx2.stroke()
+            }
+
             // Label at face centroid
             const allX = faceTris.flatMap(({pa,pb,pc})=>[pa.x,pb.x,pc.x])
             const allY = faceTris.flatMap(({pa,pb,pc})=>[pa.y,pb.y,pc.y])
@@ -531,6 +636,80 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
         const ctx2 = oc.getContext('2d')
         ctx2.setTransform(1,0,0,1,0,0)
         ctx2.clearRect(0,0,oc.width,oc.height)
+      }
+
+      // ── Fillet tool: highlight selected edges (orange) + hovered edge (yellow) ──
+      // Reprojected fresh every frame (not a one-time draw) so it tracks camera
+      // orbit/zoom exactly like the face-hover highlight above. Mutually
+      // exclusive with sketchArmed/sketch-mode's use of this same canvas —
+      // fillet3d never sets sketchArmed — so the two never fight over clearing.
+      if (oc && (filletActiveRef.current || measureActiveRef.current)) {
+        const ctx3 = oc.getContext('2d')
+        ctx3.setTransform(1,0,0,1,0,0)
+        ctx3.clearRect(0,0,oc.width,oc.height)
+        const rect3 = mountRef.current?.getBoundingClientRect()
+        const W = rect3?.width || oc.width
+        const H = rect3?.height || oc.height
+        const cam = stateRef.current.camera
+
+        const drawEdge = (eh, color) => {
+          if (!eh?.points || eh.points.length < 6) return
+          const mw = eh.matrixWorld
+          const toScreen = (x,y,z) => {
+            const v = new THREE.Vector3(x,y,z).applyMatrix4(mw).project(cam)
+            return { x:(v.x+1)/2*W, y:(-v.y+1)/2*H }
+          }
+          ctx3.beginPath()
+          for (let i=0; i<eh.points.length; i+=6) {
+            const p1 = toScreen(eh.points[i],   eh.points[i+1], eh.points[i+2])
+            const p2 = toScreen(eh.points[i+3], eh.points[i+4], eh.points[i+5])
+            ctx3.moveTo(p1.x, p1.y)
+            ctx3.lineTo(p2.x, p2.y)
+          }
+          ctx3.strokeStyle = color
+          ctx3.lineWidth = 4
+          ctx3.lineCap = 'round'
+          ctx3.stroke()
+        }
+
+        // Measure gets its own cyan pair instead of fillet's orange/yellow —
+        // the two tools are never active at once, but a distinct color keeps
+        // "picked an edge to measure" visually different from "picked an
+        // edge to fillet" if a screenshot/memory of one is compared later.
+        const selColor = measureActiveRef.current ? '#4FC3F7' : '#ff9800'
+        const hovColor = measureActiveRef.current ? '#84FFFF' : '#ffe14d'
+        for (const sel of selectedEdgeHighlightsRef.current) drawEdge(sel, selColor)
+
+        // Skip drawing the hover highlight if it's the same edge already in
+        // the selected set — otherwise it'd just paint yellow over the
+        // orange, masking the "already picked" cue.
+        const hov = hoverEdgeHighlightRef.current
+        const hovAlreadySelected = hov && selectedEdgeHighlightsRef.current.some(
+          s => s.solidId === hov.solidId && s.edgeId === hov.edgeId)
+        if (hov && !hovAlreadySelected) drawEdge(hov, hovColor)
+      }
+
+      // ── Mirror tool: cutout-source profile highlight (see highlightCutoutFace) ──
+      if (oc && highlightedProfileRef.current?.length >= 3) {
+        const ctx4 = oc.getContext('2d')
+        const rect4 = mountRef.current?.getBoundingClientRect()
+        const W = rect4?.width || oc.width
+        const H = rect4?.height || oc.height
+        const cam = stateRef.current.camera
+        const toScreen = v => {
+          const p = v.clone().project(cam)
+          return { x:(p.x+1)/2*W, y:(-p.y+1)/2*H }
+        }
+        const screenPts = highlightedProfileRef.current.map(toScreen)
+        ctx4.beginPath()
+        ctx4.moveTo(screenPts[0].x, screenPts[0].y)
+        for (let i=1; i<screenPts.length; i++) ctx4.lineTo(screenPts[i].x, screenPts[i].y)
+        ctx4.closePath()
+        ctx4.fillStyle = 'rgba(77,217,236,0.35)'
+        ctx4.fill()
+        ctx4.strokeStyle = '#4dd9ec'
+        ctx4.lineWidth = 2.5
+        ctx4.stroke()
       }
 
       // ── tween tick ──
@@ -633,25 +812,37 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     })
 
     // ── Render working arrays (current in-progress sketch) ──
-    lines  .forEach(l  => geomGroup.add(buildLine(l,   lineColor)))
-    circles.forEach(c  => geomGroup.add(buildCircle(c, lineColor)))
-    arcs   .forEach(a  => geomGroup.add(buildArc(a,    lineColor)))
-    splines.forEach(sp => { const o=buildSpline(sp, lineColor); if(o) geomGroup.add(o) })
+    // ghostRef entries (Loft's previous-profile reference, see App3D.jsx's
+    // injectLoftGhost) render dimmed, same treatment as an inactive committed
+    // sketch above — they're a visual + snap reference only, not part of the
+    // profile currently being drawn.
+    const ghostColor = 0xaaaaaa
+    lines  .forEach(l  => { const o=buildLine(l,   l.ghostRef?ghostColor:lineColor); if(l.ghostRef)setHaloOpacity(o,0.3); geomGroup.add(o) })
+    circles.forEach(c  => { const o=buildCircle(c, c.ghostRef?ghostColor:lineColor); if(c.ghostRef)setHaloOpacity(o,0.3); geomGroup.add(o) })
+    arcs   .forEach(a  => { const o=buildArc(a,    a.ghostRef?ghostColor:lineColor); if(a.ghostRef)setHaloOpacity(o,0.3); geomGroup.add(o) })
+    splines.forEach(sp => { const o=buildSpline(sp,sp.ghostRef?ghostColor:lineColor); if(o&&sp.ghostRef)setHaloOpacity(o,0.3); if(o) geomGroup.add(o) })
 
     // Fills for working arrays. Include circles/splines' planes too — a
     // text-only sketch (no lines/arcs yet) would otherwise never get a fill
-    // preview since wPlaneIds was derived only from lines/arcs.
+    // preview since wPlaneIds was derived only from lines/arcs. Ghost entries
+    // excluded — they belong to a DIFFERENT (already-finished) loft profile,
+    // not the one currently being sketched, so they must never merge into
+    // its fill/profile detection.
+    const ownLines   = lines  .filter(l=>!l.ghostRef)
+    const ownCircles = circles.filter(c=>!c.ghostRef)
+    const ownArcs    = arcs   .filter(a=>!a.ghostRef)
+    const ownSplines = splines.filter(s=>!s.ghostRef)
     const wPlaneIds = [...new Set([
-      ...lines.filter(l=>l.plane).map(l=>l.plane),
-      ...arcs .filter(a=>a.plane).map(a=>a.plane),
-      ...circles.filter(c=>c.plane).map(c=>c.plane),
-      ...splines.filter(s=>s.plane).map(s=>s.plane),
+      ...ownLines.filter(l=>l.plane).map(l=>l.plane),
+      ...ownArcs .filter(a=>a.plane).map(a=>a.plane),
+      ...ownCircles.filter(c=>c.plane).map(c=>c.plane),
+      ...ownSplines.filter(s=>s.plane).map(s=>s.plane),
     ])]
     wPlaneIds.forEach(pid => {
-      const pLines   = lines  .filter(l=>l.plane===pid)
-      const pArcs    = arcs   .filter(a=>a.plane===pid)
-      const pCircles = circles.filter(c=>c.plane===pid)
-      const pSplines = splines.filter(s=>s.plane===pid)
+      const pLines   = ownLines  .filter(l=>l.plane===pid)
+      const pArcs    = ownArcs   .filter(a=>a.plane===pid)
+      const pCircles = ownCircles.filter(c=>c.plane===pid)
+      const pSplines = ownSplines.filter(s=>s.plane===pid)
       const fp = pLines[0]?.facePlane || pArcs[0]?.facePlane || pCircles[0]?.facePlane || pSplines[0]?.facePlane || null
       const profiles = detectProfiles(pLines, pArcs, pid, pCircles, pSplines)
       profiles.forEach(pts => {
@@ -715,7 +906,25 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   const showWorkPlanesRef = useRef(true)
   const [isFaceHovered, setIsFaceHovered] = useState(false)
   useEffect(() => { showWorkPlanesRef.current = showWorkPlanes }, [showWorkPlanes])
-  useEffect(() => { sketchArmedRef.current = sketchArmed }, [sketchArmed])
+  useEffect(() => {
+    sketchArmedRef.current = sketchArmed
+    if (!sketchArmed) tabEdgeIndexRef.current = null
+  }, [sketchArmed])
+  useEffect(() => { extrudeArmedRef.current = extrudeArmed }, [extrudeArmed])
+  useEffect(() => {
+    filletActiveRef.current = filletActive
+    if (!filletActive) {
+      hoverEdgeHighlightRef.current = null
+      selectedEdgeHighlightsRef.current = []
+    }
+  }, [filletActive])
+  useEffect(() => {
+    measureActiveRef.current = measureActive
+    if (!measureActive) {
+      hoverEdgeHighlightRef.current = null
+      selectedEdgeHighlightsRef.current = []
+    }
+  }, [measureActive])
 
   // Clear face hover highlight helper
   function clearFaceHover() {
@@ -723,6 +932,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       hoveredFaceRef.current = null
       setIsFaceHovered(false)
     }
+    tabEdgeIndexRef.current = null
   }
 
   function handleMouseMoveInternal(e) {
@@ -730,6 +940,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     if (!s) { if (onMouseMove) onMouseMove(e); return }
 
     sketchArmedRef.current = sketchArmed
+    extrudeArmedRef.current = extrudeArmed
 
     const el  = mountRef.current
     const rect = el ? el.getBoundingClientRect() : s.renderer.domElement.getBoundingClientRect()
@@ -742,25 +953,35 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     // ── Face hover (only when SKETCH tool is armed) ──
     if (sketchArmedRef.current && s.solidsGroup && !s.tween?.active) {
       const hits = s.raycaster.intersectObjects(s.solidsGroup.children, true)
-      const meshHit = hits.find(h => h.object.isMesh)
+      // Solid-edge overlays (LineSegments2) also report isMesh===true and now
+      // raycast (for the fillet tool's edge picking) — exclude them here so
+      // they can't shadow the real face mesh underneath during face-pick sketching.
+      const meshHit = hits.find(h => h.object.isMesh && !h.object.userData?.isSolidEdge)
       const hitMesh = meshHit ? meshHit.object : null
-      if (!handleMouseMoveInternal._tick) handleMouseMoveInternal._tick = 0
-      if (++handleMouseMoveInternal._tick % 120 === 0) {
-        console.log('[face] armed=true solids=', s.solidsGroup.children.length, 'hits=', hits.length, 'meshHit=', !!meshHit)
-      }
-      if (hitMesh !== (hoveredFaceRef.current?.mesh || null)) {
+      if (hitMesh) {
+        // A solid's faces all live on ONE Mesh (see cadMesh.js) — refresh the
+        // stored hit every move so it tracks the current face/point even while
+        // sliding across the solid without the mesh identity ever changing
+        // (only setIsFaceHovered is gated, to avoid a React re-render per move).
+        if (!hoveredFaceRef.current) setIsFaceHovered(true)
+        hoveredFaceRef.current = { mesh: hitMesh, hit: meshHit }
+      } else if (hoveredFaceRef.current) {
         clearFaceHover()
-        if (hitMesh) {
-          hoveredFaceRef.current = { mesh: hitMesh, hit: meshHit }
-          setIsFaceHovered(true)
-        }
       }
     } else if (!sketchArmedRef.current) {
       clearFaceHover()
     }
 
-    // ── Work plane hover ──
-    if (s.workPlanes && showWorkPlanesRef.current && !s.tween?.active) {
+    // ── Work plane hover (disabled once an extrude/cutout profile is armed,
+    // Phase 2/3 — NOT gated by sketchArmedRef, since that would also block
+    // the legitimate "no tool active, click a bare work plane to start a
+    // fresh sketch" flow, which isn't broken and shouldn't be touched).
+    // Work planes have no occlusion check against solids and are huge (see
+    // hitTestPlanes/WorkPlanes.js), so without this gate they'd keep
+    // registering hover hits — and therefore eating the commit click, see
+    // the click handler below — even when the cursor is visually over the
+    // solid, not a plane. ──
+    if (!extrudeArmedRef.current && s.workPlanes && showWorkPlanesRef.current && !s.tween?.active) {
       s.raycaster.setFromCamera(ndc, s.camera)
       const hit   = hitTestPlanes(s.raycaster, s.workPlanes)
       const newId = hit ? hit.id : null
@@ -768,6 +989,9 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
         hoveredPlaneRef.current = newId
         setPlaneHover(s.workPlanes, newId)
       }
+    } else if (extrudeArmedRef.current && hoveredPlaneRef.current) {
+      hoveredPlaneRef.current = null
+      setPlaneHover(s.workPlanes, null)
     }
 
     if (onMouseMove) onMouseMove(e)
@@ -776,6 +1000,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   function handleClickInternal(e) {
     const s = stateRef.current
     sketchArmedRef.current = sketchArmed  // sync immediately
+    extrudeArmedRef.current = extrudeArmed
 
     // ── Face click (sketch armed + face hovered) ──
     if (sketchArmedRef.current && hoveredFaceRef.current && onFaceClick && !s?.tween?.active) {
@@ -783,7 +1008,18 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
         ...hoveredFaceRef.current.hit,
         ray: s.raycaster.ray.clone(),  // store ray so FacePlane can orient normal toward camera
       }
-      const facePlane = faceHitToPlane(hitWithRay)
+      // Honor a Tab-cycled bottom-edge choice (see cycleFaceBottomEdge) instead
+      // of re-deriving nearest-to-click-point — otherwise clicking would silently
+      // discard whatever edge was cycled to, since the click position itself
+      // rarely sits right on that edge.
+      let overrideEdge = null
+      if (tabEdgeIndexRef.current !== null) {
+        const hf = hoveredFaceRef.current
+        const normal = getHoveredFaceNormal(hf)
+        const segs = faceBoundarySegments({ object: hf.mesh, point: hf.hit.point }, normal)
+        overrideEdge = segs.length ? segs[tabEdgeIndexRef.current % segs.length] : null
+      }
+      const facePlane = faceHitToPlane(hitWithRay, overrideEdge)
       if (facePlane) {
         clearFaceHover()
         onFaceClick(facePlane)
@@ -791,8 +1027,9 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       }
     }
 
-    // ── Work plane click ──
-    if (s?.workPlanes && showWorkPlanesRef.current && hoveredPlaneRef.current && !s.tween?.active) {
+    // ── Work plane click (same extrudeArmedRef gate as hover above — belt
+    // and suspenders in case hoveredPlaneRef is still set from a moment ago) ──
+    if (!extrudeArmedRef.current && s?.workPlanes && showWorkPlanesRef.current && hoveredPlaneRef.current && !s.tween?.active) {
       const entry = s.workPlanes[hoveredPlaneRef.current]
       if (entry && onPlaneClick) {
         onPlaneClick({ id: entry.def.id, def: entry.def })
@@ -895,8 +1132,15 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
 
     zoomToFit() {
       const s=stateRef.current; if (!s) return
-      const {camera,controls,geomGroup}=s
-      const box=new THREE.Box3().setFromObject(geomGroup)
+      const {camera,controls,geomGroup,solidsGroup}=s
+      // Frames whatever's actually visible — sketch geometry AND committed
+      // solids, whichever groups are non-empty. Previously only measured
+      // geomGroup (the sketch-line objects), so outside sketch mode — where
+      // that group is empty — this silently did nothing; solidsGroup was
+      // never considered at all.
+      const box=new THREE.Box3()
+      box.union(new THREE.Box3().setFromObject(geomGroup))
+      if (solidsGroup) box.union(new THREE.Box3().setFromObject(solidsGroup))
       if (box.isEmpty()) return
       const size=new THREE.Vector3(), centre=new THREE.Vector3()
       box.getSize(size); box.getCenter(centre)
@@ -992,6 +1236,229 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     },
 
     /**
+     * Raycast against solid edges only (for the Fillet tool's edge picking) —
+     * a separate pass from face hover/click so it never interferes with
+     * sketch-on-face picking. Uses a dedicated Raycaster (not the shared one)
+     * so the generous hit threshold here doesn't affect anything else.
+     * Returns { solidId, edgeId, point:[x,y,z] } (point in real mm), or null.
+     */
+    raycastSolidEdges(clientX, clientY) {
+      const s = stateRef.current; if (!s?.solidsGroup) return null
+      const el = mountRef.current; if (!el) return null
+      const rect = el.getBoundingClientRect()
+      const ndc = new THREE.Vector2(
+        ((clientX - rect.left) / rect.width)  *  2 - 1,
+        ((clientY - rect.top)  / rect.height) * -2 + 1,
+      )
+      const raycaster = new THREE.Raycaster()
+      // LineSegments2.raycast() requires this explicitly when worldUnits:false
+      // (see cadMesh.js's edge material) — the shared face-picking raycaster
+      // never sets it, which is why this uses its own instance.
+      raycaster.camera = s.camera
+      raycaster.params.Line2 = { threshold: 4 }
+      raycaster.setFromCamera(ndc, s.camera)
+      const edgeObjects = []
+      s.solidsGroup.traverse(obj => { if (obj.userData?.isSolidEdge) edgeObjects.push(obj) })
+      const hits = raycaster.intersectObjects(edgeObjects, false)
+      if (!hits.length) { hoverEdgeHighlightRef.current = null; return null }
+      const hit = hits[0]
+      const obj = hit.object
+
+      // Map the hit segment back to its full edge polyline (for highlighting the
+      // WHOLE edge, not just the clicked point) via userData.edgeGroups — see
+      // cadMesh.js. faceIndex is the segment index; each segment consumes 2
+      // points, so its point-index is faceIndex*2. edgeId (OCC's edge.hashCode)
+      // is a stable identity — needed so the fillet tool can tell "is this the
+      // same edge already in my multi-select" without relying on point proximity.
+      const groups = obj.userData.edgeGroups || []
+      const ptIdx = hit.faceIndex * 2
+      const eg = groups.find(g => ptIdx >= g.start && ptIdx < g.start + g.count)
+      const solidId = obj.userData.solidId
+      if (eg && obj.userData.edgePoints) {
+        const pts = obj.userData.edgePoints
+        hoverEdgeHighlightRef.current = {
+          points: pts.slice(eg.start*3, (eg.start+eg.count)*3),
+          matrixWorld: obj.matrixWorld.clone(),
+          solidId, edgeId: eg.edgeId,
+        }
+      } else {
+        hoverEdgeHighlightRef.current = null
+      }
+
+      // LineSegments2's screen-space raycast reports TWO points: `point` (the
+      // closest point on the camera RAY to the segment — can sit noticeably
+      // off the true edge in 3D, especially at oblique angles or far from the
+      // camera, since the whole point of a thick-line hit test is that you
+      // don't have to click exactly on the infinitely-thin line) and
+      // `pointOnLine` (the closest point ON the segment itself). We need a
+      // point that's actually ON the edge for EdgeFinder().withinDistance()
+      // to reliably find it — using `point` here was the bug: fillets would
+      // silently succeed or fail (radius input never wrong) depending on how
+      // far the ray-point had drifted from the real edge for that click.
+      const SCALE = 2   // scene is in px (1mm = 2px) — see cadMesh.js
+      const p = hit.pointOnLine
+      return { solidId, edgeId: eg?.edgeId ?? null, point: [p.x/SCALE, p.y/SCALE, p.z/SCALE] }
+    },
+
+    /**
+     * Generic "where on a solid did this click land" raycast, independent of
+     * the sketch-armed face-picking flow (which returns an oriented FacePlane
+     * for starting a sketch, not a bare point) — used by the Measure tool's
+     * point-to-point distance mode. Returns { solidId, point:[x,y,z] } (mm)
+     * or null. Same mesh-filtering convention as the face-hover pass in
+     * handleMouseMoveInternal (excludes isSolidEdge overlays so a click near
+     * an edge overlay still resolves to the real face mesh underneath).
+     */
+    raycastSolidFace(clientX, clientY) {
+      const s = stateRef.current; if (!s?.solidsGroup) return null
+      const el = mountRef.current; if (!el) return null
+      const rect = el.getBoundingClientRect()
+      const ndc = new THREE.Vector2(
+        ((clientX - rect.left) / rect.width)  *  2 - 1,
+        ((clientY - rect.top)  / rect.height) * -2 + 1,
+      )
+      const raycaster = new THREE.Raycaster()
+      raycaster.setFromCamera(ndc, s.camera)
+      const hits = raycaster.intersectObjects(s.solidsGroup.children, true)
+      const meshHit = hits.find(h => h.object.isMesh && !h.object.userData?.isSolidEdge)
+      if (!meshHit) return null
+      const SCALE = 2
+      const p = meshHit.point
+      return { solidId: meshHit.object.userData?.solidId ?? null, point: [p.x/SCALE, p.y/SCALE, p.z/SCALE] }
+    },
+
+    /**
+     * Steps the bottom-edge preview (see the green highlight in animate())
+     * through the hovered face's boundary edges, one per call, instead of
+     * only following the cursor — for edges the mouse can't easily land near.
+     * dir=1 forward / -1 backward (e.g. Shift+Tab). No-op (returns false) if
+     * no face is currently hovered. The chosen edge sticks until the mouse
+     * moves to a genuinely different face or the hover is cleared (see
+     * animate()'s normal-drift check and clearFaceHover).
+     */
+    cycleFaceBottomEdge(dir = 1) {
+      const hf = hoveredFaceRef.current
+      if (!hf?.hit) return false
+      const normal = getHoveredFaceNormal(hf)
+      const segs = faceBoundarySegments({ object: hf.mesh, point: hf.hit.point }, normal)
+      if (!segs.length) return false
+      const cur = tabEdgeIndexRef.current
+      tabEdgeIndexRef.current = cur === null ? 0 : (cur + dir + segs.length) % segs.length
+      tabEdgeNormalRef.current = normal
+      return true
+    },
+
+    /**
+     * Looks up one specific edge's polyline by stable identity (solidId +
+     * edgeId, as returned by raycastSolidEdges) rather than a fresh raycast —
+     * used to re-highlight edges already in the fillet tool's multi-select
+     * set, or to re-highlight an existing fillet feature's edges when
+     * re-opening it for editing. Returns { points, matrixWorld } or null.
+     */
+    getEdgePolyline(solidId, edgeId) {
+      const s = stateRef.current; if (!s?.solidsGroup) return null
+      let found = null
+      s.solidsGroup.traverse(obj => {
+        if (found || !obj.userData?.isSolidEdge || obj.userData.solidId !== solidId) return
+        const eg = (obj.userData.edgeGroups || []).find(g => g.edgeId === edgeId)
+        if (eg && obj.userData.edgePoints) {
+          found = {
+            points: obj.userData.edgePoints.slice(eg.start*3, (eg.start+eg.count)*3),
+            matrixWorld: obj.matrixWorld.clone(),
+          }
+        }
+      })
+      return found
+    },
+
+    /**
+     * Sets the fillet tool's persistent (orange) multi-select highlight —
+     * list of {solidId, edgeId}. Looks up each edge's current polyline via
+     * getEdgePolyline; entries that can't be found (e.g. solid rebuilt since)
+     * are silently skipped rather than breaking the whole highlight.
+     */
+    setSelectedEdges(list) {
+      selectedEdgeHighlightsRef.current = (list || [])
+        .map(({ solidId, edgeId }) => this.getEdgePolyline(solidId, edgeId))
+        .filter(Boolean)
+    },
+
+    /** Clears the fillet tool's hover (yellow) and selection (orange) edge highlights (e.g. after commit/cancel). */
+    clearEdgeHighlight() {
+      hoverEdgeHighlightRef.current = null
+      selectedEdgeHighlightsRef.current = []
+    },
+
+    /**
+     * Makes one whole solid glow (Mirror tool step 1 — "this is the body
+     * you're about to mirror"). Finds the solid's own faceMesh (userData.solidId,
+     * set in cadMesh.js) and sets its material's emissive color directly —
+     * that material is already created fresh per solid there (never shared),
+     * so mutating it in place can't bleed into any other solid. Resets any
+     * previously-highlighted mesh first so only one solid ever glows at once.
+     */
+    highlightSolid(solidId) {
+      const s = stateRef.current; if (!s?.solidsGroup) return
+      this.clearSolidHighlight()
+      const group = s.solidsGroup.children.find(g => g.userData?.solidId === solidId)
+      const faceMesh = group?.children.find(c => c.isMesh && !c.userData?.isSolidEdge)
+      if (faceMesh) {
+        faceMesh.material.emissive.set(0x4dd9ec)
+        highlightedSolidMeshRef.current = faceMesh
+      }
+    },
+
+    /**
+     * Highlights a cutout feature's own profile (Mirror tool step 1, cutout
+     * source specifically) instead of glowing the whole solid it belongs to —
+     * a cutout is often a small detail on a much larger body, so this is a
+     * clearer cue for exactly what's about to be mirrored. `worldPts` is the
+     * profile's own points already converted to world space by the caller
+     * (App3D knows the feature's facePlane/planeId, this component doesn't).
+     * Reprojected every frame in animate(), same convention as every other
+     * camera-tracking overlay highlight here.
+     */
+    highlightCutoutFace(worldPts) {
+      this.clearSolidHighlight()
+      highlightedProfileRef.current = worldPts
+    },
+
+    /** Clears whatever highlightSolid()/highlightCutoutFace() lit up, if any. */
+    clearSolidHighlight() {
+      if (highlightedSolidMeshRef.current) {
+        highlightedSolidMeshRef.current.material.emissive.set(0x000000)
+        highlightedSolidMeshRef.current = null
+      }
+      highlightedProfileRef.current = null
+    },
+
+    /**
+     * Glows every solid in `solidIds` at once (Join tool step 1 — a
+     * multi-select, unlike Mirror's single pick). Resets any previously
+     * highlighted set first. Independent of highlightSolid/clearSolidHighlight
+     * so Join and Mirror's highlight state can never stomp on each other,
+     * though in practice only one tool is ever active at a time.
+     */
+    highlightJoinMembers(solidIds) {
+      this.clearJoinHighlight()
+      const s = stateRef.current; if (!s?.solidsGroup) return
+      for (const solidId of solidIds) {
+        const group = s.solidsGroup.children.find(g => g.userData?.solidId === solidId)
+        const faceMesh = group?.children.find(c => c.isMesh && !c.userData?.isSolidEdge)
+        if (faceMesh) {
+          faceMesh.material.emissive.set(0x4dd9ec)
+          highlightedJoinMeshesRef.current.push(faceMesh)
+        }
+      }
+    },
+
+    /** Clears whatever highlightJoinMembers() lit up, if any. */
+    clearJoinHighlight() {
+      for (const mesh of highlightedJoinMeshesRef.current) mesh.material.emissive.set(0x000000)
+      highlightedJoinMeshesRef.current = []
+    },
+
+    /**
      * Get the screen-space direction vector for a plane's extrude normal.
      * Returns a normalised {dx, dy} in canvas pixels.
      * planeId: 'XY'|'XZ'|'YZ'
@@ -1004,7 +1471,13 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       if (facePlane && facePlane.normal) {
         nx = facePlane.normal.x; ny = facePlane.normal.y; nz = facePlane.normal.z
       } else {
-        const worldNormals = { XY:[0,0,1], XZ:[0,1,0], YZ:[1,0,0] }
+        // XZ's world normal is -Y, not +Y — matches replicad's own PLANES_CONFIG.XZ
+        // (and this app's SketchPlane.js camera convention: XZ camera sits at
+        // negative Y looking toward +Y). Getting this backwards doesn't break the
+        // math, but it does make this preview arrow point the opposite way from
+        // where cadWorker.js's buildExtrude (which uses replicad's real XZ plane)
+        // actually builds the solid — same bug class as workPlaneToFacePlaneBasisPx.
+        const worldNormals = { XY:[0,0,1], XZ:[0,-1,0], YZ:[1,0,0] }
         ;[nx,ny,nz] = worldNormals[planeId] || [0,0,1]
       }
       // Project origin and origin+normal to screen to get direction
@@ -1108,14 +1581,51 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       return new Promise(resolve => { tween.onDone = resolve })
     },
 
+    /**
+     * Tweens to the fixed canonical isometric view (ISO_VIEW) — always the
+     * same corner angle, regardless of what the camera was doing before.
+     * This is what the toolbar's ISO button calls; it's a peer of
+     * snapToPlane('XY'/'XZ'/'YZ'), not a "go back" — for that, see
+     * restoreSavedView() below.
+     */
     snapToIsometric() {
       const s=stateRef.current; if (!s) return Promise.resolve()
       const {camera,controls,tween}=s
 
-      // Fall back to a default isometric-ish view if nothing was saved
-      const toPos = s.savedPos ?? new THREE.Vector3(400, -400, 400)
-      const toUp  = s.savedUp  ?? new THREE.Vector3(0, 0, 1)
-      const toTgt = s.savedTgt ?? new THREE.Vector3(0, 0, 0)
+      s.savedPos = camera.position.clone()
+      s.savedUp  = camera.up.clone()
+      s.savedTgt = controls.target.clone()
+
+      controls.enabled = false
+
+      tween.fromPos.copy(camera.position)
+      tween.fromUp .copy(camera.up)
+      tween.fromTgt.copy(controls.target)
+      tween.toPos  .copy(ISO_VIEW.position)
+      tween.toUp   .copy(ISO_VIEW.up)
+      tween.toTgt  .copy(ISO_VIEW.target)
+      tween.startMs = performance.now()
+      tween.active  = true
+
+      return new Promise(resolve => { tween.onDone = resolve })
+    },
+
+    /**
+     * Tweens back to whatever camera state was saved by the last snapToPlane/
+     * snapToFace/snapToIsometric call — used after finishing or canceling a
+     * sketch/extrude flow to return exactly where the user was, rather than
+     * forcing a fixed view. Falls back to a reasonable default if nothing was
+     * ever saved (e.g. fresh load). This used to be named snapToIsometric()
+     * itself, which is why the toolbar's actual ISO button looked broken —
+     * it was calling "go back to wherever I was" instead of "go to isometric."
+     */
+    restoreSavedView() {
+      const s=stateRef.current; if (!s) return Promise.resolve()
+      const {camera,controls,tween}=s
+
+      const toPos = s.savedPos ?? ISO_VIEW.position
+      const toUp  = s.savedUp  ?? ISO_VIEW.up
+      const toTgt = s.savedTgt ?? ISO_VIEW.target
 
       controls.enabled = false
 

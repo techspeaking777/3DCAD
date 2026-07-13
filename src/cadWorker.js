@@ -1,8 +1,36 @@
 import opencascade from 'replicad-opencascadejs/src/replicad_single.js'
 import opencascadeWasm from 'replicad-opencascadejs/src/replicad_single.wasm?url'
-import { setOC, Sketcher, Plane, makePlane, sketchCircle } from 'replicad'
+import { setOC, Sketcher, Plane, makePlane, sketchCircle, getOC, cast, localGC } from 'replicad'
 
 const SCALE = 2
+// Tolerance (mm) for matching a picked screen point to the actual OCC edge —
+// generous enough for mesh-tessellation slop, tight enough to avoid grabbing
+// a neighboring edge. Shared by the fillet3d handler and STL export's fallback replay.
+const EDGE_PICK_TOL = 0.75
+// Fuzzy tolerance (mm) for boolean fuse — a face-sketched boss meant to sit
+// flush on another solid's face can end up a hair's-width off (0.01-0.5mm)
+// due to floating-point round-tripping through the sketch's mm<->px
+// conversions. Plain BRepAlgoAPI_Fuse treats that as "not touching" and
+// silently returns a Compound of two still-separate bodies instead of one
+// merged Solid — SetFuzzyValue tells OCC to treat gaps within this tolerance
+// as coincident, same intent as buildExtrude's cut-side OVH protrusion.
+const FUSE_FUZZY_TOL = 0.5
+
+// Fuse two shapes with a fuzzy tolerance so near-coincident (but not exactly
+// touching) faces still merge into one Solid instead of silently degrading to
+// a Compound of two disjoint bodies — see FUSE_FUZZY_TOL above.
+function fuseTolerant(a, b) {
+  const [r, gc] = localGC()
+  const oc = getOC()
+  const progress = r(new oc.Message_ProgressRange_1())
+  const op = r(new oc.BRepAlgoAPI_Fuse_3(a.wrapped, b.wrapped, progress))
+  op.SetFuzzyValue(FUSE_FUZZY_TOL)
+  op.Build(progress)
+  op.SimplifyResult(true, true, 1e-3)
+  const result = cast(op.Shape())
+  gc()
+  return result
+}
 
 let ocReady = false
 async function initOC() {
@@ -26,21 +54,30 @@ self.onmessage = async function(e) {
   const { type, id, params } = e.data
   try {
     if (type==='exportSTL') {
-      // Each entry in params.solids is one top-level extrude body (its cutouts
+      // Each entry in params.solids is one top-level solid (its cutouts/fillets
       // already baked in). Prefer the shapeStore's current cached shape (fast,
-      // and reflects the live state exactly); rebuild from base+cuts only if
+      // and reflects the live state exactly); rebuild from base+ops only if
       // the cache doesn't have it — e.g. after a fresh load with no edits yet.
-      const shapes = params.solids.map(({ solidId, base, cuts }) => {
+      const shapes = params.solids.map(({ solidId, base, ops }) => {
         let shape = shapeStore.get(solidId)
         if (!shape) {
-          shape = buildExtrude(base)
-          for (const cut of cuts) shape = shape.cut(buildExtrude({ ...cut, isCut: true }))
+          shape = buildBase(base)
+          for (const op of ops) {
+            if (op.type === 'fillet') {
+              shape = shape.fillet(op.radius, e => e.either(
+                op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
+              ))
+            } else {
+              const cut = op.params
+              shape = shape.cut(cut.axis ? buildRevolve(cut) : buildExtrude({ ...cut, isCut: true }))
+            }
+          }
         }
         return shape
       })
       if (shapes.length === 0) throw new Error('No solids to export')
       let fused = shapes[0]
-      for (let i = 1; i < shapes.length; i++) fused = fused.fuse(shapes[i])
+      for (let i = 1; i < shapes.length; i++) fused = fuseTolerant(fused, shapes[i])
       // Same tolerances used for the on-screen render mesh elsewhere in this
       // file, so the printed geometry matches what was previewed.
       const blob = fused.blobSTL({ tolerance:0.05, angularTolerance:30, binary: true })
@@ -55,16 +92,37 @@ self.onmessage = async function(e) {
     } else if (type==='revolve') {
       shape = buildRevolve(params)
       if (params.solidId) shapeStore.set(params.solidId, shape)
-    } else if (type==='fillet') {
-      shape = buildFillet(params)
+    } else if (type==='loft') {
+      shape = buildLoft(params)
       if (params.solidId) shapeStore.set(params.solidId, shape)
+    } else if (type==='fillet3d') {
+      // Edge-pick fillet: applies to whatever this solid currently looks like
+      // (shapeStore holds cuts/prior fillets already baked in). edgePoints is
+      // an array of [x,y,z] mm points, each near a picked edge — replicad's
+      // EdgeFinder does the real edge lookup, we just need to be close enough
+      // (see EDGE_PICK_TOL). One edge is just a 1-element array — same path,
+      // no separate single-edge code needed.
+      let base = shapeStore.get(params.solidId)
+      if (!base) {
+        if (!params.base) throw new Error(`Fillet-MISS: base not in store and no fallback params`)
+        console.warn('[cadWorker] shapeStore miss — rebuilding base from params')
+        base = buildBase(params.base)
+      }
+      try {
+        shape = base.fillet(params.radius, e => e.either(
+          params.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
+        ))
+      } catch(e) {
+        throw new Error(`Fillet failed: ${e.message}`)
+      }
+      shapeStore.set(params.solidId, shape)
     } else if (type==='subtract') {
       let base = shapeStore.get(params.baseSolidId)
       const fromStore = !!base
       if (!base) {
         if (!params.base) throw new Error(`Step1-MISS: base not in store and no fallback params`)
         console.warn('[cadWorker] shapeStore miss — rebuilding base from params')
-        try { base = buildExtrude(params.base) }
+        try { base = buildBase(params.base) }
         catch(e) { throw new Error(`Step1-BASE: ${e.message} | planeId=${params.base.planeId} dir=${params.base.direction}`) }
       }
       let cutShape
@@ -86,6 +144,77 @@ self.onmessage = async function(e) {
         throw new Error(`Step3-BOOL: ${e.message} | store=${fromStore}`)
       }
       shapeStore.set(params.baseSolidId, shape)
+    } else if (type==='mirrorShape') {
+      // Mirroring a whole solid across a plane is this app's first
+      // cross-solid dependency (a mirror-solid depends on its SOURCE solid's
+      // current shape) — nothing guarantees shapeStore[sourceSolidId] is
+      // fresh at rebuild time (fresh page load, or a dependent-mirror
+      // rebuild that didn't just touch the source), so always cold-rebuild
+      // the source's full chain from params rather than trusting the cache —
+      // the same safety fallback buildBase already provides on a fillet3d/
+      // subtract cache MISS, just made unconditional here since there's no
+      // "hot path" to prefer in the first place.
+      let base = buildBase(params.base)
+      for (const op of params.ops || []) {
+        if (op.type === 'fillet') {
+          base = base.fillet(op.radius, e => e.either(
+            op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
+          ))
+        } else {
+          base = base.cut(op.params.axis ? buildRevolve(op.params) : buildExtrude({ ...op.params, isCut: true }))
+        }
+      }
+      // Work-plane mirror: pass the PlaneName string directly — replicad's
+      // mirror() accepts 'XY'/'XZ'/'YZ' natively, and this app's work planes
+      // always pass through the world origin (see WorkPlanes.js), so no
+      // origin override is needed. Face mirror: build a real Plane the same
+      // way buildProfilePlane's own planeId==='face' branch does.
+      const mirrorPlane = params.plane.kind === 'face'
+        ? new Plane(params.plane.origin, params.plane.uAxis, params.plane.normal)
+        : params.plane.planeId
+      shape = base.mirror(mirrorPlane)
+      if (params.solidId) shapeStore.set(params.solidId, shape)
+    } else if (type==='joinShapes') {
+      // Boolean-union several existing solids into one. Unlike mirrorShape,
+      // trusting shapeStore here is safe rather than a shortcut: every member
+      // is a currently-rendered, up-to-date solid at the moment of joining
+      // (members can't be edited while locked/joined — see App3D.jsx — so
+      // there's no "went stale after the fact" case to guard against). Same
+      // shapeStore-or-cold-rebuild-from-params fallback exportSTL already
+      // uses for its own multi-solid fuse, reused here per member.
+      const shapes = params.members.map(m => {
+        let s = shapeStore.get(m.solidId)
+        if (!s) {
+          s = buildBase(m.base)
+          for (const op of m.ops || []) {
+            if (op.type === 'fillet') {
+              s = s.fillet(op.radius, e => e.either(
+                op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
+              ))
+            } else {
+              s = s.cut(op.params.axis ? buildRevolve(op.params) : buildExtrude({ ...op.params, isCut: true }))
+            }
+          }
+        }
+        return s
+      })
+      if (shapes.length < 2) throw new Error('Need at least 2 shapes to join')
+      shape = shapes.reduce((a, b) => fuseTolerant(a, b))
+      // A fuse can come back wrapped in a Compound container even when it
+      // DID successfully weld into one continuous body — cast() only looks
+      // at the outer shape type, not whether it holds one Solid or several.
+      // Count the actual TopoDS_SOLID sub-shapes: >1 means the members are
+      // still genuinely disjoint (didn't touch/overlap even within
+      // FUSE_FUZZY_TOL) and were just bundled together, not welded — surface
+      // that clearly instead of silently handing back a "join" that would
+      // look merged in the feature tree but never actually weld (e.g. a
+      // later fillet across the "seam" would apply to one member's edge in
+      // isolation and visibly not blend into the other body).
+      const solidCount = [...shape._iterTopo('solid')].length
+      if (solidCount > 1) {
+        throw new Error('The selected bodies don’t touch or overlap — move them so they intersect or share a face before joining.')
+      }
+      if (params.solidId) shapeStore.set(params.solidId, shape)
     } else {
       throw new Error(`Unknown: ${type}`)
     }
@@ -154,6 +283,90 @@ function buildProfilePlane(planeId, offsetMm, normal, origin, uAxis) {
   return makePlane(planeId || 'XY', offsetMm)
 }
 
+// pt (sketch px, Y-down) → plane-local mm (Y-up) — same convention as toRep().
+function toMm(p) { return [p.x/SCALE, -p.y/SCALE] }
+
+// Converts a Catmull-Rom control-point sequence into a list of cubic Bezier
+// segments ({start, end, cp1, cp2}, sketch-px units) — an EXACT conversion,
+// not an approximation: Catmull-Rom is a special case of cubic Hermite
+// interpolation with tangent T_i = (P_{i+1}-P_{i-1})/2 at each point, and the
+// standard Hermite→Bezier control points are P_i + T_i/3, P_{i+1} - T_{i+1}/3.
+// Mirrors the neighbor-extension convention splineMath.js's sampleSpline uses
+// for open vs. closed curves (kept self-contained here rather than imported —
+// this worker already duplicates small constants like SCALE rather than
+// cross-importing from src/tools/*, avoiding any risk of pulling that
+// module's own dependency chain into the worker's bundle).
+function catmullRomToBezierSegments(pts, closed) {
+  const n = pts.length
+  if (n < 2) return []
+  const ext = closed
+    ? [pts[n-1], ...pts, pts[0], pts[1]]
+    : [pts[0],   ...pts, pts[n-1]]
+  const segCount = closed ? n : n - 1
+  const segments = []
+  for (let i = 0; i < segCount; i++) {
+    const p0 = ext[i], p1 = ext[i+1], p2 = ext[i+2], p3 = ext[i+3]
+    const t1 = { x: (p2.x-p0.x)/2, y: (p2.y-p0.y)/2 }
+    const t2 = { x: (p3.x-p1.x)/2, y: (p3.y-p1.y)/2 }
+    segments.push({
+      start: p1, end: p2,
+      cp1: { x: p1.x + t1.x/3, y: p1.y + t1.y/3 },
+      cp2: { x: p2.x - t2.x/3, y: p2.y - t2.y/3 },
+    })
+  }
+  return segments
+}
+
+// Emits one real curve — a chain of cubic Beziers reproducing the original
+// hand-drawn spline exactly (see catmullRomToBezierSegments) — onto a
+// Sketcher already positioned at controlPoints[0].
+function emitBezierChain(sketcher, controlPoints) {
+  for (const { start, end, cp1, cp2 } of catmullRomToBezierSegments(controlPoints, false)) {
+    // Degenerate guard: two control points placed on top of each other would
+    // produce a near-zero-length edge OCC can choke on — same defensive
+    // spirit as dedupeRep. 0.01px ≈ dedupeRep's 0.005mm epsilon (×SCALE).
+    if (Math.hypot(end.x-start.x, end.y-start.y) < 0.01) sketcher.lineTo(toMm(end))
+    else sketcher.cubicBezierCurveTo(toMm(end), toMm(cp1), toMm(cp2))
+  }
+}
+
+// Emits one real circular-arc edge onto a Sketcher already positioned at the
+// arc's start point, using replicad's three-point arc (start is implicit —
+// wherever the sketcher's pointer already is — end + a point on the arc
+// unambiguously define the same sweep direction the polygon-sampling
+// profile-detection code walked).
+function emitArc(sketcher, seg) {
+  const midAngle = (seg.startAngle + seg.endAngle) / 2
+  const endPt = { x: seg.cx + Math.cos(seg.endAngle)*seg.r, y: seg.cy + Math.sin(seg.endAngle)*seg.r }
+  const midPt = { x: seg.cx + Math.cos(midAngle)*seg.r,     y: seg.cy + Math.sin(midAngle)*seg.r }
+  sketcher.threePointsArcTo(toMm(endPt), toMm(midPt))
+}
+
+// Mixed profile: walks `pts` by index, switching between straight .lineTo()
+// calls and real curve commands (spline/arc) wherever a curveSegments entry
+// says so — see detectProfiles() in extrudeMath.js for how these get
+// attached. `i` jumps forward by a segment's `count` after emitting its
+// curve, skipping the now-redundant polygon-sampled points for that span.
+function buildMixedProfile(sketcher, pts, curveSegments) {
+  const segs = [...curveSegments].sort((a,b)=>a.startIdx-b.startIdx)
+  const n = pts.length
+  sketcher.movePointerTo(toMm(pts[0]))
+  let i = 0, segPtr = 0
+  while (i < n) {
+    const seg = (segPtr < segs.length && segs[segPtr].startIdx === i) ? segs[segPtr] : null
+    if (seg) {
+      if (seg.type === 'spline') emitBezierChain(sketcher, seg.controlPoints)
+      else if (seg.type === 'arc') emitArc(sketcher, seg)
+      i = seg.startIdx + seg.count
+      segPtr++
+    } else {
+      i++
+      if (i < n) sketcher.lineTo(toMm(pts[i]))
+    }
+  }
+  return sketcher.close()
+}
+
 function makeProfile(pts, planeId, offsetMm, normal, origin, uAxis, circle=null) {
   if (circle) {
     // True circular curve — a plain circle/hole should have 2 rim edges + 1 seam,
@@ -175,6 +388,13 @@ function makeProfile(pts, planeId, offsetMm, normal, origin, uAxis, circle=null)
   const plane = buildProfilePlane(planeId, offsetMm, normal, origin, uAxis)
   const sketcher = new Sketcher(plane)
   plane.delete()
+
+  // Real curve segments (splines/arcs — see detectProfiles in extrudeMath.js)
+  // build a mixed sketch of straight lines + real curves; everything else
+  // (plain line/arc-only profiles) keeps the exact original polygon path.
+  if (pts.curveSegments && pts.curveSegments.length > 0) {
+    return buildMixedProfile(sketcher, pts, pts.curveSegments)
+  }
 
   const rep = dedupeRep(toRep(pts))
   sketcher.movePointerTo(rep[0])
@@ -212,6 +432,26 @@ function buildRevolve({ pts, planeId, normal, origin, uAxis, circle=null, axis, 
   return sketch.revolve(axisDir, { origin: axisOrigin, angle: angleDeg })
 }
 
+/**
+ * Loft a solid through 2+ profiles sketched on parallel planes sharing the
+ * same normal/uAxis — only the offset along the normal differs between them
+ * (App3D.jsx enforces this: every loft profile is built from one shared
+ * basis + a per-profile offsetMm, see buildLoftFacePlane). Each profile is
+ * built via the SAME makeProfile() extrude/revolve already use (handles
+ * true circles, mixed line/arc/spline curves, and plain polygons
+ * identically) — the only new step is chaining them with replicad's
+ * Sketch.loftWith(), which wraps OCC's BRepOffsetAPI_ThruSections directly.
+ * ruled=false (smooth blend) is the default; ruled=true gives a faceted
+ * transition at each intermediate profile instead — only visible with 3+
+ * profiles, since 2 profiles loft identically either way.
+ */
+function buildLoft({ profiles, normal, origin, uAxis, ruled=false }) {
+  if (!profiles || profiles.length < 2) throw new Error('Loft needs at least 2 profiles')
+  const sketches = profiles.map(p => makeProfile(p.pts, 'face', p.offsetMm, normal, origin, uAxis, p.circle))
+  const [first, ...rest] = sketches
+  return first.loftWith(rest, { ruled })
+}
+
 function buildExtrude({ pts, depthMm, planeId, direction='both',
                         normal, origin, uAxis, vAxis, isCut=false, circle=null }) {
   if (!circle && (!pts||pts.length<3)) throw new Error('Need ≥3 pts')
@@ -241,9 +481,14 @@ function buildExtrude({ pts, depthMm, planeId, direction='both',
   return makeProfile(pts, planeId, -half, normal, origin, uAxis, circle).extrude(depthMm)
 }
 
-function buildFillet({ filletRadius=2, ...rest }) {
-  const solid = buildExtrude(rest)
-  try { return solid.fillet(filletRadius) }
-  catch(e) { console.warn('Fillet failed:', e.message); return solid }
+// Rebuilds a solid's OWN base shape (no cuts/fillets applied) from its stored
+// params — used whenever the worker's shapeStore doesn't have a solid cached
+// (e.g. right after a fresh page load). `profiles` (array) means Loft;
+// `axis` means Revolve, not a linear extrude — same discriminators already
+// used everywhere else a base gets cold-rebuilt (cuts, fillets, STL export,
+// Join member fallback), so Loft slots into all of them for free.
+function buildBase(params) {
+  if (params.profiles) return buildLoft(params)
+  return params.axis ? buildRevolve(params) : buildExtrude(params)
 }
 

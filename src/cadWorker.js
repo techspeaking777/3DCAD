@@ -1,6 +1,6 @@
 import opencascade from 'replicad-opencascadejs/src/replicad_single.js'
 import opencascadeWasm from 'replicad-opencascadejs/src/replicad_single.wasm?url'
-import { setOC, Sketcher, Plane, makePlane, sketchCircle, getOC, cast, localGC } from 'replicad'
+import { setOC, Sketcher, Plane, makePlane, sketchCircle, getOC, cast, localGC, FaceFinder, Vector } from 'replicad'
 
 const SCALE = 2
 // Tolerance (mm) for matching a picked screen point to the actual OCC edge —
@@ -82,6 +82,72 @@ self.onmessage = async function(e) {
       // file, so the printed geometry matches what was previewed.
       const blob = fused.blobSTL({ tolerance:0.05, angularTolerance:30, binary: true })
       self.postMessage({ type:'result', id, stlBlob: blob })
+      return
+    }
+
+    if (type==='exportFaceDXF') {
+      // Reads the picked face's REAL OCC topology (outerWire + every
+      // innerWire/hole) instead of reconstructing geometry from the
+      // tessellated render mesh — exact curves, and holes come along for
+      // free since OCC already separates them from the outer boundary
+      // (unlike the render-mesh-based "Include From Face" tool, which has to
+      // reverse-engineer circles/arcs from boundary-edge chains and can miss
+      // internal loops).
+      let base = shapeStore.get(params.solidId)
+      if (!base) {
+        if (!params.base) throw new Error('exportFaceDXF-MISS: base not in store and no fallback params')
+        base = buildBase(params.base)
+      }
+      const face = new FaceFinder().withinDistance(EDGE_PICK_TOL, params.point).find(base, { unique: true })
+      const normal = face.normalAt()
+      // Stable local (u,v) frame for a flat projection — Gram-Schmidt a world
+      // axis against the normal. No "which edge is bottom" concern the way
+      // FacePlane.js's sketch-orientation logic has (see faceHitToPlane's own
+      // fallback branch, same technique) — a flat DXF export just needs ANY
+      // consistent frame, not a user-meaningful orientation.
+      const refAxis = Math.abs(normal.x) < 0.9 ? new Vector([1, 0, 0]) : new Vector([0, 0, 1])
+      const uAxis = refAxis.sub(normal.multiply(refAxis.dot(normal))).normalize()
+      const vAxis = normal.cross(uAxis).normalize()
+      const origin = face.center
+      const project = v => { const rel = v.sub(origin); return { x: rel.dot(uAxis), y: rel.dot(vAxis) } }
+
+      const lines = [], circles = [], arcs = []
+      // face.outerWire()/innerWires() each DELETE their receiver as a side
+      // effect (replicad's "consuming" idiom — see Face.outerWire()/
+      // innerWires() in replicad.js), so calling both directly on the same
+      // `face` would use-after-delete on the second call. Clone for the
+      // outer-wire call so the original `face` survives for innerWires().
+      const wires = [face.clone().outerWire(), ...face.innerWires()]
+      for (const wire of wires) {
+        for (const edge of wire.edges) {
+          if (edge.geomType === 'CIRCLE') {
+            // No convenience center/radius getter on Edge/Curve — drop to the
+            // raw OCC circle adaptor, same "replicad doesn't cover this, use
+            // .wrapped directly" pattern already used throughout this file.
+            const circ = edge.curve.wrapped.Circle()
+            const loc = circ.Location()
+            const center = project(new Vector([loc.X(), loc.Y(), loc.Z()]))
+            const r = circ.Radius()
+            if (edge.isClosed) {
+              circles.push({ cx: center.x, cy: center.y, r })
+            } else {
+              const sp = project(edge.startPoint), ep = project(edge.endPoint)
+              arcs.push({
+                cx: center.x, cy: center.y, r,
+                startAngle: Math.atan2(sp.y - center.y, sp.x - center.x),
+                endAngle:   Math.atan2(ep.y - center.y, ep.x - center.x),
+              })
+            }
+          } else {
+            // Any other curve type (LINE, or an unexpected BEZIER/BSPLINE
+            // edge) — a straight chord between endpoints is a reasonable
+            // fallback for DXF export.
+            const sp = project(edge.startPoint), ep = project(edge.endPoint)
+            lines.push({ x1: sp.x, y1: sp.y, x2: ep.x, y2: ep.y })
+          }
+        }
+      }
+      self.postMessage({ type:'result', id, dxfData: { lines, circles, arcs } })
       return
     }
 
@@ -439,17 +505,51 @@ function buildRevolve({ pts, planeId, normal, origin, uAxis, circle=null, axis, 
  * basis + a per-profile offsetMm, see buildLoftFacePlane). Each profile is
  * built via the SAME makeProfile() extrude/revolve already use (handles
  * true circles, mixed line/arc/spline curves, and plain polygons
- * identically) — the only new step is chaining them with replicad's
- * Sketch.loftWith(), which wraps OCC's BRepOffsetAPI_ThruSections directly.
+ * identically).
+ *
+ * Built as N-1 PAIRWISE loftWith() calls (profile 1→2, 2→3, ...) fused
+ * together, rather than one loftWith() call across every profile at once.
+ * With 3+ profiles, a single all-at-once ThruSections call lets OCC's
+ * solver decide how to blend across every section together, which gets
+ * increasingly unpredictable/uncontrollable the more profiles you add —
+ * exactly the complaint that motivated this change. Segmenting means each
+ * individual loft only ever has to blend between exactly two profiles (the
+ * same reasoning that made "Include From Face" chaining segments by hand
+ * useful — see that feature — just done automatically here). Each
+ * segment's shared boundary is the literal same profile data on both
+ * sides, so fusing them back together with fuseTolerant (same helper
+ * joinShapes uses) is a full-face-coincident union, one of the more robust
+ * cases for OCC's boolean fuse rather than a risky one. For exactly 2
+ * profiles this reduces to one segment and no fuse call — byte-identical
+ * to the single-loftWith()-call behavior this replaces.
+ *
+ * Known trade-off: positions match exactly at each segment join (they
+ * share a real boundary), but the surface's tangent/slope isn't
+ * guaranteed to match there — a possible subtle kink at intermediate
+ * profiles that a single continuous loft wouldn't have. Not addressed
+ * here; flagged as acceptable given the alternative (the old unpredictable
+ * all-at-once blend) was the actual problem being solved.
+ *
  * ruled=false (smooth blend) is the default; ruled=true gives a faceted
- * transition at each intermediate profile instead — only visible with 3+
- * profiles, since 2 profiles loft identically either way.
+ * transition within each segment instead — passed through unchanged to
+ * every pairwise loftWith() call.
  */
 function buildLoft({ profiles, normal, origin, uAxis, ruled=false }) {
   if (!profiles || profiles.length < 2) throw new Error('Loft needs at least 2 profiles')
-  const sketches = profiles.map(p => makeProfile(p.pts, 'face', p.offsetMm, normal, origin, uAxis, p.circle))
-  const [first, ...rest] = sketches
-  return first.loftWith(rest, { ruled })
+  // A fresh Sketch per (segment, side) rather than one Sketch array reused
+  // across segments — every middle profile participates in TWO loftWith()
+  // calls (end of one segment, start of the next), and Sketch.loftWith()
+  // consumes/invalidates its own wire internally, so sharing one Sketch
+  // instance across two calls throws "This object has been deleted" on the
+  // second use. Rebuilding is cheap (makeProfile is pure geometry, no OCC
+  // solve) and keeps every loftWith() call working with an object nobody
+  // else has touched.
+  const buildSketch = p => makeProfile(p.pts, 'face', p.offsetMm, normal, origin, uAxis, p.circle)
+  const segments = []
+  for (let i = 0; i < profiles.length - 1; i++) {
+    segments.push(buildSketch(profiles[i]).loftWith([buildSketch(profiles[i + 1])], { ruled }))
+  }
+  return segments.length === 1 ? segments[0] : segments.reduce((a, b) => fuseTolerant(a, b))
 }
 
 function buildExtrude({ pts, depthMm, planeId, direction='both',

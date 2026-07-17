@@ -1,25 +1,6 @@
 // ToolIcons.jsx — pixel-art sprite icons
 
-import mirrorLoftIconSheet from '../assets/mirror-loft-icon.png'
-
 const P = ({x,y,c,s=3}) => <rect x={x} y={y} width={s} height={s} fill={c}/>
-
-// Crops one cell out of a raster sprite sheet for use INSIDE an <I> icon's own
-// 0..48 viewBox — position/scale the full image so only the desired cell
-// lands inside the viewBox; SVG clips everything outside it automatically,
-// no clipPath needed (same trick App3D.jsx uses via CSS background-position
-// for the solid-op/view-op sprite sheets, just done with an <image> element
-// here since these icons render inside a shared <svg>, not a plain <div>).
-function SpriteIcon({ sheet, sheetW, sheetH, cell, targetH }) {
-  const scale = targetH / cell.h
-  const dispW = cell.w * scale
-  const x = (48 - dispW) / 2 - cell.x * scale
-  const y = (48 - targetH) / 2 - cell.y * scale
-  return (
-    <image href={sheet} x={x} y={y} width={sheetW*scale} height={sheetH*scale}
-      style={{imageRendering:'pixelated'}}/>
-  )
-}
 
 // Pixel-art icon wrapper: 48×48 canvas + 14px label area = 48×62 total
 const I = ({children,label,active}) => (
@@ -395,14 +376,25 @@ export function IconMove({ active }) {
 }
 
 // ── MIRROR ────────────────────────────────────────────────────────────────────
-const MIRROR_LOFT_SHEET_W = 1536, MIRROR_LOFT_SHEET_H = 1024
-const MIRROR_CELL = { x:146, y:283, w:535, h:519 }
-
 export function IconMirror({ active }) {
   return (
     <I label="MIRROR" active={active}>
-      <SpriteIcon sheet={mirrorLoftIconSheet} sheetW={MIRROR_LOFT_SHEET_W} sheetH={MIRROR_LOFT_SHEET_H}
-        cell={MIRROR_CELL} targetH={44}/>
+      <P x={18} y={0} c="#050505"/><P x={21} y={0} c="#050505"/><P x={24} y={0} c="#050505"/><P x={27} y={0} c="#050505"/>
+      <P x={15} y={3} c="#050505"/><P x={18} y={3} c="#ffd500"/><P x={21} y={3} c="#ffd500"/><P x={24} y={3} c="#ffd500"/><P x={27} y={3} c="#ffd500"/><P x={30} y={3} c="#050505"/>
+      <P x={12} y={6} c="#050505"/><P x={15} y={6} c="#ffd500"/><P x={18} y={6} c="#7ef7fb"/><P x={21} y={6} c="#7ef7fb"/><P x={24} y={6} c="#7ef7fb"/><P x={27} y={6} c="#7ef7fb"/><P x={30} y={6} c="#ffd500"/><P x={33} y={6} c="#050505"/>
+      <P x={9} y={9} c="#050505"/><P x={12} y={9} c="#ffd500"/><P x={15} y={9} c="#7ef7fb"/><P x={18} y={9} c="#7ef7fb"/><P x={21} y={9} c="#7ef7fb"/><P x={24} y={9} c="#7ef7fb"/><P x={27} y={9} c="#7ef7fb"/><P x={30} y={9} c="#dbfeff"/><P x={33} y={9} c="#ffd500"/><P x={36} y={9} c="#050505"/>
+      <P x={9} y={12} c="#050505"/><P x={12} y={12} c="#ffd500"/><P x={15} y={12} c="#7ef7fb"/><P x={18} y={12} c="#7ef7fb"/><P x={21} y={12} c="#7ef7fb"/><P x={24} y={12} c="#7ef7fb"/><P x={27} y={12} c="#dbfeff"/><P x={30} y={12} c="#7ef7fb"/><P x={33} y={12} c="#ffd500"/><P x={36} y={12} c="#050505"/>
+      <P x={9} y={15} c="#050505"/><P x={12} y={15} c="#ffd500"/><P x={15} y={15} c="#7ef7fb"/><P x={18} y={15} c="#7ef7fb"/><P x={21} y={15} c="#7ef7fb"/><P x={24} y={15} c="#dbfeff"/><P x={27} y={15} c="#7ef7fb"/><P x={30} y={15} c="#dbfeff"/><P x={33} y={15} c="#ffd500"/><P x={36} y={15} c="#050505"/>
+      <P x={9} y={18} c="#050505"/><P x={12} y={18} c="#ffd500"/><P x={15} y={18} c="#7ef7fb"/><P x={18} y={18} c="#7ef7fb"/><P x={21} y={18} c="#dbfeff"/><P x={24} y={18} c="#7ef7fb"/><P x={27} y={18} c="#dbfeff"/><P x={30} y={18} c="#dbfeff"/><P x={33} y={18} c="#ffd500"/><P x={36} y={18} c="#050505"/>
+      <P x={9} y={21} c="#050505"/><P x={12} y={21} c="#ffd500"/><P x={15} y={21} c="#7ef7fb"/><P x={18} y={21} c="#dbfeff"/><P x={21} y={21} c="#7ef7fb"/><P x={24} y={21} c="#dbfeff"/><P x={27} y={21} c="#dbfeff"/><P x={30} y={21} c="#7ef7fb"/><P x={33} y={21} c="#ffd500"/><P x={36} y={21} c="#050505"/>
+      <P x={12} y={24} c="#050505"/><P x={15} y={24} c="#ffd500"/><P x={18} y={24} c="#7ef7fb"/><P x={21} y={24} c="#dbfeff"/><P x={24} y={24} c="#dbfeff"/><P x={27} y={24} c="#7ef7fb"/><P x={30} y={24} c="#ffd500"/><P x={33} y={24} c="#050505"/>
+      <P x={15} y={27} c="#050505"/><P x={18} y={27} c="#ffd500"/><P x={21} y={27} c="#ffd500"/><P x={24} y={27} c="#ffd500"/><P x={27} y={27} c="#ffd500"/><P x={30} y={27} c="#050505"/>
+      <P x={18} y={30} c="#050505"/><P x={21} y={30} c="#d6b300"/><P x={24} y={30} c="#d6b300"/><P x={27} y={30} c="#050505"/>
+      <P x={18} y={33} c="#050505"/><P x={21} y={33} c="#ffd500"/><P x={24} y={33} c="#ffd500"/><P x={27} y={33} c="#050505"/>
+      <P x={18} y={36} c="#050505"/><P x={21} y={36} c="#ffd500"/><P x={24} y={36} c="#ffd500"/><P x={27} y={36} c="#050505"/>
+      <P x={18} y={39} c="#050505"/><P x={21} y={39} c="#ffd500"/><P x={24} y={39} c="#ffd500"/><P x={27} y={39} c="#050505"/>
+      <P x={18} y={42} c="#050505"/><P x={21} y={42} c="#ffd500"/><P x={24} y={42} c="#ffd500"/><P x={27} y={42} c="#050505"/>
+      <P x={21} y={45} c="#050505"/><P x={24} y={45} c="#050505"/>
     </I>
   )
 }

@@ -176,12 +176,24 @@ export function faceHitToPlane(hit, overrideEdge = null) {
   }
 
   const plane = new FacePlane(origin, normal, uAxis, vAxis)
-  try {
-    plane.refSegments = loopsToSketchSegments(boundaryLoops, plane)
-  } catch (err) {
-    // Snap-to-edge is a best-effort bonus — never let it break face sketching/extruding.
-    console.warn('loopsToSketchSegments failed:', err)
-    plane.refSegments = []
+  // Reference geometry is a best-effort bonus (snap targets + the dashed
+  // outline + Include From Face) — never let a failure here break face
+  // sketching/extruding itself. Each loop becomes exactly one of: a whole
+  // circle (refCircles), or a mix of collapsed straight runs (refSegments)
+  // and detected arcs (refArcs) — see segmentLoopIntoPrimitives.
+  plane.refSegments = []
+  plane.refCircles = []
+  plane.refArcs = []
+  for (const loop of boundaryLoops) {
+    try {
+      const circle = fitCircleIfRound(loop, plane)
+      if (circle) { plane.refCircles.push(circle); continue }
+      const { lines, arcs } = segmentLoopIntoPrimitives(loop, plane)
+      plane.refSegments.push(...lines)
+      plane.refArcs.push(...arcs)
+    } catch (err) {
+      console.warn('face reference-geometry classification failed for one loop:', err)
+    }
   }
   return plane
 }
@@ -325,6 +337,276 @@ function extractFaceBoundaryLoops3D(hit, normal, epsilon=0.05) {
     loops.push(loop)
   }
   return loops
+}
+
+// Classifies a boundary loop as circular if every point sits within
+// `tolerance` (relative to the fitted radius) of a common centroid — true
+// for a tessellated OCC circular edge (a many-sided regular polygon), false
+// for a real straight-edged N-gon face (whose vertex-to-centroid distances
+// vary far more than that).
+//
+// minPoints is low (5) because this app's render/reference mesh is
+// tessellated coarsely — cadWorker.js's shape.mesh() uses angularTolerance:
+// 30°, so a real circular edge produces as few as ~6 boundary segments, not
+// the dozens a finer mesh would give. That means this test genuinely cannot
+// distinguish a coarsely-tessellated circle from a real, perfectly regular
+// hand-drawn hexagon of the same segment count — both have vertices
+// equidistant from their centroid by definition. Biased toward catching
+// every circle (the common case: bosses, holes, shafts) at the cost of an
+// occasional false-positive center snap on a deliberately regular polygon
+// face (rare, and a harmless extra snap point even when it happens).
+// Centroid + average-radius circle fit — no tolerance check, just the raw
+// fit. Only valid for a point set with reasonably full, symmetric coverage
+// around the true circle (errors average out) — that's true for a WHOLE
+// closed boundary loop (fitCircleIfRound, below), but badly wrong for a
+// small local arc segment covering just a slice of the circle (the centroid
+// of a few clustered points isn't anywhere near the true center) — use
+// fitCircleLeastSquares for that case instead (segmentLoopIntoPrimitives,
+// fitArcToRun).
+function fitCircleCentroid(pts) {
+  const cx = pts.reduce((s,p)=>s+p.x,0) / pts.length
+  const cy = pts.reduce((s,p)=>s+p.y,0) / pts.length
+  const dists = pts.map(p => Math.hypot(p.x-cx, p.y-cy))
+  const r = dists.reduce((s,d)=>s+d,0) / dists.length
+  return { cx, cy, r, dists }
+}
+
+// Proper least-squares circle fit (Kåsa method — linear least squares on
+// x²+y² = D·x + E·y + F, closed-form via a 3x3 normal-equation solve), used
+// wherever a small/local point set needs an accurate center — unlike
+// fitCircleCentroid's plain average, this is correct even for just 3-4
+// points covering a small arc slice. Returns null if the points are
+// (near-)colinear (no unique circle).
+function fitCircleLeastSquares(pts) {
+  const n = pts.length
+  let sx=0, sy=0, sxx=0, syy=0, sxy=0, sxz=0, syz=0, sz=0
+  for (const p of pts) {
+    const z = p.x*p.x + p.y*p.y
+    sx+=p.x; sy+=p.y; sxx+=p.x*p.x; syy+=p.y*p.y; sxy+=p.x*p.y
+    sxz+=p.x*z; syz+=p.y*z; sz+=z
+  }
+  const A = [[sxx,sxy,sx],[sxy,syy,sy],[sx,sy,n]]
+  const B = [sxz,syz,sz]
+  const det3 = m => m[0][0]*(m[1][1]*m[2][2]-m[1][2]*m[2][1]) - m[0][1]*(m[1][0]*m[2][2]-m[1][2]*m[2][0]) + m[0][2]*(m[1][0]*m[2][1]-m[1][1]*m[2][0])
+  const D0 = det3(A)
+  if (Math.abs(D0) < 1e-9) return null
+  const replaceCol = col => A.map((row,i) => row.map((v,j) => j===col ? B[i] : v))
+  const D = det3(replaceCol(0)) / D0
+  const E = det3(replaceCol(1)) / D0
+  const F = det3(replaceCol(2)) / D0
+  const cx = D/2, cy = E/2
+  const r2 = F + cx*cx + cy*cy
+  if (!(r2 > 0)) return null
+  return { cx, cy, r: Math.sqrt(r2) }
+}
+
+function fitCircleIfRound(loop, facePlane, tolerance = 0.03, minPoints = 5) {
+  if (loop.length < minPoints) return null
+  const pts = loop.map(p => facePlane.worldToSketch(p))
+  const { cx, cy, r, dists } = fitCircleCentroid(pts)
+  if (dists.some(d => Math.abs(d-r)/r > tolerance)) return null
+  return { cx, cy, r }
+}
+
+// Perpendicular distance from p to the infinite line through a,b (0 if a,b
+// coincide, falling back to plain distance-to-point).
+function distToLine(p, a, b) {
+  const len = Math.hypot(b.x-a.x, b.y-a.y)
+  if (len < 1e-9) return Math.hypot(p.x-a.x, p.y-a.y)
+  return Math.abs((b.x-a.x)*(a.y-p.y) - (a.x-p.x)*(b.y-a.y)) / len
+}
+
+// Splits a boundary loop into straight `lines` and circular `arcs` in
+// sketch space, for a loop that ISN'T one whole circle (fitCircleIfRound
+// already covers that) but isn't pure straight lines either — e.g. a slot
+// or rounded-rectangle face.
+//
+// Walks the loop incrementally, growing a "current run" of points and
+// testing each NEW point against the run's actual geometric fit (distance
+// to the run's line, or distance to its fitted circle) rather than
+// comparing local turning angles between neighboring vertices. An earlier
+// version tried turning-angle comparison and broke on the very case this
+// function exists for: a tangent-continuous line-to-arc transition (e.g. a
+// slot's straight side meeting its rounded end) has an inherent "half-step"
+// turning angle right at the seam — a discretized chord's direction always
+// differs from the true continuous tangent by about half one segment's
+// angle, no matter how fine the tessellation — so comparing raw angle
+// values at that vertex reliably misclassifies it. Testing actual
+// point-to-fit distance instead sidesteps that: a seam point measures as a
+// near-perfect fit to BOTH its neighboring line and its neighboring circle
+// (it's genuinely on both), so whichever run reaches it first correctly
+// absorbs it as a shared boundary point.
+//
+// A 3-point circle always technically exists unless the points are exactly
+// colinear, so telling a real tessellated arc segment from one sharp
+// polygon corner (checked first as its own 3-point "circle") needs a
+// second signal beyond "some circle fits": maxStepAngle rejects a
+// candidate circle whose points are spread too far apart angularly to be a
+// real coarse-tessellated curve at this app's mesh density (a handful of
+// degrees per segment — see fitCircleIfRound's tessellation comment) — a
+// rectangle's 90° corner fails this immediately, while even a fairly
+// tight-radius real fillet's few-degree steps pass easily.
+function segmentLoopIntoPrimitives(loop, facePlane, opts = {}) {
+  const { lineTol = 0.05, radiusTol = 0.04, maxStepAngle = 0.45, minArcPoints = 4 } = opts
+  const raw = loop.map(p => facePlane.worldToSketch(p))
+  // Drop a duplicated closing point (loop already returns to its start) so
+  // every entry below is a distinct vertex; the loop still closes
+  // implicitly from the last point back to the first.
+  const pts = raw.length > 1 && Math.hypot(raw[raw.length-1].x-raw[0].x, raw[raw.length-1].y-raw[0].y) < 1e-6
+    ? raw.slice(0, -1) : raw
+  const n = pts.length
+  if (n < 3) return { lines: [], arcs: [] }
+
+  const angleSpan = (fit, ptsIn) => {
+    const angles = ptsIn.map(p => Math.atan2(p.y-fit.cy, p.x-fit.cx))
+    let min = Math.min(...angles), max = Math.max(...angles)
+    // Two ways around a circle — use whichever span is smaller.
+    return Math.min(max - min, Math.PI*2 - (max - min))
+  }
+
+  const tryExtend = run => {
+    const p = run._next
+    if (run.pts.length < 2) return true   // always accept the 2nd point — mode still undetermined
+    if (run.mode === null) {
+      // Deciding 3rd point: colinear with the first two -> line. Otherwise,
+      // only accept as the start of an arc if the resulting 3-point circle's
+      // angular spread per step is small enough to be a real curve, not a
+      // sharp corner (see function comment).
+      const [a, b] = run.pts
+      // Scale to the incremental step (b -> p), not the a-b span — see the
+      // matching comment on the already-in-'line'-mode branch below (at this
+      // point a-b IS the only step so far, but the same "don't let a long
+      // first edge loosen the tolerance" reasoning still applies once this
+      // decision generalizes to a run whose first edge is itself long).
+      const stepLen = Math.max(1, Math.hypot(p.x-b.x, p.y-b.y))
+      if (distToLine(p, a, b) < lineTol * stepLen) { run.mode = 'line'; return true }
+      const fit = fitCircleLeastSquares([a, b, p])
+      // A near-but-not-quite-colinear 3-point set (just failed the colinear
+      // check above) fits a huge, nearly-degenerate circle whose angular
+      // span LOOKS small enough to pass the maxStepAngle test on its own —
+      // reject that by also requiring the fitted radius stay within a sane
+      // multiple of the points' own spread. A genuine small arc's radius is
+      // comparable to its chord length (a handful of times at most), not
+      // 15-20x+ larger.
+      // Scale to the newest increment only (b -> p) — NOT the a-b span, which
+      // can be long-established and unrelated to whether a curve is
+      // starting right now (same "stay local" principle as stepLen above).
+      const sane = fit && fit.r > 1e-6 && fit.r < 15 * stepLen
+      if (sane && angleSpan(fit, [a, b, p]) / 2 < maxStepAngle) { run.mode = 'arc'; return true }
+      // Neither colinear nor a sane arc start — p doesn't belong with [a,b] at
+      // all (e.g. p is actually the first point of a new curve on the far
+      // side of a tangent seam). Reject rather than defaulting to 'line': the
+      // caller then closes the run at just [a,b] and reseeds a new run at
+      // [b,p], so p gets a fair, undecided re-evaluation next step instead of
+      // being force-absorbed into a straight edge it doesn't lie on.
+      return false
+    }
+    if (run.mode === 'line') {
+      // Test against the run's start-to-end line, but scale the tolerance to
+      // the INCREMENTAL step (last point -> new point), not the run's total
+      // accumulated length — a tolerance relative to total length keeps
+      // growing looser as a long straight run extends, which would happily
+      // absorb the first several points of a real curve (a gentle,
+      // large-radius arc's early deviation is small relative to a long
+      // straight run's overall span, even though it's clearly too much
+      // relative to how far the polyline actually moved in this one step).
+      const a = run.pts[0], b = run.pts[run.pts.length-1]
+      const stepLen = Math.max(1, Math.hypot(p.x-b.x, p.y-b.y))
+      return distToLine(p, a, b) < lineTol * stepLen
+    }
+    // mode === 'arc'
+    const fit = fitCircleLeastSquares(run.pts)
+    if (!fit || !(fit.r > 1e-6)) return false
+    const d = Math.hypot(p.x-fit.cx, p.y-fit.cy)
+    return Math.abs(d - fit.r) / fit.r < radiusTol
+  }
+
+  const runs = []
+  let cur = { mode: null, pts: [pts[0]] }
+  for (let i = 1; i <= n; i++) {
+    const p = pts[i % n]
+    cur._next = p
+    if (tryExtend(cur)) {
+      cur.pts.push(p)
+    } else {
+      delete cur._next
+      runs.push(cur)
+      cur = { mode: null, pts: [cur.pts[cur.pts.length-1], p] }
+    }
+  }
+  delete cur._next
+  runs.push(cur)
+
+  // Merge wraparound: the walk's first and last run may really be one run
+  // split by the arbitrary starting vertex — only when they ended up the
+  // same mode (an unresolved seam between genuinely different features,
+  // e.g. line-mode meeting arc-mode, is a real boundary, not a split).
+  if (runs.length > 1) {
+    const f = runs[0], l = runs[runs.length-1]
+    if (f.mode && f.mode === l.mode) {
+      f.pts = [...l.pts.slice(0, -1), ...f.pts]   // shared point at the seam, don't duplicate
+      runs.pop()
+    } else if (l.mode === null && l.pts.length === 2 && f.mode) {
+      // The trailing run is a 2-point fragment that never got a fair
+      // classification — the walk started arbitrarily mid-way through what
+      // is now `f`, so `f`'s true starting point may actually be `l`'s first
+      // point (l.pts[0]), rejected only because it was tested against the
+      // wrong neighbor (l.pts[1], not f's own run) right as the walk ran out
+      // of iterations. Test whether it belongs prepended to `f` using f's
+      // own established mode, same fit tests tryExtend uses.
+      const extra = l.pts[0]
+      const fits = f.mode === 'line'
+        ? distToLine(extra, f.pts[0], f.pts[f.pts.length-1]) < lineTol * Math.max(1, Math.hypot(extra.x-f.pts[0].x, extra.y-f.pts[0].y))
+        : (() => {
+            const fit = fitCircleLeastSquares(f.pts)
+            if (!fit || !(fit.r > 1e-6)) return false
+            const d = Math.hypot(extra.x-fit.cx, extra.y-fit.cy)
+            return Math.abs(d - fit.r) / fit.r < radiusTol
+          })()
+      if (fits) {
+        f.pts = [extra, ...f.pts]
+        runs.pop()
+      }
+    }
+  }
+
+  const lines = [], arcs = []
+  for (const run of runs) {
+    if (run.pts.length < 2) continue
+    if (run.mode === 'arc' && run.pts.length >= minArcPoints) {
+      const arc = fitArcToRun(run.pts)
+      if (arc) { arcs.push(arc); continue }
+    }
+    // Straight run, or an arc-candidate too short to trust (realistic for a
+    // small-radius fillet under this app's coarse mesh) — emit as one line
+    // spanning the run, collapsing any interior points.
+    const a = run.pts[0], b = run.pts[run.pts.length-1]
+    if (Math.hypot(b.x-a.x, b.y-a.y) > 1e-6) lines.push({ x1:a.x, y1:a.y, x2:b.x, y2:b.y })
+  }
+  return { lines, arcs }
+}
+
+// Fits a circle to a run of consecutive arc points (already established as
+// one consistent curve by segmentLoopIntoPrimitives) and returns
+// {cx,cy,r,startAngle,endAngle}, using the run's OWN middle point to
+// disambiguate sweep direction — the same "pick a third point to resolve
+// which way the arc actually goes" approach emitArc/threePointsArcTo
+// already use elsewhere in this codebase for the identical start/end
+// ambiguity a bare pair of endpoint angles can't resolve on its own.
+function fitArcToRun(runPts) {
+  const fit = fitCircleLeastSquares(runPts)
+  if (!fit || !(fit.r > 1e-6)) return null
+  const { cx, cy, r } = fit
+  const angleOf = p => Math.atan2(p.y-cy, p.x-cx)
+  const a0 = angleOf(runPts[0])
+  const a1raw = angleOf(runPts[runPts.length-1])
+  const aMid = angleOf(runPts[Math.floor(runPts.length/2)])
+  let e1 = a1raw; while (e1 < a0) e1 += Math.PI*2
+  let em = aMid; while (em < a0) em += Math.PI*2
+  if (em <= e1) return { cx, cy, r, startAngle: a0, endAngle: e1 }
+  // Midpoint isn't on the a0->e1 sweep — the arc actually goes the other way around.
+  let e0 = a0; while (e0 < a1raw) e0 += Math.PI*2
+  return { cx, cy, r, startAngle: a1raw, endAngle: e0 }
 }
 
 /** Converts raw 3D boundary loops (from extractFaceBoundaryLoops3D) to sketch-space {x1,y1,x2,y2} segments. */

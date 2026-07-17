@@ -36,6 +36,7 @@ import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
 import { createWorkPlanes, hitTestPlanes, setPlaneHover, setPlaneActive, setWorkPlanesVisible } from './WorkPlanes.js'
 import { SKETCH_PLANES } from './SketchPlane.js'
 import { faceHitToPlane, previewBottomEdge, faceBoundarySegments } from './FacePlane.js'
+import { mmToPx } from './constants.js'
 
 // Averages the 3 vertex normals of a hovered face's hit triangle, world-space —
 // same convention faceHitToPlane uses, factored out so both the per-frame
@@ -51,6 +52,16 @@ function getHoveredFaceNormal(hf) {
   const nb = new THREE.Vector3(normals.getX(face.b), normals.getY(face.b), normals.getZ(face.b))
   const nc = new THREE.Vector3(normals.getX(face.c), normals.getY(face.c), normals.getZ(face.c))
   return na.add(nb).add(nc).divideScalar(3).transformDirection(hf.mesh.matrixWorld).normalize()
+}
+
+// solidId lives on the per-solid GROUP's userData (see cadMesh.js), not on the
+// individual face Mesh a raycast actually hits — walk up to find the nearest
+// ancestor that has it. Shared by raycastSolidFace and the sketch-armed
+// face-click handler below.
+function findOwningSolidId(obj) {
+  let owner = obj
+  while (owner && owner.userData?.solidId == null) owner = owner.parent
+  return owner?.userData?.solidId ?? null
 }
 import { detectProfiles } from './tools/extrudeMath.js'
 import { EDGE_LINE_RESOLUTION } from './cadMesh.js'
@@ -99,6 +110,15 @@ const ISO_VIEW = {
   up:       new THREE.Vector3(0,  0, 1),
   target:   new THREE.Vector3(0,  0, 0),
 }
+
+// Fixed camera half-height (world units, 1mm = 2 units) used when actually
+// entering a sketch — 400 gives a 400mm default view, comfortable framing for
+// a ~300mm print-bed-sized part without inheriting whatever zoom level the
+// general 3D orbit view happens to be at (which can be zoomed out much
+// further, e.g. its own default of 900 — see the camera setup below — making
+// mouse drags in the 2D sketch profile correspond to huge, unusable mm
+// distances if the sketch view just reused it unchanged).
+const SKETCH_FRUST_H = 400
 
 const TWEEN_MS = 420   // animation duration in milliseconds
 
@@ -288,25 +308,25 @@ function buildSpline(sp, color=0xffdd44) {
 
 // ── XY grid ───────────────────────────────────────────────────────────────────
 
-function buildGrid(half=5000) {
+function buildGrid(step=10, half=5000) {
   const group=new THREE.Group(); group.renderOrder=0
-  const minorPts=[], step=10
+  const minorPts=[]
   for (let v=-half;v<=half;v+=step) {
     minorPts.push(new THREE.Vector3(-half,v,0),new THREE.Vector3(half,v,0))
     minorPts.push(new THREE.Vector3(v,-half,0),new THREE.Vector3(v,half,0))
   }
   group.add(new THREE.LineSegments(
     new THREE.BufferGeometry().setFromPoints(minorPts),
-    new THREE.LineBasicMaterial({color:0x222240,transparent:true,opacity:0.9,depthTest:false})
+    new THREE.LineBasicMaterial({color:0xc8c8d4,transparent:true,opacity:0.4,depthTest:false})
   ))
-  const majorPts=[], mstep=100
+  const majorPts=[], mstep=step*5
   for (let v=-half;v<=half;v+=mstep) {
     majorPts.push(new THREE.Vector3(-half,v,0),new THREE.Vector3(half,v,0))
     majorPts.push(new THREE.Vector3(v,-half,0),new THREE.Vector3(v,half,0))
   }
   group.add(new THREE.LineSegments(
     new THREE.BufferGeometry().setFromPoints(majorPts),
-    new THREE.LineBasicMaterial({color:0x383870,transparent:true,opacity:1.0,depthTest:false})
+    new THREE.LineBasicMaterial({color:0xa0a0b8,transparent:true,opacity:0.6,depthTest:false})
   ))
   const ax=200
   const xa=new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-ax,0,0),new THREE.Vector3(ax,0,0)]),new THREE.LineBasicMaterial({color:0x662222,depthTest:false})); xa.renderOrder=1; group.add(xa)
@@ -331,10 +351,16 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     onPlaneClick,
     onFaceClick,          // called with FacePlane when a solid face is clicked
     sketchArmed = false,
+    // true while sketchArmed's face-pick is for Export Face DXF rather than
+    // starting a sketch — swaps the hover label and skips the bottom-edge
+    // preview line, which previews sketch orientation and has no meaning here.
+    dxfPickMode = false,
     extrudeArmed   = false,  // true once a profile is picked (Phase 2/3) — see extrudeArmedRef
     showWorkPlanes = true,
     activePlane    = null,
     sketchMode     = false,
+    gridVisible    = false,  // 3D-mode reference grid toggle — see the GRID toolbar button in App3D.jsx
+    gridSizeMm     = 5,      // minor grid line spacing — mirrors the grid-size dropdown in App3D.jsx
     extrudeTool    = null,   // 'extrude'|'cutout' — bypasses work plane click
     filletActive   = false,  // true while the fillet edge-pick tool is active
     measureActive  = false,  // true while the measure tool is active (reuses fillet's edge-highlight machinery, see measureActiveRef)
@@ -349,6 +375,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   // Face hover state
   const hoveredFaceRef   = useRef(null)  // { mesh, origMat }
   const sketchArmedRef   = useRef(false)
+  const dxfPickModeRef   = useRef(false)
   // Extrude/cutout Phase 2/3 (a profile is picked, awaiting the commit
   // click) — see the work-plane hover/click gates below for why this is
   // tracked separately from sketchArmedRef (that one also covers the
@@ -406,7 +433,13 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     mount.insertBefore(renderer.domElement, mount.firstChild)
 
     const scene  = new THREE.Scene()
-    const aspect = width/height, frustH=600
+    // frustH is the camera's half-height in world units (1mm = 2 units, same
+    // scale cadMesh.js uses for solids) — 900 gives a 900mm total default
+    // vertical view, comfortable padding around the 300mm work planes so they
+    // don't dominate the screen before any part is modeled (zoomToFit ignores
+    // the work planes entirely and only frames actual geometry, so an empty
+    // scene always shows this default, unadjusted).
+    const aspect = width/height, frustH=900
     const camera = new THREE.OrthographicCamera(
       -frustH*aspect, frustH*aspect, frustH, -frustH, -10000, 10000
     )
@@ -451,6 +484,52 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     const raycaster = new THREE.Raycaster()
     const workPlanes = createWorkPlanes(scene)
 
+    // Generic square plane indicator shown while hovering a face armed for
+    // sketching — same visual language as the XY/YZ/XZ work planes above, but
+    // fixed-size and oriented to the hovered face's normal instead of a scene
+    // axis. Deliberately NOT shaped to the actual face boundary (a cylinder's
+    // circular top, a slot's rounded rectangle, etc.) — a neutral square reads
+    // as "this defines your sketch plane" the same way regardless of the
+    // underlying face's real shape, matching how the axis work planes already
+    // communicate that idea.
+    const FACE_INDICATOR_SIZE = 60   // half-size, world units
+    const facePlaneIndicator = new THREE.Group()
+    facePlaneIndicator.visible = false
+    facePlaneIndicator.renderOrder = 4
+    {
+      const S = FACE_INDICATOR_SIZE
+      const fillGeo = new THREE.PlaneGeometry(S*2, S*2)
+      // Opacity bumped well above the axis work planes' hover-state 0.14 —
+      // this sits directly on a solid whose own material is a similar blue
+      // hue, so the same opacity that reads clearly against the plain
+      // white/gray background behind the work planes was nearly invisible
+      // here (verified: correct position/orientation/visible=true in the
+      // scene graph, but not perceptible in a screenshot at 0.16).
+      const fillMat = new THREE.MeshBasicMaterial({
+        color: 0x64aaff, transparent: true, opacity: 0.4,
+        side: THREE.DoubleSide, depthWrite: false, depthTest: false,
+      })
+      facePlaneIndicator.add(new THREE.Mesh(fillGeo, fillMat))
+      // Plain THREE.Line/LineBasicMaterial ignores linewidth on most
+      // GPUs/browsers (same WebGL limitation cadMesh.js's solid-edge
+      // rendering already works around) — use the Line2/LineMaterial fat-line
+      // module instead for a border that's actually visible at 1x zoom.
+      const corners = [
+        -S,-S,0,  S,-S,0,  S,S,0,  -S,S,0,  -S,-S,0,
+      ]
+      const borderGeo = new LineGeometry()
+      borderGeo.setPositions(corners)
+      const borderMat = new LineMaterial({
+        color: 0x64aaff, linewidth: 2, worldUnits: false,
+        transparent: true, opacity: 0.95, depthTest: false,
+        resolution: LINE_RESOLUTION,
+      })
+      const border = new Line2(borderGeo, borderMat)
+      border.computeLineDistances()
+      facePlaneIndicator.add(border)
+    }
+    scene.add(facePlaneIndicator)
+
     // Tween state — stored on stateRef so the RAF loop can access it
     const tween = {
       active:   false,
@@ -467,6 +546,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     stateRef.current = {
       renderer, scene, camera, controls,
       geomGroup, solidsGroup, raycaster, plane, workPlanes,
+      facePlaneIndicator,
       grid,   // for hide/show in sketch mode
       tween,
       savedPos: null, savedUp: null, savedTgt: null,
@@ -496,6 +576,10 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       const hf = hoveredFaceRef.current
       const oc = overlayRef.current
       const inSketchMode = !!activePlaneInternalRef.current
+      // Default to hidden every frame; only the sketch-armed-and-hovering path
+      // below turns it back on — guarantees it never lingers from a stale
+      // frame no matter which branch below runs (or doesn't).
+      facePlaneIndicator.visible = false
       if (oc && hf?.hit && !inSketchMode) {
         const ctx2 = oc.getContext('2d')
         ctx2.setTransform(1,0,0,1,0,0)
@@ -504,84 +588,26 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
           const geo = hf.mesh.geometry
           const face = hf.hit.face
           if (face && geo.attributes.position) {
-            const pos = geo.attributes.position
-            const normals = geo.attributes.normal
             const faceNormal = getHoveredFaceNormal(hf)
             const rect2 = mountRef.current?.getBoundingClientRect()
             const W = rect2?.width || oc.width
             const H = rect2?.height || oc.height
             const cam = stateRef.current.camera
 
-            // Project a vertex index to screen coords
-            const toScreen = idx => {
-              const v = new THREE.Vector3(pos.getX(idx),pos.getY(idx),pos.getZ(idx))
-                .applyMatrix4(hf.mesh.matrixWorld).project(cam)
-              return { x:(v.x+1)/2*W, y:(-v.y+1)/2*H }
-            }
-
-            // Collect ALL triangles on this exact face (same normal, tight threshold)
-            const faceTris = []   // [{a,b,c,pa,pb,pc}] — indices + screen coords
-            const edgeCount = new Map()  // "min,max" -> count (boundary = appears once)
-            const idx = geo.index
-            const count = idx ? idx.count : pos.count
-            // normals already declared above
-
-            for (let i=0; i<count; i+=3) {
-              const a = idx ? idx.getX(i)   : i
-              const b = idx ? idx.getX(i+1) : i+1
-              const c = idx ? idx.getX(i+2) : i+2
-
-              // Use stored vertex normal of first vertex (faster than cross product)
-              // Transform to world space
-              let nx, ny, nz
-              if (normals) {
-                const n = new THREE.Vector3(normals.getX(a),normals.getY(a),normals.getZ(a))
-                  .transformDirection(hf.mesh.matrixWorld).normalize()
-                nx=n.x; ny=n.y; nz=n.z
-              } else {
-                const va2=new THREE.Vector3(pos.getX(a),pos.getY(a),pos.getZ(a))
-                const vb2=new THREE.Vector3(pos.getX(b),pos.getY(b),pos.getZ(b))
-                const vc2=new THREE.Vector3(pos.getX(c),pos.getY(c),pos.getZ(c))
-                const n=new THREE.Vector3().crossVectors(vb2.clone().sub(va2),vc2.clone().sub(va2))
-                  .normalize().transformDirection(hf.mesh.matrixWorld).normalize()
-                nx=n.x; ny=n.y; nz=n.z
-              }
-              const dot = nx*faceNormal.x + ny*faceNormal.y + nz*faceNormal.z
-              if (dot > 0.999) {  // very tight — only same face
-                const pa=toScreen(a), pb=toScreen(b), pc=toScreen(c)
-                faceTris.push({a,b,c,pa,pb,pc})
-                for (const [u,v] of [[a,b],[b,c],[c,a]]) {
-                  const key=`${Math.min(u,v)},${Math.max(u,v)}`
-                  edgeCount.set(key,(edgeCount.get(key)||0)+1)
-                }
-              }
-            }
-
-            // Fill all coplanar triangles (no per-triangle stroke — avoids showing triangulation)
-            ctx2.beginPath()
-            faceTris.forEach(({pa,pb,pc}) => {
-              ctx2.moveTo(pa.x,pa.y)
-              ctx2.lineTo(pb.x,pb.y)
-              ctx2.lineTo(pc.x,pc.y)
-              ctx2.closePath()
-            })
-            ctx2.fillStyle = 'rgba(100,170,255,0.18)'
-            ctx2.fill()
-
-            // Stroke only boundary edges (appear in exactly one triangle = outer silhouette)
-            ctx2.beginPath()
-            faceTris.forEach(({a,b,c,pa,pb,pc}) => {
-              const edges=[[a,b,pa,pb],[b,c,pb,pc],[c,a,pc,pa]]
-              for (const [u,v,p1,p2] of edges) {
-                if (edgeCount.get(`${Math.min(u,v)},${Math.max(u,v)}`)===1) {
-                  ctx2.moveTo(p1.x,p1.y)
-                  ctx2.lineTo(p2.x,p2.y)
-                }
-              }
-            })
-            ctx2.strokeStyle = '#64aaff'
-            ctx2.lineWidth = 2
-            ctx2.stroke()
+            // Position/orient the generic square indicator on the hovered
+            // face — a cheap local basis from the normal alone (not the real
+            // sketch uAxis/vAxis FacePlane.js derives from the nearest
+            // boundary edge, which needs an expensive full boundary-loop
+            // extraction; a preview square doesn't care which edge ends up
+            // "bottom", so it doesn't need that cost paid every frame).
+            const refAxis = Math.abs(faceNormal.x) < 0.9
+              ? new THREE.Vector3(1,0,0) : new THREE.Vector3(0,0,1)
+            const uAxis = refAxis.clone().addScaledVector(faceNormal, -refAxis.dot(faceNormal)).normalize()
+            const vAxis = new THREE.Vector3().crossVectors(faceNormal, uAxis).normalize()
+            facePlaneIndicator.position.copy(hf.hit.point).addScaledVector(faceNormal, 0.5)
+            facePlaneIndicator.quaternion.setFromRotationMatrix(
+              new THREE.Matrix4().makeBasis(uAxis, vAxis, faceNormal))
+            facePlaneIndicator.visible = true
 
             // If Tab-cycling (cycleFaceBottomEdge) picked an edge, that overrides
             // the cursor-nearest one — but only while still on the same face; a
@@ -597,38 +623,41 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
             // that will become the sketch's bottom/horizontal reference if the
             // face is clicked now (see FacePlane.js's faceHitToPlane, which
             // picks the same edge — or honors the same override — at click time).
-            let bottomEdge
-            if (tabEdgeIndexRef.current !== null) {
-              const segs = faceBoundarySegments({ object: hf.mesh, point: hf.hit.point }, faceNormal)
-              bottomEdge = segs.length ? segs[tabEdgeIndexRef.current % segs.length] : null
-            } else {
-              bottomEdge = previewBottomEdge({ object: hf.mesh, point: hf.hit.point }, faceNormal)
-            }
-            if (bottomEdge) {
-              const toScreenWorld = v => {
-                const p = v.clone().project(cam)
-                return { x:(p.x+1)/2*W, y:(-p.y+1)/2*H }
+            // Meaningless for a flat DXF export (no sketch orientation involved),
+            // so skip it in dxfPickMode.
+            if (!dxfPickModeRef.current) {
+              let bottomEdge
+              if (tabEdgeIndexRef.current !== null) {
+                const segs = faceBoundarySegments({ object: hf.mesh, point: hf.hit.point }, faceNormal)
+                bottomEdge = segs.length ? segs[tabEdgeIndexRef.current % segs.length] : null
+              } else {
+                bottomEdge = previewBottomEdge({ object: hf.mesh, point: hf.hit.point }, faceNormal)
               }
-              const bp1 = toScreenWorld(bottomEdge.a)
-              const bp2 = toScreenWorld(bottomEdge.b)
-              ctx2.beginPath()
-              ctx2.moveTo(bp1.x, bp1.y)
-              ctx2.lineTo(bp2.x, bp2.y)
-              ctx2.strokeStyle = '#4caf50'
-              ctx2.lineWidth = 4
-              ctx2.lineCap = 'round'
-              ctx2.stroke()
+              if (bottomEdge) {
+                const toScreenWorld = v => {
+                  const p = v.clone().project(cam)
+                  return { x:(p.x+1)/2*W, y:(-p.y+1)/2*H }
+                }
+                const bp1 = toScreenWorld(bottomEdge.a)
+                const bp2 = toScreenWorld(bottomEdge.b)
+                ctx2.beginPath()
+                ctx2.moveTo(bp1.x, bp1.y)
+                ctx2.lineTo(bp2.x, bp2.y)
+                ctx2.strokeStyle = '#4caf50'
+                ctx2.lineWidth = 4
+                ctx2.lineCap = 'round'
+                ctx2.stroke()
+              }
             }
 
-            // Label at face centroid
-            const allX = faceTris.flatMap(({pa,pb,pc})=>[pa.x,pb.x,pc.x])
-            const allY = faceTris.flatMap(({pa,pb,pc})=>[pa.y,pb.y,pc.y])
-            const cx = allX.reduce((s,v)=>s+v,0)/allX.length
-            const cy = allY.reduce((s,v)=>s+v,0)/allY.length
+            // Label at the cursor's hit point (the square indicator has no
+            // per-triangle screen-space centroid to derive one from anymore)
+            const hitScreen = hf.hit.point.clone().project(cam)
+            const cx = (hitScreen.x+1)/2*W, cy = (-hitScreen.y+1)/2*H
             ctx2.fillStyle = '#fff'
             ctx2.font = 'bold 12px monospace'
             ctx2.textAlign = 'center'
-            ctx2.fillText('click to sketch', cx, cy-8)
+            ctx2.fillText(dxfPickModeRef.current ? 'click to export' : 'click to sketch', cx, cy-8)
           }
         }
       } else if (oc && sketchArmedRef.current && !hf && !inSketchMode) {
@@ -857,21 +886,56 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   useEffect(() => {
     const s=stateRef.current; if (!s?.solidsGroup) return
     const {solidsGroup}=s
-    // Remove old solid groups
-    solidsGroup.traverse(obj=>{ if(obj.geometry)obj.geometry.dispose(); if(obj.material)obj.material.dispose() })
-    solidsGroup.clear()
-    // Add each solid's pre-built THREE.Group
-    solids.forEach(solid => { if(solid.group) solidsGroup.add(solid.group) })
+    // Diff instead of dispose-everything-then-rebuild: a solid toggled
+    // `hidden` keeps the SAME .group object (no new mesh built), so
+    // blindly disposing every current child on every `solids` change would
+    // free that group's GPU buffers, leaving it permanently blank the next
+    // time it's un-hidden. Only dispose children whose solid is genuinely
+    // gone or was actually rebuilt (a new .group reference).
+    const liveGroups = new Set(solids.map(solid => solid.group).filter(Boolean))
+    solidsGroup.children.slice().forEach(child => {
+      if (liveGroups.has(child)) return
+      child.traverse(obj => { if(obj.geometry) obj.geometry.dispose(); if(obj.material) obj.material.dispose() })
+      solidsGroup.remove(child)
+    })
+    // Sync membership: hidden solids come out of the scene (raycasting,
+    // zoomToFit etc. all just read solidsGroup.children, so this alone
+    // makes a hidden body un-pickable everywhere for free); visible ones
+    // go back in if they aren't already there.
+    solids.forEach(solid => {
+      if (!solid.group) return
+      if (solid.hidden) {
+        if (solid.group.parent === solidsGroup) solidsGroup.remove(solid.group)
+      } else if (solid.group.parent !== solidsGroup) {
+        solidsGroup.add(solid.group)
+      }
+    })
   }, [solids])
 
-  // ── sketch mode: white background, hide grid ──────────────────────────────
+  // ── sketch mode: white background, grid follows the GRID toolbar toggle ───
 
   useEffect(() => {
     const s = stateRef.current; if (!s) return
-    // Background always white, grid always hidden
+    // Background always white
     s.renderer.setClearColor(0xffffff, 1)
-    if (s.grid) s.grid.visible = false
-  }, [sketchMode])
+    // Grid is a 3D-mode reference aid only — always hidden in sketch mode
+    // (which has its own 2D grid/snap), shown/hidden by GRID otherwise.
+    if (s.grid) s.grid.visible = gridVisible && !sketchMode
+  }, [sketchMode, gridVisible])
+
+  // Rebuild the grid mesh whenever the grid-size dropdown changes so its
+  // line spacing actually matches gridSizeMm (previously hardcoded).
+  useEffect(() => {
+    const s = stateRef.current; if (!s?.scene) return
+    if (s.grid) {
+      s.scene.remove(s.grid)
+      s.grid.traverse(o => { o.geometry?.dispose?.(); o.material?.dispose?.() })
+    }
+    const grid = buildGrid(mmToPx(gridSizeMm))
+    grid.visible = gridVisible && !sketchMode
+    s.scene.add(grid)
+    s.grid = grid
+  }, [gridSizeMm])
 
   // ── work planes ───────────────────────────────────────────────────────────
 
@@ -910,6 +974,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     sketchArmedRef.current = sketchArmed
     if (!sketchArmed) tabEdgeIndexRef.current = null
   }, [sketchArmed])
+  useEffect(() => { dxfPickModeRef.current = dxfPickMode }, [dxfPickMode])
   useEffect(() => { extrudeArmedRef.current = extrudeArmed }, [extrudeArmed])
   useEffect(() => {
     filletActiveRef.current = filletActive
@@ -1021,6 +1086,17 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       }
       const facePlane = faceHitToPlane(hitWithRay, overrideEdge)
       if (facePlane) {
+        // FacePlane itself has no notion of which solid it came from — stamp
+        // it on for callers (Export Face DXF) that need to identify the solid,
+        // not just the plane geometry.
+        facePlane.solidId = findOwningSolidId(hitWithRay.object)
+        // facePlane.origin is the coplanar-vertex CENTROID of the whole face
+        // (for sketch placement) — on a face with a hole (or any non-convex
+        // boundary) that centroid can land inside the cut-out, off the actual
+        // material, which then fails a FaceFinder pick server-side. The raw
+        // click point is always ON the surface, so callers that need a real
+        // surface point (Export Face DXF) should use this instead of origin.
+        facePlane.point = hitWithRay.point.clone()
         clearFaceHover()
         onFaceClick(facePlane)
         return
@@ -1324,7 +1400,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       if (!meshHit) return null
       const SCALE = 2
       const p = meshHit.point
-      return { solidId: meshHit.object.userData?.solidId ?? null, point: [p.x/SCALE, p.y/SCALE, p.z/SCALE] }
+      return { solidId: findOwningSolidId(meshHit.object), point: [p.x/SCALE, p.y/SCALE, p.z/SCALE] }
     },
 
     /**
@@ -1523,8 +1599,15 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
      * Tween camera to look straight at the given plane.
      * Saves the current orbit state so snapToIsometric() can restore it.
      * Returns a Promise that resolves when the animation finishes.
+     *
+     * resetZoom (default true) also resets the frustum to SKETCH_FRUST_H —
+     * every caller except the toolbar's plain TOP/FRONT/SIDE view buttons is
+     * actually entering a sketch, where a fixed, print-bed-appropriate scale
+     * matters more than preserving whatever zoom the general 3D view was at.
+     * The view buttons pass {resetZoom:false} to keep their own long-standing
+     * "switching angle doesn't jump zoom" behavior.
      */
-    snapToPlane(planeId) {
+    snapToPlane(planeId, { resetZoom = true } = {}) {
       const s=stateRef.current; if (!s) return Promise.resolve()
       const view=PLANE_VIEWS[planeId]; if (!view) return Promise.resolve()
       const {camera,controls,tween}=s
@@ -1538,6 +1621,14 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       controls.enabled = false
       hoveredPlaneRef.current = null
       setPlaneHover(s.workPlanes, null)
+
+      if (resetZoom) {
+        const aspect = camera.right / camera.top
+        camera.left=-SKETCH_FRUST_H*aspect; camera.right=SKETCH_FRUST_H*aspect
+        camera.top=SKETCH_FRUST_H; camera.bottom=-SKETCH_FRUST_H
+        camera.zoom = 1
+        camera.updateProjectionMatrix()
+      }
 
       // Set up tween
       tween.fromPos.copy(camera.position)
@@ -1554,9 +1645,9 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
 
     /**
      * Tween camera to look straight at an arbitrary FacePlane.
-     * Works like snapToPlane but for any orientation.
+     * Works like snapToPlane but for any orientation — see its resetZoom doc.
      */
-    snapToFace(facePlane) {
+    snapToFace(facePlane, { resetZoom = true } = {}) {
       const s=stateRef.current; if (!s) return Promise.resolve()
       const {camera,controls,tween}=s
 
@@ -1568,6 +1659,14 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
 
       controls.enabled = false
       clearFaceHover()
+
+      if (resetZoom) {
+        const aspect = camera.right / camera.top
+        camera.left=-SKETCH_FRUST_H*aspect; camera.right=SKETCH_FRUST_H*aspect
+        camera.top=SKETCH_FRUST_H; camera.bottom=-SKETCH_FRUST_H
+        camera.zoom = 1
+        camera.updateProjectionMatrix()
+      }
 
       tween.fromPos.copy(camera.position)
       tween.fromUp .copy(camera.up)

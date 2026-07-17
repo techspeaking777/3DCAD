@@ -30,7 +30,7 @@ class CadEngine {
       )
 
       this._worker.onmessage = (e) => {
-        const { type, id, faces, edges, stlBlob, message } = e.data
+        const { type, id, faces, edges, stlBlob, dxfData, message } = e.data
 
         if (type === 'ready') {
           this._ready = true
@@ -53,8 +53,9 @@ class CadEngine {
 
         if (type === 'result') {
           // Most operations return mesh data for Three.js; exportSTL returns a
-          // Blob instead — pass through whichever fields are actually present.
-          pending.resolve(stlBlob ? { stlBlob } : { faces, edges })
+          // Blob instead, exportFaceDXF returns plain {lines,circles,arcs}
+          // geometry — pass through whichever fields are actually present.
+          pending.resolve(stlBlob ? { stlBlob } : dxfData ? { dxfData } : { faces, edges })
         } else if (type === 'error') {
           pending.reject(new Error(message || 'CAD operation failed'))
         }
@@ -142,6 +143,16 @@ class CadEngine {
    */
   async exportSTL(params) {
     return this._send('exportSTL', params)
+  }
+
+  /**
+   * Export a picked face's real OCC boundary (outer loop + every hole) as
+   * flat 2D geometry in mm — params: {solidId, point:[x,y,z] (mm), base?}.
+   * Returns {dxfData:{lines,circles,arcs}}, ready for saveLoad.js's
+   * exportFaceDXF() to write out as an actual .dxf file.
+   */
+  async exportFaceDXF(params) {
+    return this._send('exportFaceDXF', params)
   }
 
   /** True once OpenCascade has finished loading. */

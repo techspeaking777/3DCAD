@@ -1,5 +1,7 @@
+import * as THREE from 'three'
 import { pxToMm } from '../constants.js'
 import { splineToPolyline } from './splineMath.js'
+import { FacePlane } from '../FacePlane.js'
 
 function dlText(filename, content, mime) {
   const a = Object.assign(document.createElement('a'), {
@@ -13,8 +15,197 @@ function dlText(filename, content, mime) {
 
 // ── JSON Save ─────────────────────────────────────────────────────────────────
 export function saveJSON(lines, circles, arcs, splines=[], dims=[], filename = 'drawing.json') {
-  const data = JSON.stringify({ lines, circles, arcs, splines }, null, 2)
+  const data = JSON.stringify({ lines, circles, arcs, splines, dims }, null, 2)
   dlText(filename, data, 'application/json')
+}
+
+// True in Chromium browsers (Chrome, Edge) — lets the user pick both the
+// folder and filename via the OS's native Save dialog. Firefox/Safari lack this,
+// so callers should fall back to prompting for a filename and downloading normally.
+export const canPickSaveLocation = () => typeof window !== 'undefined' && !!window.showSaveFilePicker
+
+// Saves the project under a chosen name. When the File System Access API is
+// available, opens the native Save dialog (folder + filename, pre-filled with
+// suggestedName) and writes directly to the chosen file. Otherwise downloads
+// to the browser's default download location using suggestedName.
+// Returns 'saved', 'cancelled' (user closed the native dialog), or 'downloaded'.
+export async function saveProjectAs(lines, circles, arcs, splines=[], dims=[], suggestedName='drawing.json') {
+  const data = JSON.stringify({ lines, circles, arcs, splines, dims }, null, 2)
+  if (canPickSaveLocation()) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName,
+        types: [{ description: 'CAD drawing', accept: { 'application/json': ['.json'] } }],
+      })
+      const writable = await handle.createWritable()
+      await writable.write(data)
+      await writable.close()
+      return 'saved'
+    } catch (err) {
+      if (err && err.name === 'AbortError') return 'cancelled'
+      throw err
+    }
+  }
+  dlText(suggestedName, data, 'application/json')
+  return 'downloaded'
+}
+
+// Generic binary counterpart to saveProjectAs()/exportFaceDXF() — same native
+// Save dialog when available, straight Blob download otherwise. Used for STL
+// export (and anything else that hands over a ready-made Blob rather than
+// text). `accept` is a File System Access API accept map, e.g.
+// {'model/stl': ['.stl']}. Returns 'saved', 'cancelled', or 'downloaded'.
+export async function saveBlobAs(blob, suggestedName, description, accept) {
+  if (canPickSaveLocation()) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName,
+        types: [{ description, accept }],
+      })
+      const writable = await handle.createWritable()
+      await writable.write(blob)
+      await writable.close()
+      return 'saved'
+    } catch (err) {
+      if (err && err.name === 'AbortError') return 'cancelled'
+      throw err
+    }
+  }
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = suggestedName
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+  return 'downloaded'
+}
+
+// ── Whole-project save/load (.trc) ──────────────────────────────────────────
+// Unlike saveJSON/loadJSON above (which only ever captured the active 2D
+// sketch buffer), this serializes the full `features` array — the feature
+// tree's actual source of truth — so reopening a project reconstructs every
+// sketch/extrude/cutout/fillet/mirror/join/loft, not just whatever sketch
+// happened to be on screen. Solids themselves are never serialized (they're
+// live Three.js groups backed by WASM/OCC shapes with no JSON form) — on
+// load the whole tree is replayed through cadEngine instead, the same way
+// editing a feature already rebuilds its dependency chain today.
+//
+// Two field shapes need special handling because plain JSON.stringify either
+// mangles or silently drops them:
+//   - FacePlane is a class instance (THREE.Vector3 fields + a derived
+//     THREE.Plane). Its numeric fields *would* survive stringify/parse, but
+//     the result loses its prototype (no worldToSketch/sketchToWorld), so it
+//     must be unpacked to plain arrays and reconstructed with `new FacePlane`.
+//   - profilePts (and each loft profile's `pts`) carry circleMeta/
+//     curveSegments as bolted-on NON-INDEX array properties (see
+//     tools/extrudeMath.js) — JSON.stringify only serializes index
+//     properties on arrays, so a raw `JSON.stringify(profilePts)` silently
+//     drops them, corrupting true-circle/arc/spline profile info.
+
+function vec3ToArr(v) { return v ? [v.x, v.y, v.z] : null }
+function arrToVec3(a) { return a ? new THREE.Vector3(a[0], a[1], a[2]) : null }
+
+function serializeFacePlane(fp) {
+  if (!fp) return null
+  return {
+    origin: vec3ToArr(fp.origin),
+    normal: vec3ToArr(fp.normal),
+    uAxis:  vec3ToArr(fp.uAxis),
+    vAxis:  vec3ToArr(fp.vAxis),
+  }
+}
+function deserializeFacePlane(obj) {
+  if (!obj) return null
+  return new FacePlane(arrToVec3(obj.origin), arrToVec3(obj.normal), arrToVec3(obj.uAxis), arrToVec3(obj.vAxis))
+}
+
+// Packs a profile-points array (possibly carrying .circleMeta/.curveSegments)
+// into a plain, fully JSON-safe object. `pts` itself is undefined for
+// features that never had a profile (e.g. mirror/join) — pass through null.
+function serializePts(pts) {
+  if (!pts) return null
+  return { arr: pts.map(p => ({ ...p })), circleMeta: pts.circleMeta || null, curveSegments: pts.curveSegments || null }
+}
+function deserializePts(obj) {
+  if (!obj) return null
+  const arr = obj.arr.map(p => ({ ...p }))
+  if (obj.circleMeta) arr.circleMeta = obj.circleMeta
+  if (obj.curveSegments) arr.curveSegments = obj.curveSegments
+  return arr
+}
+
+// `hidden` is passed in explicitly (from the matching `solids` entry) since
+// it lives on solid state, not the feature itself — see saveProjectFileAs.
+export function serializeFeature(feat, hidden = false) {
+  const out = { ...feat, hidden }
+  if (feat.facePlane) out.facePlane = serializeFacePlane(feat.facePlane)
+  if (feat.profilePts) out.profilePts = serializePts(feat.profilePts)
+  if (feat.profiles) out.profiles = feat.profiles.map(p => ({ ...p, pts: serializePts(p.pts) }))
+  return out
+}
+export function deserializeFeature(obj) {
+  const out = { ...obj }
+  if (obj.facePlane) out.facePlane = deserializeFacePlane(obj.facePlane)
+  if (obj.profilePts) out.profilePts = deserializePts(obj.profilePts)
+  if (obj.profiles) out.profiles = obj.profiles.map(p => ({ ...p, pts: deserializePts(p.pts) }))
+  return out
+}
+
+const PROJECT_FORMAT_VERSION = 1
+
+function serializeProject(features, solids) {
+  const hiddenById = new Map(solids.map(s => [s.id, !!s.hidden]))
+  return JSON.stringify({
+    formatVersion: PROJECT_FORMAT_VERSION,
+    app: '3d-retro-cad',
+    features: features.map(f => serializeFeature(f, hiddenById.get(f.solidId) || false)),
+  }, null, 2)
+}
+
+// Saves the whole feature tree under a chosen name — the .trc counterpart of
+// saveProjectAs() above. Same native-Save-dialog-or-download behavior.
+export async function saveProjectFileAs(features, solids, suggestedName = 'drawing.trc') {
+  const data = serializeProject(features, solids)
+  if (canPickSaveLocation()) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName,
+        types: [{ description: '3D Retro CAD project', accept: { 'application/json': ['.trc'] } }],
+      })
+      const writable = await handle.createWritable()
+      await writable.write(data)
+      await writable.close()
+      return 'saved'
+    } catch (err) {
+      if (err && err.name === 'AbortError') return 'cancelled'
+      throw err
+    }
+  }
+  dlText(suggestedName, data, 'application/json')
+  return 'downloaded'
+}
+
+// Parses a .trc (or legacy-incompatible) file. Throws if `features` isn't
+// present/an array so callers can fall back to the old sketch-buffer-only
+// loadJSON() for files saved before this format existed.
+export function loadProjectFile(file) {
+  return new Promise((resolve, reject) => {
+    if (!file) return reject(new Error('No file'))
+    const reader = new FileReader()
+    reader.onload = e => {
+      try {
+        const data = JSON.parse(e.target.result)
+        if (!Array.isArray(data.features)) return reject(new Error('Not a project file (no feature tree)'))
+        resolve({ features: data.features.map(deserializeFeature), formatVersion: data.formatVersion })
+      } catch {
+        reject(new Error('Could not parse file'))
+      }
+    }
+    reader.onerror = () => reject(new Error('File read error'))
+    reader.readAsText(file)
+  })
 }
 
 // ── JSON Load ─────────────────────────────────────────────────────────────────
@@ -119,6 +310,49 @@ export function exportDXF(lines, circles, arcs, splines=[], filename='drawing.dx
     '0\nENDSEC\n0\nEOF\n'
 
   dlText(filename, dxf, 'application/dxf')
+}
+
+// Writes a DXF for a solid face exported straight from its real OCC geometry
+// (see cadEngine.exportFaceDXF/cadWorker.js) — lines/circles/arcs here are
+// ALREADY in real mm and already in a standard right-handed (u,v) frame, not
+// the app's screen-space Y-down sketch convention exportDXF() above converts
+// from. Don't route this through exportDXF(): its pxToMm/Y-flip would double-
+// convert already-correct data.
+// Opens the native Save dialog (folder + filename, pre-filled with
+// suggestedName) when the File System Access API is available — same
+// canPickSaveLocation()/showSaveFilePicker() pattern as saveProjectAs()
+// above. Otherwise downloads to the browser's default location. Returns
+// 'saved', 'cancelled' (user closed the native dialog), or 'downloaded'.
+export async function exportFaceDXF(lines, circles, arcs, suggestedName='face.dxf') {
+  const toDeg = rad => { const d = rad * 180 / Math.PI; return ((d % 360) + 360) % 360 }
+  let entities = ''
+  lines.forEach(l => { entities += dxfLine(l.x1, l.y1, l.x2, l.y2) })
+  circles.forEach(c => { entities += dxfCircle(c.cx, c.cy, c.r) })
+  arcs.forEach(a => { entities += dxfArc(a.cx, a.cy, a.r, toDeg(a.startAngle), toDeg(a.endAngle)) })
+  const dxf =
+    '0\nSECTION\n2\nHEADER\n' +
+    '9\n$INSUNITS\n70\n4\n' +
+    '0\nENDSEC\n' +
+    '0\nSECTION\n2\nENTITIES\n' +
+    entities +
+    '0\nENDSEC\n0\nEOF\n'
+  if (canPickSaveLocation()) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName,
+        types: [{ description: 'DXF drawing', accept: { 'application/dxf': ['.dxf'] } }],
+      })
+      const writable = await handle.createWritable()
+      await writable.write(dxf)
+      await writable.close()
+      return 'saved'
+    } catch (err) {
+      if (err && err.name === 'AbortError') return 'cancelled'
+      throw err
+    }
+  }
+  dlText(suggestedName, dxf, 'application/dxf')
+  return 'downloaded'
 }
 
 // ── DXF Import ────────────────────────────────────────────────────────────────

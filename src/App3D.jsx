@@ -5,7 +5,7 @@ import Viewport3D from './Viewport3D.jsx'
 import { planeColor, planeAxisLabels, sketchToWorld } from './SketchPlane.js'
 import { FacePlane } from './FacePlane.js'
 import { pxToMm, mmToPx, ALIGN_SNAP_DIST, ACQUIRE_DIST, SELECT_DIST, norm2pi, zoomRef } from './constants.js'
-import { angleOnArc, computeAllIntersections } from './geometry/intersections.js'
+import { angleOnArc, computeAllIntersections, circleCircleIntersect } from './geometry/intersections.js'
 import { getGeoSnap, getAllSnapPoints, checkAngle, getAngleSnap, applyTracking, computeLiveAngle, getTanPtsOnCircle, getExternalTangentPairs, nearestPt } from './geometry/snap.js'
 import { computeTrimPreview, performTrim, computeDeletePreview, distToSeg } from './tools/trimDelete.js'
 import { nearestOffsetEntity, computeOffsetPreview, distToEntity } from './tools/offsetMath.js'
@@ -19,7 +19,7 @@ import { sampleSpline, nearestSpline, computeSplineTrimPreview, performSplineTri
 import { selectionBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform } from './tools/selectMath.js'
 import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
-import { saveJSON, loadJSON, exportDXF, parseDXF } from './tools/saveLoad.js'
+import { saveJSON, loadJSON, exportDXF, parseDXF, saveProjectAs, canPickSaveLocation, exportFaceDXF as writeFaceDXF, saveBlobAs, saveProjectFileAs, loadProjectFile } from './tools/saveLoad.js'
 import { detectProfiles, buildSolid, pickProfile } from './tools/extrudeMath.js'
 import { cadEngine } from './cadEngine.js'
 import { replicadMeshToThree } from './cadMesh.js'
@@ -27,6 +27,11 @@ import TracerPanel from './tools/TracerPanel.jsx'
 import TextPanel from './tools/TextPanel.jsx'
 import PageSetupPanel from './tools/PageSetupPanel.jsx'
 import GuidePanel from './tools/GuidePanel.jsx'
+import SaveAsPanel from './tools/SaveAsPanel.jsx'
+import LineSnapPanel from './tools/LineSnapPanel.jsx'
+import CircleSnapPanel from './tools/CircleSnapPanel.jsx'
+import SplineSnapPanel from './tools/SplineSnapPanel.jsx'
+import CopyModePanel from './tools/CopyModePanel.jsx'
 import {
   IconLine, IconCircle, IconTrim, IconDelete, IconExtend, IconOffset,
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
@@ -265,6 +270,14 @@ async function rebuildBaseMesh(solid) {
   const baseWorkerParams = buildBaseWorkerParams(solid)
   const meshData = solid.operation === 'revolve'
     ? await cadEngine.revolve({ solidId: solid.id, ...baseWorkerParams })
+    // Loft's base params are shaped like {profiles,normal,origin,uAxis,ruled}
+    // (see buildBaseWorkerParams' loft branch) — routing those through
+    // cadEngine.extrude() would hand a pts/depthMm-shaped worker handler a
+    // profiles array it doesn't understand. cadWorker.js's own buildBase()
+    // already discriminates on params.profiles for exactly this reason; this
+    // mirrors that same convention.
+    : solid.operation === 'loft'
+    ? await cadEngine.loft({ solidId: solid.id, ...baseWorkerParams })
     : await cadEngine.extrude({ solidId: solid.id, ...baseWorkerParams })
   return { meshData, baseWorkerParams }
 }
@@ -498,7 +511,77 @@ function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEP
 
 // ── Feature Tree Panel ────────────────────────────────────────────────────────
 
-function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, mirrorPickActive, onPickMirrorSource, joinPickActive, joinSel, onToggleJoinMember, onEditLoft }) {
+// Per-operation accent color — reuses each tool's own established toolbar
+// color (see ToolIcons.jsx's Icon*3D default `color` props) so a tree row
+// reads as the same "thing" as its toolbar button rather than a separately
+// invented palette. Revolve has no toolbar button of its own (triggered via
+// the Axis tool inside a sketch), so it shares Extrude's gold.
+function featureOpColor(feat) {
+  if (feat.type === 'sketch') return '#4FC3F7'
+  if (feat.type === 'fillet') return '#A470F2'
+  const op = feat.operation || 'extrude'
+  return {
+    extrude: '#FBDA2D', revolve: '#FBDA2D', cutout: '#53D3E4',
+    mirror: '#8E65F3', loft: '#33D5EC', join: '#FFEE88',
+  }[op] || '#FBDA2D'
+}
+
+// Small single-color line glyphs for the tree — the toolbar's own Icon*3D
+// badges (ToolIcons.jsx) are full illustrations with glow/shadow filters
+// meant for 70px buttons; shrunk to a 13px row icon they'd just be noise.
+// These are deliberately minimal so they stay legible at that size.
+function RowIcon({ kind, color, size=13 }) {
+  const p = { fill:'none', stroke:color, strokeWidth:1.4, strokeLinecap:'round', strokeLinejoin:'round' }
+  const shapes = {
+    sketch:  <><rect x="2" y="2" width="9" height="9" {...p}/><line x1="2" y1="2" x2="11" y2="11" {...p}/></>,
+    extrude: <path d="M6.5 11V3M3 6.5L6.5 3l3.5 3.5" {...p}/>,
+    cutout:  <path d="M6.5 2v8M3 6.5L6.5 10l3.5-3.5" {...p}/>,
+    revolve: <><path d="M10.5 6.5a4 4 0 1 1-1.3-2.95" {...p}/><path d="M10.8 2.2l.3 2.4-2.4-.4" {...p}/></>,
+    fillet:  <path d="M2 10q0-8 8-8" {...p}/>,
+    mirror:  <><line x1="6.5" y1="1" x2="6.5" y2="12" strokeDasharray="1.5 1.5" {...p}/><path d="M4.5 4L2.5 5.5 4.5 7" {...p}/><path d="M8.5 4l2 1.5-2 1.5" {...p}/></>,
+    join:    <><circle cx="5" cy="6.5" r="3.5" {...p}/><circle cx="8" cy="6.5" r="3.5" {...p}/></>,
+    loft:    <><rect x="4" y="1.5" width="5" height="2.5" {...p}/><rect x="1.5" y="8" width="10" height="2.5" {...p}/><line x1="4.5" y1="4" x2="2.5" y2="8" {...p}/><line x1="8.5" y1="4" x2="9.5" y2="8" {...p}/></>,
+  }
+  return <svg width={size} height={size} viewBox="0 0 13 13" style={{flexShrink:0}}>{shapes[kind]}</svg>
+}
+
+// Tiny padlock for locked (joined-away) rows — standalone so it never fights
+// the type-specific RowIcon above for space or color.
+function LockGlyph({ color='#8899aa' }) {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" style={{flexShrink:0}}>
+      <rect x="1.5" y="4.5" width="7" height="5" rx="1" fill="none" stroke={color} strokeWidth="1.2"/>
+      <path d="M3 4.5V3a2 2 0 0 1 4 0v1.5" fill="none" stroke={color} strokeWidth="1.2"/>
+    </svg>
+  )
+}
+
+// "Edit sketch/profile" action icon — was the same ⚙ as "edit extent", making
+// the two indistinguishable whenever a row shows both buttons (e.g. a
+// cutout has separate profile-edit and extent-edit actions side by side).
+function PencilGlyph({ color='#7fa8cc' }) {
+  return (
+    <svg width="11" height="11" viewBox="0 0 11 11" style={{flexShrink:0}}>
+      <path d="M1.5 9.5l.6-2.4 5-5 1.8 1.8-5 5-2.4.6z" fill="none" stroke={color} strokeWidth="1.2" strokeLinejoin="round"/>
+      <path d="M6 3.1l1.8 1.8" stroke={color} strokeWidth="1.2"/>
+    </svg>
+  )
+}
+
+// "Edit extent/radius/angle" action icon — a dimension caliper, used for any
+// action that adjusts a single numeric magnitude (extrude/cutout extent,
+// fillet radius), kept visually distinct from PencilGlyph above.
+function RulerGlyph({ color='#7fa8cc' }) {
+  return (
+    <svg width="11" height="11" viewBox="0 0 11 11" style={{flexShrink:0}}>
+      <line x1="1.5" y1="1" x2="1.5" y2="10" stroke={color} strokeWidth="1.2"/>
+      <line x1="9.5" y1="1" x2="9.5" y2="10" stroke={color} strokeWidth="1.2"/>
+      <path d="M1.5 5.5h8M3 4l-1.5 1.5L3 7M8 4l1.5 1.5L8 7" fill="none" stroke={color} strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  )
+}
+
+function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, mirrorPickActive, onPickMirrorSource, joinPickActive, joinSel, onToggleJoinMember, onEditLoft, hiddenSolidIds, onToggleBodyVisible }) {
   const [editingName, setEditingName] = useState(null)
   const [editDepthId, setEditDepthId] = useState(null)
   const [depthVal, setDepthVal]       = useState('')
@@ -525,27 +608,28 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
 
   return (
     <div style={{
-      width: 220, minWidth: 220, background: '#f8f8f8',
-      borderLeft: '1px solid #ddd', display: 'flex', flexDirection: 'column',
+      width: 220, minWidth: 220, background: '#1a1a2e',
+      borderLeft: '1px solid #2a2a4a', display: 'flex', flexDirection: 'column',
       fontFamily: 'monospace', fontSize: 12, overflowY: 'auto',
       userSelect: 'none',
     }}>
       {/* Header */}
       <div style={{
-        padding: '8px 12px', background: '#1a1a2e', color: '#dce8ff',
+        padding: '8px 12px', background: '#141428', color: '#dce8ff',
         fontSize: 11, fontWeight: 'bold', letterSpacing: '0.08em',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         borderBottom: '1px solid #2a2a4a', flexShrink: 0,
       }}>
         <span>FEATURE TREE</span>
-        <span style={{color:'#445566', fontWeight:'normal'}}>
+        <span style={{color:'#5a6b85', fontWeight:'normal'}}>
           {displayFeatures.length} item{displayFeatures.length!==1?'s':''}
         </span>
       </div>
 
       {/* Empty state */}
       {displayFeatures.length === 0 && (
-        <div style={{padding:'24px 16px', color:'#aaa', textAlign:'center', fontSize:11}}>
+        <div style={{margin:12, padding:'20px 12px', color:'#5a6b85', textAlign:'center',
+          fontSize:11, letterSpacing:'0.04em', border:'1px dashed #2a2a4a', borderRadius:4}}>
           No features yet.<br/>Click a work plane<br/>to start sketching.
         </div>
       )}
@@ -564,15 +648,29 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           const hasDependentMirror = features.some(f => f.operation === 'mirror' && f.sourceSolidId === feat.solidId)
           const isMirrorEligible = isExtrude && !isMirror && !isLocked
           const isJoinEligible = isExtrude && feat.operation !== 'cutout' && !isJoin && !isLocked && !hasDependentMirror
+          // Only rows that own an independent solid can be hidden — a cutout/
+          // fillet (or a mirrored cutout, which shows up as operation:'cutout'
+          // too, see commitMirrorCutout) modifies an EXISTING body in place
+          // rather than creating one, so there's nothing separate to hide.
+          // Locked (joined-away) rows are excluded too: their own solid was
+          // consumed into the Join's new body, so only the Join row's eye
+          // icon does anything meaningful now.
+          const isBodyOwner = isExtrude && !isLocked &&
+            ['extrude','revolve','loft','mirror','join'].includes(feat.operation || 'extrude')
+          const isBodyHidden = isBodyOwner && hiddenSolidIds?.includes(feat.solidId)
           const isJoinSelected = joinSel?.includes(feat.id)
           const editingDepth = editDepthId === feat.id
 
+          const rowKind = isSketch ? 'sketch' : isFillet ? 'fillet' : isMirror ? 'mirror'
+            : isJoin ? 'join' : isLoft ? 'loft' : feat.operation === 'cutout' ? 'cutout'
+            : feat.operation === 'revolve' ? 'revolve' : 'extrude'
+          const rowColor = featureOpColor(feat)
+
           const mirrorHover = mirrorPickActive && isMirrorEligible && hoveredMirrorRow === feat.id
-          const itemBg = isJoinSelected ? '#fff8e0' : mirrorHover ? '#eafbe8' : isActiveSketch ? '#e8f0ff' : 'transparent'
-          const borderLeft = isJoinSelected ? '3px solid #FFEE88'
-                           : isActiveSketch ? '3px solid #3a7bd5'
-                           : isSketch ? '3px solid #ddd'
-                           : '3px solid transparent'
+          const itemBg = isJoinSelected ? '#FFEE8822' : mirrorHover ? '#8E65F322' : isActiveSketch ? '#4FC3F722' : 'transparent'
+          const borderLeft = `3px solid ${
+            isJoinSelected ? '#FFEE88' : mirrorHover ? '#8E65F3' : isActiveSketch ? '#4FC3F7' : rowColor + '55'
+          }`
 
           return (
             <div key={feat.id}
@@ -586,8 +684,8 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
               style={{
               borderLeft, background: itemBg,
               padding: '6px 10px 6px 8px',
-              borderBottom: '1px solid #eee',
-              opacity: isLocked ? 0.45 : 1,
+              borderBottom: '1px solid #2a2a4a',
+              opacity: isLocked ? 0.5 : 1,
               cursor: mirrorPickActive ? (isMirrorEligible ? 'pointer' : 'default')
                     : joinPickActive   ? (isJoinEligible ? 'pointer' : 'default')
                     : (isSketch ? 'pointer' : 'default'),
@@ -598,18 +696,18 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                 {joinPickActive && isJoinEligible && (
                   <span style={{
                     width:13, height:13, flexShrink:0, borderRadius:3,
-                    border:`1.5px solid ${isJoinSelected ? '#c9a600' : '#aaa'}`,
+                    border:`1.5px solid ${isJoinSelected ? '#FFEE88' : '#556'}`,
                     background: isJoinSelected ? '#FFEE88' : 'transparent',
                     display:'flex', alignItems:'center', justifyContent:'center',
-                    fontSize:10, color:'#4a3e00', lineHeight:1,
+                    fontSize:10, color:'#3a3000', lineHeight:1,
                   }}>
                     {isJoinSelected ? '✓' : ''}
                   </span>
                 )}
                 {/* Icon */}
-                <span style={{fontSize:14, flexShrink:0}}>
-                  {isSketch ? '📐' : isFillet ? '◠' : isMirror ? '⇄' : isJoin ? '⛓' : isLoft ? '🌀' : '⬆'}
-                  {isLocked ? ' 🔒' : ''}
+                <span style={{display:'flex', alignItems:'center', gap:3, flexShrink:0}}>
+                  <RowIcon kind={rowKind} color={rowColor}/>
+                  {isLocked && <LockGlyph/>}
                 </span>
 
                 {/* Name — double-click to rename */}
@@ -618,7 +716,8 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                     autoFocus
                     defaultValue={feat.name}
                     style={{flex:1, fontSize:11, fontFamily:'monospace',
-                      border:'1px solid #3a7bd5', borderRadius:3, padding:'1px 4px'}}
+                      background:'#0d0d1a', color:'#dce8ff',
+                      border:'1px solid #4FC3F7', borderRadius:3, padding:'1px 4px'}}
                     onBlur={e=>{ onRename(feat.id, e.target.value||feat.name); setEditingName(null) }}
                     onKeyDown={e=>{
                       if(e.key==='Enter'){ onRename(feat.id,e.target.value||feat.name); setEditingName(null) }
@@ -628,7 +727,8 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                 ) : (
                   <span
                     style={{flex:1, fontSize:11, fontWeight: isActiveSketch?'bold':'normal',
-                      color: isActiveSketch?'#1a3a7d':'#222'}}
+                      letterSpacing:'0.02em',
+                      color: isActiveSketch?'#4FC3F7':'#c7d3e6'}}
                     onDoubleClick={()=>setEditingName(feat.id)}
                   >
                     {feat.name}
@@ -637,6 +737,17 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
 
                 {/* Action buttons */}
                 <div style={{display:'flex', gap:2, flexShrink:0}}>
+                  {isBodyOwner && (
+                    <button
+                      title={isBodyHidden?'Show body':'Hide body'}
+                      onClick={e=>{e.stopPropagation(); onToggleBodyVisible(feat.id)}}
+                      style={{background:'none',border:'none',cursor:'pointer',
+                        padding:'1px 3px', fontSize:12, opacity: isBodyHidden?0.4:1,
+                        color:'#7fa8cc'}}
+                    >
+                      {isBodyHidden ? '○' : '◉'}
+                    </button>
+                  )}
                   {isSketch && (
                     <>
                       {/* Visibility toggle */}
@@ -644,10 +755,10 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                         title={feat.visible?'Hide sketch':'Show sketch'}
                         onClick={e=>{e.stopPropagation(); onToggleVisible(feat.id)}}
                         style={{background:'none',border:'none',cursor:'pointer',
-                          padding:'1px 3px', fontSize:11, opacity: feat.visible?1:0.4,
-                          color:'#555'}}
+                          padding:'1px 3px', fontSize:12, opacity: feat.visible?1:0.4,
+                          color:'#7fa8cc'}}
                       >
-                        {feat.visible ? '👁' : '🚫'}
+                        {feat.visible ? '◉' : '○'}
                       </button>
                       {/* Edit — re-enter sketch */}
                       {!sketchMode && (
@@ -655,9 +766,9 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                           title="Edit sketch"
                           onClick={e=>{e.stopPropagation(); onEditSketch(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
-                            padding:'1px 3px', fontSize:11, color:'#3a7bd5'}}
+                            padding:'1px 3px', display:'flex', alignItems:'center'}}
                         >
-                          ✏️
+                          <PencilGlyph/>
                         </button>
                       )}
                       {/* Delete sketch */}
@@ -665,9 +776,9 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                         title="Delete sketch"
                         onClick={e=>{e.stopPropagation(); onDelete(feat.id)}}
                         style={{background:'none',border:'none',cursor:'pointer',
-                          padding:'1px 3px', fontSize:12, color:'#e05a4e'}}
+                          padding:'1px 3px', fontSize:11, color:'#ff6b5e'}}
                       >
-                        🗑
+                        ✕
                       </button>
                     </>
                   )}
@@ -677,28 +788,28 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                         <button title="Edit loft profiles"
                           onClick={e=>{e.stopPropagation(); onEditLoft(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
-                            padding:'1px 3px', fontSize:11, color:'#3a7bd5'}}
-                        >✏️</button>
+                            padding:'1px 3px', display:'flex', alignItems:'center'}}
+                        ><PencilGlyph/></button>
                       )}
                       {!sketchMode && !isLoft && feat.sketchLines !== undefined && (
                         <button title="Edit sketch"
                           onClick={e=>{e.stopPropagation(); onEditSketch(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
-                            padding:'1px 3px', fontSize:11, color:'#3a7bd5'}}
-                        >✏️</button>
+                            padding:'1px 3px', display:'flex', alignItems:'center'}}
+                        ><PencilGlyph/></button>
                       )}
                       {!sketchMode && !isMirror && !isJoin && !isLoft && (
                         <button title={feat.operation==='cutout' ? 'Edit cutout extent' : 'Edit extrusion extent'}
                           onClick={e=>{e.stopPropagation(); onEditExtent(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
-                            padding:'1px 3px', fontSize:11, color:'#888'}}
-                        >⚙</button>
+                            padding:'1px 3px', display:'flex', alignItems:'center'}}
+                        ><RulerGlyph/></button>
                       )}
                       <button title="Delete"
                         onClick={e=>{e.stopPropagation(); onDelete(feat.id)}}
                         style={{background:'none',border:'none',cursor:'pointer',
-                          padding:'1px 3px', fontSize:11, color:'#e05a4e'}}
-                      >🗑</button>
+                          padding:'1px 3px', fontSize:11, color:'#ff6b5e'}}
+                      >✕</button>
                     </>
                   )}
                   {isFillet && (
@@ -707,14 +818,14 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                         <button title="Edit fillet radius"
                           onClick={e=>{e.stopPropagation(); onEditFilletRadius(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
-                            padding:'1px 3px', fontSize:11, color:'#888'}}
-                        >⚙</button>
+                            padding:'1px 3px', display:'flex', alignItems:'center'}}
+                        ><RulerGlyph/></button>
                       )}
                       <button title="Delete"
                         onClick={e=>{e.stopPropagation(); onDelete(feat.id)}}
                         style={{background:'none',border:'none',cursor:'pointer',
-                          padding:'1px 3px', fontSize:11, color:'#e05a4e'}}
-                      >🗑</button>
+                          padding:'1px 3px', fontSize:11, color:'#ff6b5e'}}
+                      >✕</button>
                     </>
                   )}
                 </div>
@@ -722,14 +833,14 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
 
               {/* Sketch subtitle */}
               {isSketch && (
-                <div style={{color:'#888', fontSize:10, marginLeft:20, marginTop:2}}>
+                <div style={{color:'#8fa0b8', fontSize:10, marginLeft:20, marginTop:2}}>
                   {feat.planeId==='face' ? 'Face plane'
                     : feat.planeId==='XY' ? 'XY · Top'
                     : feat.planeId==='XZ' ? 'XZ · Front'
                     : feat.planeId==='YZ' ? 'YZ · Side'
                     : feat.planeId}
                   {' · '}{(feat.lines||[]).length + (feat.arcs||[]).length + (feat.circles||[]).length} entities
-                  {isActiveSketch && <span style={{color:'#3a7bd5',marginLeft:6}}>● editing</span>}
+                  {isActiveSketch && <span style={{color:'#4FC3F7',marginLeft:6}}>● editing</span>}
                 </div>
               )}
 
@@ -739,7 +850,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                   <div style={{display:'flex', alignItems:'center', gap:5}}>
                     <div style={{width:8,height:8,borderRadius:'50%',
                       background:feat.color||'#8E65F3', flexShrink:0}}/>
-                    <span style={{color:'#777', fontSize:10}}>
+                    <span style={{color:'#8fa0b8', fontSize:10}}>
                       mirror of {features.find(f=>f.id===feat.sourceFeatureId)?.name || '?'}
                       {' · '}{feat.mirrorPlane?.kind==='face' ? 'face' : feat.mirrorPlane?.planeId || '?'}
                     </span>
@@ -753,7 +864,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                   <div style={{display:'flex', alignItems:'center', gap:5}}>
                     <div style={{width:8,height:8,borderRadius:'50%',
                       background:feat.color||'#FFEE88', flexShrink:0}}/>
-                    <span style={{color:'#777', fontSize:10}}>
+                    <span style={{color:'#8fa0b8', fontSize:10}}>
                       join · {(feat.memberFeatureIds||[]).length} bodies
                     </span>
                   </div>
@@ -766,7 +877,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                   <div style={{display:'flex', alignItems:'center', gap:5}}>
                     <div style={{width:8,height:8,borderRadius:'50%',
                       background:feat.color||'#33D5EC', flexShrink:0}}/>
-                    <span style={{color:'#777', fontSize:10}}>
+                    <span style={{color:'#8fa0b8', fontSize:10}}>
                       loft · {(feat.profiles||[]).length} profiles
                     </span>
                   </div>
@@ -779,7 +890,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                   <div style={{display:'flex', alignItems:'center', gap:5}}>
                     <div style={{width:8,height:8,borderRadius:'50%',
                       background:feat.color||'#3a7bd5', flexShrink:0}}/>
-                    <span style={{color:'#777', fontSize:10}}>
+                    <span style={{color:'#8fa0b8', fontSize:10}}>
                       {feat.operation==='cutout'
                         ? (feat.revolveAxis ? `${feat.angleDeg ?? 360}°` : feat.extentMode==='through' ? '∞ through-all' : `${feat.depthMm||'?'}mm`)
                         : feat.operation==='revolve'
@@ -790,7 +901,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                         ? ` · ${feat.cutDirection}` : ''}
                       {feat.operation!=='cutout' && feat.operation!=='revolve' && feat.direction && feat.direction!=='both'
                         ? ` · ${feat.direction}` : ''}
-                      {groupSize(feat) > 1 ? ` · ${groupSize(feat)} bodies` : ''}
+                      {groupSize(feat) > 1 ? ` · ${groupSize(feat)} ${feat.operation==='cutout' ? 'holes' : 'bodies'}` : ''}
                     </span>
                   </div>
                 </div>
@@ -802,7 +913,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                   <div style={{display:'flex', alignItems:'center', gap:5}}>
                     <div style={{width:8,height:8,borderRadius:'50%',
                       background:feat.color||'#9c6ade', flexShrink:0}}/>
-                    <span style={{color:'#777', fontSize:10}}>
+                    <span style={{color:'#8fa0b8', fontSize:10}}>
                       R{feat.radius}mm · fillet{feat.edgePoints?.length > 1 ? ` · ${feat.edgePoints.length} edges` : ''}
                     </span>
                   </div>
@@ -856,7 +967,7 @@ export default function App() {
   // sketches hold their own geometry; working arrays are the active sketch buffer
   const [features,setFeatures]=useState([])
   const [activeSketchId,setActiveSketchId]=useState(null)  // which sketch is being edited
-  const featureCountRef=useRef({sketch:0,extrude:0,fillet:0,mirror:0,join:0,loft:0})       // for auto-naming
+  const featureCountRef=useRef({sketch:0,extrude:0,cutout:0,fillet:0,mirror:0,join:0,loft:0})       // for auto-naming
   const [treeCollapsed,setTreeCollapsed]=useState(false)
 
   const viewport3dRef=useRef(null)
@@ -869,8 +980,16 @@ export default function App() {
   // or editable as real sketch geometry.
   const faceRefSegments = (activePlane && typeof activePlane === 'object' && activePlane.refSegments) || []
   const snapLines = faceRefSegments.length ? [...lines, ...faceRefSegments] : lines
+  // Same idea as faceRefSegments/snapLines above, but for face-boundary loops
+  // that fit a circle (see FacePlane.js's fitCircleIfRound) — e.g. the rim of
+  // a cylinder's top face — so the existing center/quadrant/tangent snap
+  // logic in getGeoSnap (which only scans circles/arcs) can find them too.
   const [circles,setCircles]=useState([])
+  const faceRefCircles = (activePlane && typeof activePlane === 'object' && activePlane.refCircles) || []
+  const snapCircles = faceRefCircles.length ? [...circles, ...faceRefCircles] : circles
   const [arcs,setArcs]=useState([])
+  const faceRefArcs = (activePlane && typeof activePlane === 'object' && activePlane.refArcs) || []
+  const snapArcs = faceRefArcs.length ? [...arcs, ...faceRefArcs] : arcs
   const [splines,setSplines]=useState([])
   const [dims,setDims]=useState([])  // dimension annotations
 
@@ -879,6 +998,33 @@ export default function App() {
   const [splineClosed,setSplineClosed]=useState(false) // C key toggles
   const [startPoint,setStartPoint]=useState(null)
   const [circleCenter,setCircleCenter]=useState(null)
+  // Tangent-to-2-circles construction (T, click circle A, click circle B, type radius, Enter/click)
+  const [circleTanA,setCircleTanA]=useState(null)
+  const [circleTanB,setCircleTanB]=useState(null)
+  // Line/Circle/Spline toolbar flyouts render at the top level (position:fixed,
+  // anchored to the active tool button's measured screen rect) instead of as a
+  // child of the left sidebar — that sidebar has overflowY:'auto' for its own
+  // scrolling needs, and per the CSS spec once overflow-y is constrained,
+  // overflow-x can no longer stay 'visible' either, so a position:absolute
+  // popover anchored inside it (left:100%, popping out to the right) gets
+  // silently clipped invisible. Same root cause Retro-CAD's own flyout work
+  // hit and fixed by deleting its sidebar's overflow entirely — not an option
+  // here since this sidebar's scrolling is load-bearing (10 tools can exceed
+  // a short window's height), hence measuring out to a fixed-position render
+  // instead of just removing the clip.
+  const toolBtnRefs = useRef({})
+  const [flyoutAnchor,setFlyoutAnchor] = useState(null)
+  useEffect(() => {
+    if (sketchMode && (tool==='line'||tool==='circle'||tool==='spline')) {
+      const el = toolBtnRefs.current[tool]
+      if (el) {
+        const r = el.getBoundingClientRect()
+        setFlyoutAnchor({top:r.top, right:r.right})
+        return
+      }
+    }
+    setFlyoutAnchor(null)
+  }, [tool, sketchMode])
   const [mousePos,setMousePos]=useState(null)
   const [dimInput,setDimInput]=useState('')
   const [dimLocked,setDimLocked]=useState(false)
@@ -950,6 +1096,12 @@ export default function App() {
   const [pageSetupOpen,setPageSetupOpen]=useState(false)
   const [pageConfig,setPageConfig]=useState({size:'A4',orientation:'landscape',margin:10,showPage:false})
   const [guideOpen,setGuideOpen]=useState(false)
+  // Guide's toggle button only shows in the sketch profile environment (see
+  // its render site) — GuidePanel itself has no close affordance of its own,
+  // so leaving sketch mode while it's open would strand it open with no way
+  // to dismiss it in the 3D environment.
+  useEffect(() => { if (!sketchMode) setGuideOpen(false) }, [sketchMode])
+  const [saveAsOpen,setSaveAsOpen]=useState(false)  // false | 'sketch' | 'project' — which save flow the SaveAsPanel fallback modal is for
   const [gridVisible,setGridVisible]=useState(false)
   const [gridSnap,setGridSnap]=useState(false)
   const [gridSizeMm,setGridSizeMm]=useState(5)
@@ -1041,6 +1193,7 @@ export default function App() {
   const arcsRef=useRef([])
   const splinesRef=useRef([])
   const loadFileRef=useRef(null)
+  const loadProjectFileRef=useRef(null)
   const [loadError,setLoadError]=useState(null)
   useEffect(()=>{trackedPtsRef.current=trackedPts},[trackedPts])
   useEffect(()=>{splinePointsRef.current=splinePoints},[splinePoints])
@@ -1051,9 +1204,106 @@ export default function App() {
 
   function resetDrawState(){
     setStartPoint(null);setCircleCenter(null)
+    setCircleTanA(null);setCircleTanB(null)
     setDimInput('');setDimLocked(false);setAngleInput('');setAngleLocked(false);setFocusField('dim')
     setTrackedPts([]);trackedPtsRef.current=[];setDeferredTangent(null);setTKeyDown(false);setPKeyDown(false);setPerpSourceLineIdx(null)
   }
+  // Save button / Ctrl+S: Chromium browsers get a native folder+filename dialog;
+  // others fall back to a small filename prompt (still downloads to Downloads).
+  async function handleSave(){
+    if (canPickSaveLocation()) await saveProjectAs(lines,circles,arcs,splines,dims)
+    else setSaveAsOpen('sketch')
+  }
+
+  // Whole-PROJECT save — the feature tree, not just whatever sketch happens
+  // to be open (see handleSave/loadFileRef above, which stay scoped to a
+  // single sketch's buffer and are only shown while sketching). This is what
+  // the always-visible SAVE/OPEN toolbar buttons and Ctrl+S (outside sketch
+  // mode) use.
+  async function handleSaveProject(){
+    if (canPickSaveLocation()) await saveProjectFileAs(features, solids)
+    else setSaveAsOpen('project')
+  }
+
+  // Clears every tool's in-progress state — used before loading a project,
+  // since opening a new file replaces everything currently on screen. Chains
+  // the existing per-tool reset*() helpers rather than re-deriving which
+  // fields each one touches.
+  function resetAllToolState(){
+    resetDrawState(); resetSelection(); resetSpline(); resetOffset(); resetMirror(); resetCenter()
+    resetMoveCopy(); resetRotateCopy(); resetResize(); resetFillet(); resetTrace(); resetDim(); resetJoin(); resetText()
+    resetMeasure(); resetMirror3D(); resetJoin3D(); resetLoft3D(); resetFillet3D(); resetExportSTL()
+    setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
+    setTool('select')
+    setLines([]); setCircles([]); setArcs([]); setSplines([])
+    setExtrudeState(null); setExtrudeTool(null); setExtrudeHandlePos(null); setEditingFeatureId(null)
+  }
+
+  // Opens a .trc project: parses first (non-destructive), THEN clears the
+  // current scene and replays every feature through cadEngine from scratch
+  // via rebuildProjectFromFeatures — solids are never stored in the file
+  // itself, only the feature tree that produces them. Falls back to the old
+  // sketch-buffer-only format (pre-.trc save files) if the file has no
+  // feature tree at all, importing it as a bare sketch with a clear notice
+  // rather than a hard failure.
+  async function handleOpenProject(file){
+    let projectData = null, legacyData = null, parseErr = null
+    try {
+      projectData = await loadProjectFile(file)
+    } catch (err) {
+      parseErr = err
+      try { legacyData = await loadJSON(file) } catch { /* neither format */ }
+    }
+    if (!projectData && !legacyData) {
+      setLoadError(parseErr?.message || 'Could not open file')
+      setTimeout(()=>setLoadError(null), 3000)
+      return
+    }
+    resetAllToolState()
+    if (projectData) {
+      setFeatures(projectData.features)
+      try {
+        const newSolids = await rebuildProjectFromFeatures(projectData.features)
+        setSolids(newSolids)
+        setLoadError(null)
+      } catch (err) {
+        setCadError('Project loaded but rebuild failed: ' + err.message)
+        setTimeout(() => setCadError(null), 8000)
+      }
+    } else {
+      if (legacyData.dims) setDims(legacyData.dims)
+      setLines(legacyData.lines); setCircles(legacyData.circles); setArcs(legacyData.arcs); setSplines(legacyData.splines||[])
+      setFeatures([]); setSolids([])
+      setLoadError('Old-format file — loaded as a sketch only, no feature tree.')
+      setTimeout(()=>setLoadError(null), 4000)
+    }
+  }
+
+  // Solve for a circle of radius r externally tangent to both circleTanA and circleTanB.
+  // Returns {best,candidates} (best = candidate nearest ref) or null if no fit / no radius yet.
+  function tanCircleSolution(r, ref) {
+    if (!circleTanA||!circleTanB||!(r>0)||!ref) return null
+    const candidates=circleCircleIntersect(circleTanA.cx,circleTanA.cy,circleTanA.r+r,circleTanB.cx,circleTanB.cy,circleTanB.r+r)
+    if (!candidates.length) return null
+    return { best:nearestPt(candidates,ref), candidates }
+  }
+
+  // Approximate "what radius does the cursor imply" for the 2-tangent-circle construction.
+  // There's no simple closed form (the centre depends on r too), so this averages the radius
+  // each target circle would imply if the cursor were the new circle's centre — good enough
+  // for a natural grow/shrink feel while the mouse moves, before an exact number is typed.
+  function tanCircleGuessRadius(ref) {
+    if (!circleTanA||!circleTanB||!ref) return 1
+    const rA=Math.hypot(ref.x-circleTanA.cx,ref.y-circleTanA.cy)-circleTanA.r
+    const rB=Math.hypot(ref.x-circleTanB.cx,ref.y-circleTanB.cy)-circleTanB.r
+    return Math.max(1,(rA+rB)/2)
+  }
+
+  // Current radius for the 2-tangent-circle construction: typed value if present, else live mouse guess.
+  function tanCircleCurrentRadius(ref) {
+    return dimInput ? mmToPx(parseFloat(dimInput)||0) : tanCircleGuessRadius(ref)
+  }
+
   function resetSelection(){
     setSelection([]);setSelectHover(null);setSelectLiveGeom(null)
     setSelectDimField(null);setSelectDimPending({});setSelectDimAnchor('mc')
@@ -1188,7 +1438,7 @@ export default function App() {
 
   function computeEnd(start,raw,tracked){
     if (!dimLocked&&!angleLocked){
-      const geo=getGeoSnap(raw,snapLines,circles,arcs,start,false,splines,intersectionPts)
+      const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,start,false,splines,intersectionPts)
       if (geo&&geo.type!=='tan') return{x:geo.x,y:geo.y,snapType:geo.type,angleSnap:checkAngle(start,geo),tracks:[]}
     }
     const{snapped,tracks}=applyTracking(raw,tracked)
@@ -1312,7 +1562,7 @@ export default function App() {
 
   useEffect(()=>{
     if (tool!=='mirror'||!mirrorAccepted||!mirrorP1||!mousePos||!mirrorSel.length){setMirrorPreview(null);return}
-    const hSnap=getGeoSnap(mousePos,snapLines,circles,arcs,mirrorP1,false,splines,intersectionPts)
+    const hSnap=getGeoSnap(mousePos,snapLines,snapCircles,snapArcs,mirrorP1,false,splines,intersectionPts)
     let endPt
     if (hSnap&&hSnap.type!=='tan'){endPt={x:hSnap.x,y:hSnap.y}}
     else{const{snapped}=applyTracking(mousePos,trackedPts);const angled=getAngleSnap(mirrorP1,snapped);endPt={x:angled.x,y:angled.y}}
@@ -1549,11 +1799,16 @@ export default function App() {
     viewport3dRef.current.clearOverlay()
 
     // While sketching on a face, draw the underlying solid's own face boundary —
-    // these are the same segments used for snapping (activePlane.refSegments, from
-    // FacePlane.js's extractFaceBoundarySegments). They were originally snap-only
-    // (never rendered), but that made the reference geometry invisible even though
-    // you could snap to it — draw a faint outline so it's clear what's snappable.
-    if (sketchMode && faceRefSegments.length > 0) {
+    // the same geometry used for snapping (activePlane.refSegments/refCircles/
+    // refArcs, from FacePlane.js's faceHitToPlane). This was originally
+    // snap-only (never rendered), but that made the reference geometry
+    // invisible even though you could snap to it — draw a faint outline so
+    // it's clear what's snappable. Circles/arcs are sampled into points (not
+    // drawn with ctx.arc()) so they go through the same per-point
+    // sketchToScreen transform the line segments already use, staying correct
+    // under whatever screen transform is active rather than assuming a
+    // uniform-scale circle stays a circle on screen.
+    if (sketchMode && (faceRefSegments.length > 0 || faceRefCircles.length > 0 || faceRefArcs.length > 0)) {
       const vp = viewport3dRef.current
       const oc = vp.getOverlayCanvas?.()
       if (oc) {
@@ -1572,6 +1827,20 @@ export default function App() {
           ctx.lineTo(p2.x, p2.y)
           ctx.stroke()
         })
+        const strokeSweep = (cx, cy, r, a0, a1, steps) => {
+          let started = false
+          for (let i = 0; i <= steps; i++) {
+            const a = a0 + (a1-a0)*i/steps
+            const p = vp.sketchToScreen(cx+Math.cos(a)*r, cy+Math.sin(a)*r, 'face', activePlane)
+            if (!p) { started = false; continue }
+            if (!started) { ctx.beginPath(); ctx.moveTo(p.x, p.y); started = true }
+            else ctx.lineTo(p.x, p.y)
+          }
+          if (started) ctx.stroke()
+        }
+        faceRefCircles.forEach(c => strokeSweep(c.cx, c.cy, c.r, 0, Math.PI*2, 48))
+        faceRefArcs.forEach(a => strokeSweep(a.cx, a.cy, a.r, a.startAngle, a.endAngle,
+          Math.max(6, Math.round(Math.abs(a.endAngle-a.startAngle) / (Math.PI/24)))))
         ctx.setLineDash([])
         ctx.restore()
       }
@@ -1641,11 +1910,44 @@ export default function App() {
     }
     const over=viewport3dRef.current.getOverlayCtx(activePlane||'XY')
     if (!over) return
-    const {ctx,sc}=over
+    const {ctx,sc,scX,scY,vtx,vty}=over
 
     // In sketch mode: use dark colours on white background
     const sketchLineColor = sketchMode ? '#111111' : '#2196F3'
     const sketchHighlight = sketchMode ? '#0066cc' : '#64B5F6'
+
+    // ── Grid dots (sketch mode only) ────────────────────────────────────────
+    // Reference-grid dots at gridSizeMm spacing, drawn in the sketch's own
+    // 2D pixel space so they line up correctly on any active plane (XY/XZ/
+    // YZ/face) — unlike the 3D reference grid mesh, which only lies flat on
+    // world XY and would be misaligned for other sketch planes. Gated on the
+    // same gridVisible flag as the 3D grid so the GRID toolbar button
+    // controls both instead of the sketch dots being permanently on.
+    if (sketchMode && gridVisible) {
+      const baseGridPx = mmToPx(gridSizeMm)
+      if (baseGridPx > 0) {
+        const xMin=(0-vtx)/scX, xMax=(canvasSize.w-vtx)/scX
+        const yMin=(0-vty)/scY, yMax=(canvasSize.h-vty)/scY
+        // Zoomed far out, gridSizeMm spacing would mean thousands of dots —
+        // coarsen by doubling until the on-screen count is reasonable so the
+        // grid stays visible (just less fine) instead of vanishing entirely.
+        let gridPx = baseGridPx
+        while ((xMax-xMin)/gridPx * (yMax-yMin)/gridPx > 6000) gridPx *= 2
+        const x0=Math.floor(xMin/gridPx)*gridPx
+        const y0=Math.floor(yMin/gridPx)*gridPx
+        {
+          ctx.save()
+          ctx.fillStyle = '#c4c4cc'
+          const r = 1.4/sc
+          for (let x=x0; x<=xMax; x+=gridPx) {
+            for (let y=y0; y<=yMax; y+=gridPx) {
+              ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill()
+            }
+          }
+          ctx.restore()
+        }
+      }
+    }
 
     // ── Crosshairs (sketch mode only) ─────────────────────────────────────
     // Draw X and Y axis lines through the plane origin so students can
@@ -1764,9 +2066,10 @@ export default function App() {
       const isRzHov=resizeHover?.kind==='circle'&&resizeHover.idx===idx&&!isRzSel
       const isSelHov=selectHover?.kind==='circle'&&selectHover.idx===idx&&!selection.some(s=>s.kind==='circle'&&s.idx===idx)
       const isSelected=selection.some(s=>s.kind==='circle'&&s.idx===idx)
-      const color=isDelTarget?'#F44336':isMirSel||isCenSel||isMCSel||isRCSel||isRzSel?'#FF9800':isMirHov||isCenHov||isMCHov||isRCHov||isRzHov?'#FFD600':isSelHov||isSelected?'#64B5F6':null
+      const isTanSel=(circleTanA&&circleTanA.circleIdx===idx)||(circleTanB&&circleTanB.circleIdx===idx)
+      const color=isDelTarget?'#F44336':isMirSel||isCenSel||isMCSel||isRCSel||isRzSel||isTanSel?'#FF9800':isMirHov||isCenHov||isMCHov||isRCHov||isRzHov?'#FFD600':isSelHov||isSelected?'#64B5F6':null
       if (!color) return
-      const lw=(isDelTarget||isMirSel||isCenSel||isMCSel||isRCSel||isRzSel?3:2)/sc
+      const lw=(isDelTarget||isMirSel||isCenSel||isMCSel||isRCSel||isRzSel||isTanSel?3:2)/sc
       ctx.save();ctx.strokeStyle=color;ctx.lineWidth=lw;ctx.setLineDash([])
       ctx.beginPath();ctx.arc(c.cx,c.cy,c.r,0,Math.PI*2);ctx.stroke();ctx.restore()
     })
@@ -1836,7 +2139,7 @@ export default function App() {
         ctx.beginPath();ctx.arc(0,0,4,0,Math.PI*2)
         ctx.fillStyle=i===0?'#f97316':'#ff9800';ctx.fill();ctx.restore()
       })
-      const geo=getGeoSnap(mousePos,snapLines,circles,arcs,splinePoints[splinePoints.length-1],false,splines,intersectionPts)
+      const geo=getGeoSnap(mousePos,snapLines,snapCircles,snapArcs,splinePoints[splinePoints.length-1],false,splines,intersectionPts)
       if (geo) drawLineIndicator(ctx,geo.x,geo.y,geo.type,sc)
       ctx.restore()
     }
@@ -1884,7 +2187,7 @@ export default function App() {
     // ── Mirror axis + preview ──
     if (tool==='mirror'&&mirrorAccepted&&mirrorP1&&mousePos){
       ctx.save()
-      const hSnap=getGeoSnap(mousePos,snapLines,circles,arcs,mirrorP1,false,splines,intersectionPts)
+      const hSnap=getGeoSnap(mousePos,snapLines,snapCircles,snapArcs,mirrorP1,false,splines,intersectionPts)
       let endPt,snapType=null,angleSnap=null,tracks=[]
       if (hSnap&&hSnap.type!=='tan'&&hSnap.type!=='oncircle'){endPt={x:hSnap.x,y:hSnap.y};snapType=hSnap.type;angleSnap=checkAngle(mirrorP1,hSnap)}
       else{const{snapped,tracks:tr}=applyTracking(mousePos,trackedPts);tracks=tr;const angled=getAngleSnap(mirrorP1,snapped);endPt={x:angled.x,y:angled.y};angleSnap=angled.angleSnap}
@@ -1906,7 +2209,7 @@ export default function App() {
       }
     }
     if (tool==='mirror'&&mirrorAccepted&&!mirrorP1&&mousePos){
-      const geo=getGeoSnap(mousePos,snapLines,circles,arcs,null,false,splines,intersectionPts)
+      const geo=getGeoSnap(mousePos,snapLines,snapCircles,snapArcs,null,false,splines,intersectionPts)
       const{tracks}=applyTracking(mousePos,trackedPts)
       if (tracks.length) drawTracks(ctx,tracks,trackedPts,sc)
       if (geo) drawLineIndicator(ctx,geo.x,geo.y,geo.type,sc)
@@ -1963,7 +2266,7 @@ export default function App() {
         ctx.fillStyle=isFirst?'#FF9800':'#26C6DA';ctx.fill()
       }
       if (joinFirstPt){
-        const snap=getGeoSnap(mousePos,snapLines,circles,arcs,{x:joinFirstPt.x,y:joinFirstPt.y},false,splines,intersectionPts)
+        const snap=getGeoSnap(mousePos,snapLines,snapCircles,snapArcs,{x:joinFirstPt.x,y:joinFirstPt.y},false,splines,intersectionPts)
         const snapPt=snap||mousePos
         ctx.beginPath();ctx.moveTo(joinFirstPt.x,joinFirstPt.y);ctx.lineTo(snapPt.x,snapPt.y)
         ctx.strokeStyle='#FF980066';ctx.lineWidth=1/sc;ctx.setLineDash([6/sc,3/sc]);ctx.stroke();ctx.setLineDash([])
@@ -2079,7 +2382,7 @@ export default function App() {
 
     // ── Line tool rubber-band ──
     if (tool==='line'&&startPoint){
-      const hSnap=getGeoSnap(mousePos,snapLines,circles,arcs,startPoint,tKeyDown,splines,intersectionPts)
+      const hSnap=getGeoSnap(mousePos,snapLines,snapCircles,snapArcs,startPoint,tKeyDown,splines,intersectionPts)
       let endPt,isTanEnd=false
       if (hSnap?.type==='tan'){
         const c=hSnap.circleIdx!==undefined?circles[hSnap.circleIdx]:{cx:hSnap.cx,cy:hSnap.cy,r:hSnap.r}
@@ -2126,7 +2429,7 @@ export default function App() {
 
     // ── Circle tool rubber-band ──
     } else if (tool==='circle'&&circleCenter){
-      const geo=!dimLocked?getGeoSnap(mousePos,snapLines,circles,arcs,circleCenter,tKeyDown,splines,intersectionPts):null
+      const geo=!dimLocked?getGeoSnap(mousePos,snapLines,snapCircles,snapArcs,circleCenter,tKeyDown,splines,intersectionPts):null
       const {tracks}=applyTracking(mousePos,trackedPts)
       if (tracks.length) drawTracks(ctx,tracks,trackedPts,sc)
       let r=1
@@ -2140,21 +2443,47 @@ export default function App() {
       drawLabel(ctx,(dimLocked?'🔒 R ':'R ')+(dimInput||pxToMm(r).toFixed(1))+' mm',circleCenter.x+r/2,circleCenter.y-14/sc,dimLocked?'#FF9800':'#2196F3',sc)
       if (geo) drawLineIndicator(ctx,geo.x,geo.y,geo.type,sc)
 
+    } else if (tool==='circle'&&circleTanA&&circleTanB&&mousePos){
+      // Tangent-to-2-circles preview — live radius from cursor until an exact number is typed
+      const r=tanCircleCurrentRadius(mousePos)
+      const sol=tanCircleSolution(r,mousePos)
+      if (!sol){
+        drawLabel(ctx,'No fit — try a different radius',mousePos.x,mousePos.y-20/sc,'#F44336',sc)
+      } else {
+        const{best,candidates}=sol
+        candidates.forEach(cand=>{
+          if (cand===best) return
+          ctx.beginPath();ctx.arc(cand.x,cand.y,r,0,Math.PI*2)
+          ctx.strokeStyle='#4CAF5055';ctx.lineWidth=1/sc;ctx.setLineDash([4/sc,3/sc]);ctx.stroke();ctx.setLineDash([])
+        })
+        ctx.beginPath();ctx.arc(best.x,best.y,r,0,Math.PI*2)
+        ctx.strokeStyle='#4CAF50';ctx.lineWidth=2/sc;ctx.setLineDash([6/sc,3/sc]);ctx.stroke();ctx.setLineDash([])
+        // Tangent point markers — on the line from each target's centre to the new centre, at the target's radius
+        ;[circleTanA,circleTanB].forEach(tc=>{
+          const d=Math.hypot(best.x-tc.cx,best.y-tc.cy)||1
+          const t={x:tc.cx+(best.x-tc.cx)*tc.r/d,y:tc.cy+(best.y-tc.cy)*tc.r/d}
+          ctx.save();ctx.translate(t.x,t.y);ctx.scale(1/sc,1/sc)
+          ctx.beginPath();ctx.arc(0,0,4,0,Math.PI*2);ctx.fillStyle='#4CAF50';ctx.fill()
+          ctx.restore()
+        })
+        drawLabel(ctx,(dimInput?'R ':'R ~')+pxToMm(r).toFixed(1)+' mm · Enter or click to apply',best.x,best.y-r/sc-14/sc,'#4CAF50',sc)
+      }
+
     // ── Idle snap indicator ──
     } else if (tool!=='trim'&&tool!=='delete'&&tool!=='offset'&&tool!=='mirror'&&tool!=='movecopy'&&tool!=='rotatecopy'&&tool!=='resize'&&tool!=='trace'){
       const{tracks}=applyTracking(mousePos,trackedPts)
       if (tracks.length) drawTracks(ctx,tracks,trackedPts,sc)
-      const geo=getGeoSnap(mousePos,snapLines,circles,arcs,null,tKeyDown,splines,intersectionPts)
+      const geo=getGeoSnap(mousePos,snapLines,snapCircles,snapArcs,null,tKeyDown,splines,intersectionPts)
       if (geo) drawLineIndicator(ctx,geo.x,geo.y,geo.type,sc)
     }
 
     // Snap indicator for movecopy/rotatecopy base point
     if ((tool==='movecopy'&&moveCopyAccepted||tool==='rotatecopy'&&rotateCopyAccepted)&&!startPoint){
-      const geo=getGeoSnap(mousePos,snapLines,circles,arcs,null,false,splines,intersectionPts)
+      const geo=getGeoSnap(mousePos,snapLines,snapCircles,snapArcs,null,false,splines,intersectionPts)
       if (geo) drawLineIndicator(ctx,geo.x,geo.y,geo.type,sc)
     }
 
-  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetDistLocked,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,intersectionPts,joinHover,joinFirstPt,dims,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState])
+  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetDistLocked,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,intersectionPts,joinHover,joinFirstPt,dims,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm])
 
 
   // ── Phase 2 Step 3: plane tagging ────────────────────────────────────────
@@ -2171,24 +2500,32 @@ export default function App() {
   // ── Include From Face ────────────────────────────────────────────────────
   // General sketch tool (works while sketching on any solid face — extrude,
   // cutout, or a loft profile): copies the CURRENT face's own boundary into
-  // this sketch as real, editable line geometry, so it can be traced/reused
-  // as a profile instead of redrawn by hand. Sources from
-  // activePlane.refSegments — already computed in sketch-space by
-  // FacePlane.js's faceHitToPlane() when the face was picked (the same data
-  // that already powers edge-snapping while sketching on a face), so this
-  // needs no new geometry extraction. It's a mesh-derived polygon
-  // approximation of the face boundary, not exact OCC curves (fine per the
-  // user's explicit "don't care if it's a circle/polyline/spline/arc" — they
-  // just want the shape available to work with, not a bit-exact curve).
+  // this sketch as real, editable geometry, so it can be traced/reused as a
+  // profile instead of redrawn by hand. Sources from activePlane.refSegments/
+  // refCircles/refArcs — already computed in sketch-space by FacePlane.js's
+  // faceHitToPlane() when the face was picked (the same data that already
+  // powers edge-snapping while sketching on a face), so this needs no new
+  // geometry extraction. A whole circular loop (a cylinder's rim) becomes one
+  // real circle, a mixed loop's curved runs (a slot's rounded ends) become
+  // real arcs, and only the genuinely straight parts fall back to lines —
+  // see FacePlane.js's segmentLoopIntoPrimitives for how those are told apart.
   function includeFaceGeometry() {
     const ap = activePlaneRef.current
-    if (!ap || typeof ap !== 'object' || !ap.refSegments || !ap.refSegments.length) return
+    if (!ap || typeof ap !== 'object') return
+    const hasGeom = (ap.refSegments?.length || ap.refCircles?.length || ap.refArcs?.length)
+    if (!hasGeom) return
     const tag = planeTag()
-    const newLines = ap.refSegments.map(seg => ({
+    const newLines = (ap.refSegments||[]).map(seg => ({
       x1: seg.x1, y1: seg.y1, x2: seg.x2, y2: seg.y2, ...tag,
+    }))
+    const newCircles = (ap.refCircles||[]).map(c => ({ cx: c.cx, cy: c.cy, r: c.r, ...tag }))
+    const newArcs = (ap.refArcs||[]).map(a => ({
+      cx: a.cx, cy: a.cy, r: a.r, startAngle: a.startAngle, endAngle: a.endAngle, ...tag,
     }))
     commit(snapshot())
     setLines(prev => [...prev, ...newLines])
+    setCircles(prev => [...prev, ...newCircles])
+    setArcs(prev => [...prev, ...newArcs])
   }
 
   // ── Feature tree helpers ─────────────────────────────────────────────────
@@ -2200,6 +2537,10 @@ export default function App() {
   function nextExtrudeName() {
     featureCountRef.current.extrude += 1
     return `Extrude ${featureCountRef.current.extrude}`
+  }
+  function nextCutoutName() {
+    featureCountRef.current.cutout += 1
+    return `Cutout ${featureCountRef.current.cutout}`
   }
   function nextFilletName() {
     featureCountRef.current.fillet += 1
@@ -2254,6 +2595,7 @@ export default function App() {
   function handleFaceClick(facePlane) {
     if (tool==='mirror3d' && mirror3dSourceFeatureId) { commitMirror3D({ kind:'face', facePlane }); return }
     if (tool==='loft3d' && !loftState) { startLoftProfile1({ kind:'face', facePlane }); return }
+    if (tool==='exportfacedxf') { handleExportFaceDXFFaceClick(facePlane); return }
     if (extrudeState) return  // step 3 (depth): ignore stray face clicks
     enterSketch(facePlane)
     viewport3dRef.current?.snapToFace(facePlane)
@@ -2345,18 +2687,6 @@ export default function App() {
       const editingFeat = editingFeatureId ? features.find(f => f.id === editingFeatureId) : null
       const isCutoutEdit = editingFeat && extrudeTool === 'cutout'
 
-      // Whole-word text extrude: if the sketch contains text-imported letters
-      // (see TextPanel.jsx's textId tagging), treat every letter sharing the
-      // SAME textId as one group — one click extrudes the whole word, each
-      // letter gets its own solid, and holes (the counter in O/A/8/etc.) are
-      // already attached per-letter via detectProfiles/resolveTextHoles.
-      // Scoped to extrude only (not cutout), and to the FIRST detected
-      // profile's textId — a sketch mixing text with other shapes still only
-      // extrudes one selection at a time, same as any other mixed sketch.
-      const textGroup = (extrudeTool !== 'cutout' && best.pts.textId)
-        ? allProfiles.filter(p => p.pts.textId === best.pts.textId).map(p => p.pts)
-        : null
-
       // Revolve: if the sketch has an axis line (drawn with the Axis tool —
       // see App3D.jsx's tool==='axis' handling), extrude/cutout auto-detects
       // it and builds a solid (or cut volume) of revolution instead of a
@@ -2391,7 +2721,6 @@ export default function App() {
         planeId:       best.planeId,
         facePlane:     best.facePlane || null,
         pickedIdx:     0,
-        textGroup,
         revolveAxis,
         revolveReverse: revolveAxis ? (editingFeat?.revolveReverse || false) : false,
         // depthInput doubles as the angle input (in degrees) when revolveAxis is
@@ -2736,6 +3065,56 @@ export default function App() {
     setMeasureP1(null)
   }
 
+  // ── Export Face as DXF ─────────────────────────────────────────────────────
+  // No-sketch-mode tool that reuses the same sketchArmed/onFaceClick pipeline
+  // Mirror3D/Loft3D use for face-picking — hovering a face shows the same
+  // square face-plane indicator those tools get for free (Viewport3D.jsx's
+  // animate() loop), and clicking commits immediately via handleFaceClick
+  // below, instead of a separate raw-raycast hover/click pair. Pulls the
+  // face's real OCC boundary (outer loop + every hole, via cadWorker.js's
+  // exportFaceDXF) and writes it to a .dxf file — unlike "Include From Face"
+  // this never goes through the tessellated render mesh, so cutout holes
+  // come through intact.
+  const [exportFaceDXFBusy, setExportFaceDXFBusy] = useState(false)
+
+  function activateExportFaceDXFTool() {
+    resetSelection()
+    resetDrawState()
+    if (sketchModeRef.current) {
+      setSketchMode(false)
+      setActivePlane(null)
+      setActiveSketchId(null)
+      activePlaneRef.current = null
+    }
+    setTool('exportfacedxf')
+    setExtrudeTool(null)
+    setExtrudeState(null)
+    setEditingFeatureId(null)
+    viewport3dRef.current?.restoreSavedView()
+  }
+
+  // facePlane.solidId/.point are stamped on by Viewport3D's handleClickInternal
+  // (see the walk-up-to-owning-group lookup next to raycastSolidFace) — the
+  // plain FacePlane class itself carries neither. Use .point (the raw click
+  // point, guaranteed to be on the actual surface) rather than .origin (the
+  // whole face's coplanar-vertex centroid, meant for sketch placement — on a
+  // face with a hole that centroid can land inside the cut-out and miss the
+  // solid's material entirely, which fails the worker's FaceFinder pick).
+  async function handleExportFaceDXFFaceClick(facePlane) {
+    if (exportFaceDXFBusy || facePlane.solidId == null) return
+    const SCALE = 2
+    const point = [facePlane.point.x/SCALE, facePlane.point.y/SCALE, facePlane.point.z/SCALE]
+    setExportFaceDXFBusy(true)
+    try {
+      const { dxfData } = await cadEngine.exportFaceDXF({ solidId: facePlane.solidId, point })
+      await writeFaceDXF(dxfData.lines, dxfData.circles, dxfData.arcs, 'face.dxf')
+    } catch (err) {
+      console.error('Export Face DXF failed:', err)
+    } finally {
+      setExportFaceDXFBusy(false)
+    }
+  }
+
   // ── Mirror (3D feature) state machine ─────────────────────────────────────
   // Step 1: click a feature row in the Feature Tree to pick mirror3dSourceFeatureId.
   // Step 2: click a work plane or solid face — commits immediately (see
@@ -2794,7 +3173,17 @@ export default function App() {
 
   function handleToggleJoinMember(featId) {
     if (tool !== 'join3d') return
-    setJoinSel(prev => prev.includes(featId) ? prev.filter(id => id !== featId) : [...prev, featId])
+    // A Feature Tree row can represent a whole multi-body group (e.g. a
+    // whole-word text extrude — one row, N letter solids, see groupSize()
+    // in FeatureTree) collapsed down to a single displayed/clickable row.
+    // Toggling must pull in every sibling sharing that groupId, not just
+    // the clicked row's own feature id, or only one body ever joins.
+    const feat = features.find(f => f.id === featId)
+    const ids = feat?.groupId ? features.filter(f => f.groupId === feat.groupId).map(f => f.id) : [featId]
+    setJoinSel(prev => {
+      const allSelected = ids.every(id => prev.includes(id))
+      return allSelected ? prev.filter(id => !ids.includes(id)) : [...new Set([...prev, ...ids])]
+    })
   }
 
   // Keeps every currently-selected join member glowing in the 3D view, live
@@ -3149,7 +3538,7 @@ export default function App() {
 
     const newFeat = {
       id: `cutout-${baseSolid.id}-${Date.now()}`,
-      type: 'extrude', name: nextExtrudeName(), operation: 'cutout',
+      type: 'extrude', name: nextCutoutName(), operation: 'cutout',
       solidId: baseSolid.id, sourceFeatureId: cutFeat.id,
       planeId: 'face', facePlane: mirroredFacePlane,
       profilePts: mirroredPts,
@@ -3257,18 +3646,22 @@ export default function App() {
     }
   }
 
-  async function rebuildFeatureSolid(feat) {
+  // `feats`/`solidsLookup` default to the live component state so every
+  // existing call site behaves exactly as before — pass them explicitly to
+  // rebuild against a different snapshot (rebuildProjectFromFeatures does
+  // this, replaying a just-loaded project before its solids exist in state).
+  async function rebuildFeatureSolid(feat, feats = features, solidsLookup = solids) {
     if (feat.operation === 'mirror') {
-      const sourceSolid = solids.find(s => s.id === feat.sourceSolidId)
+      const sourceSolid = solidsLookup.find(s => s.id === feat.sourceSolidId)
       if (!sourceSolid) throw new Error('Mirror source solid not found')
       const base = buildBaseWorkerParams(sourceSolid)
-      const ops = buildSolidOpsForWorker(sourceSolid, features)
+      const ops = buildSolidOpsForWorker(sourceSolid, feats)
       return cadEngine.mirrorShape({ solidId: feat.solidId, base, ops, plane: feat.mirrorPlane })
     }
     // rebuildSolidChain also transparently replays this member's OWN
-    // cutouts/fillets — untouched by the join, still in `features` keyed to
+    // cutouts/fillets — untouched by the join, still in `feats` keyed to
     // feat.solidId the whole time.
-    return rebuildSolidChain(featureToTempSolid(feat))
+    return rebuildSolidChain(featureToTempSolid(feat), {}, feats, solidsLookup)
   }
 
   // Re-fuses a join solid's base from its members' own stored feature params
@@ -3277,18 +3670,30 @@ export default function App() {
   // first. Member solids no longer exist in `solids` while locked, so this
   // reconstructs each member's base/ops from its FEATURE entry instead (same
   // per-member params rebuildFeatureSolid's extrude/revolve case builds).
-  // A mirror member has no extrude-style base/ops of its own — passes
-  // base:null/ops:[], relying on that member's shapeStore entry already
-  // being warm (true unless the worker restarted since it was joined).
-  async function rebuildJoinBaseMesh(joinSolid) {
-    const joinFeat = features.find(f => f.solidId === joinSolid.id && f.operation === 'join')
+  // A mirror member has no extrude-style base/ops of its own — its shapeStore
+  // entry must actually exist before the join can reference it, so it's
+  // proactively rebuilt via cadEngine.mirrorShape here rather than assumed
+  // warm. That assumption held during live editing (the mirror was always
+  // created earlier in the same session) but breaks on a cold worker — e.g.
+  // right after a project load, where nothing has been built yet.
+  async function rebuildJoinBaseMesh(joinSolid, feats = features, solidsLookup = solids) {
+    const joinFeat = feats.find(f => f.solidId === joinSolid.id && f.operation === 'join')
     if (!joinFeat) throw new Error('Join feature not found for solid')
-    const memberFeats = (joinFeat.memberFeatureIds || []).map(id => features.find(f => f.id === id)).filter(Boolean)
-    const members = memberFeats.map(mf => {
-      if (mf.operation === 'mirror') return { solidId: mf.solidId, base: null, ops: [] }
-      const tempSolid = featureToTempSolid(mf)
-      return { solidId: mf.solidId, base: buildBaseWorkerParams(tempSolid), ops: buildSolidOpsForWorker(tempSolid, features) }
-    })
+    const memberFeats = (joinFeat.memberFeatureIds || []).map(id => feats.find(f => f.id === id)).filter(Boolean)
+    const members = []
+    for (const mf of memberFeats) {
+      if (mf.operation === 'mirror') {
+        const sourceSolid = solidsLookup.find(s => s.id === mf.sourceSolidId)
+        if (!sourceSolid) throw new Error('Mirror source solid not found (join member)')
+        const base = buildBaseWorkerParams(sourceSolid)
+        const ops = buildSolidOpsForWorker(sourceSolid, feats)
+        await cadEngine.mirrorShape({ solidId: mf.solidId, base, ops, plane: mf.mirrorPlane })
+        members.push({ solidId: mf.solidId, base: null, ops: [] })
+      } else {
+        const tempSolid = featureToTempSolid(mf)
+        members.push({ solidId: mf.solidId, base: buildBaseWorkerParams(tempSolid), ops: buildSolidOpsForWorker(tempSolid, feats) })
+      }
+    }
     const meshData = await cadEngine.joinShapes({ solidId: joinSolid.id, members })
     return { meshData, baseWorkerParams: null }
   }
@@ -4030,13 +4435,17 @@ export default function App() {
   // applied first. `overrideId` + `overrideCut`/`overrideFilletRadius`
   // substitutes new params for ONE feature being edited; `skipId` omits one
   // being deleted. Returns the final meshData.
-  async function rebuildSolidChain(baseSolid, { overrideId=null, overrideCut=null, overrideFilletRadius=null, skipId=null } = {}) {
+  async function rebuildSolidChain(baseSolid, { overrideId=null, overrideCut=null, overrideFilletRadius=null, skipId=null, skipIds=null } = {}, feats = features, solidsLookup = solids) {
     let { meshData, baseWorkerParams } = baseSolid.operation === 'join'
-      ? await rebuildJoinBaseMesh(baseSolid)
+      ? await rebuildJoinBaseMesh(baseSolid, feats, solidsLookup)
       : await rebuildBaseMesh(baseSolid)
-    const ops = features.filter(f => f.solidId === baseSolid.id && (f.operation === 'cutout' || f.type === 'fillet'))
+    const ops = feats.filter(f => f.solidId === baseSolid.id && (f.operation === 'cutout' || f.type === 'fillet'))
+    // skipIds lets a caller skip several ops in ONE rebuild pass (e.g. deleting
+    // or re-sketching every member of a multi-hole cutout group that shares this
+    // solidId) instead of doing N separate full rebuild-and-replay passes.
+    const skipSet = skipIds ? new Set(skipIds) : null
     for (const opFeat of ops) {
-      if (opFeat.id === skipId) continue
+      if (opFeat.id === skipId || skipSet?.has(opFeat.id)) continue
       if (opFeat.type === 'fillet') {
         const radius = opFeat.id === overrideId ? overrideFilletRadius : opFeat.radius
         meshData = await cadEngine.fillet3d({ solidId: baseSolid.id, edgePoints: opFeat.edgePoints, radius, base: baseWorkerParams })
@@ -4048,10 +4457,38 @@ export default function App() {
     return meshData
   }
 
+  // Rebuilds every solid in a project from scratch, purely from a loaded
+  // `features` array — the load-time counterpart to editing, which only ever
+  // rebuilds ONE feature's dependency chain reactively. Walks the tree in
+  // order and reuses rebuildFeatureSolid for each top-level feature (it
+  // already dispatches extrude/revolve/loft through rebuildSolidChain and
+  // mirror through cadEngine.mirrorShape directly); sketches, and cutout/
+  // fillet features, are consumed inside that chain rather than getting a
+  // standalone solid of their own. `newSolids` is built up incrementally
+  // (not read from React state, which won't hold anything yet) so a later
+  // mirror/join feature can find the solid it depends on — this relies on
+  // `loadedFeatures` being in creation order, same as every other place in
+  // this file that assumes dependencies appear earlier in the array.
+  async function rebuildProjectFromFeatures(loadedFeatures) {
+    const newSolids = []
+    for (const feat of loadedFeatures) {
+      if (feat.type === 'sketch' || feat.type === 'fillet' || feat.operation === 'cutout') continue
+      if (feat.joinedInto) continue
+      const meshData = await rebuildFeatureSolid(feat, loadedFeatures, newSolids)
+      const group = replicadMeshToThree(meshData, feat.color, feat.solidId)
+      newSolids.push({
+        ...featureToTempSolid(feat),
+        group, color: feat.color, hidden: !!feat.hidden,
+        sourceSolidId: feat.sourceSolidId, mirrorPlane: feat.mirrorPlane,
+      })
+    }
+    return newSolids
+  }
+
   async function commitExtrude(overrideState=null) {
     const state = overrideState || extrudeStateRef.current || extrudeState
     if (!state) return
-    const { profiles, planeId, pickedIdx, depthInput, direction='both', extentMode='through', textGroup=null, revolveAxis=null, revolveReverse=false,
+    const { profiles, planeId, pickedIdx, depthInput, direction='both', extentMode='through', revolveAxis=null, revolveReverse=false,
             sketchLines:savedLines=[], sketchCircles:savedCircles=[], sketchArcs:savedArcs=[], sketchSplines:savedSplines=[] } = state
     const depthMm = parseFloat(depthInput) || 20
     const angleDeg = revolveAxis ? Math.min(360, Math.max(1, depthMm)) : null
@@ -4100,14 +4537,13 @@ export default function App() {
       const lastSketch = [...features].reverse().find(f=>f.type==='sketch')
 
       if (isCutout) {
-        // Revolve-cutout: same axis-detection as a plain revolve (see
-        // handleFinishSketch), just subtracted from the target solid(s)
-        // instead of added as a new one. No depth/direction concept — the
-        // swept volume is fully defined by the profile, axis, and angle.
-        const cut = revolveAxis
+        // Builds cut params for ONE profile — revolve-cutout (axis + angle,
+        // no depth/direction) or a plain linear cut. Mirrors
+        // buildCutWorkerParams' own branching so the two stay in sync.
+        const buildCut = p => revolveAxis
           ? {
-              pts, planeId, axis: revolveAxis, angleDeg, reverse: revolveReverse,
-              circle: pts.circleMeta || null,
+              pts: p, planeId, axis: revolveAxis, angleDeg, reverse: revolveReverse,
+              circle: p.circleMeta || null,
               ...(facePlane ? {
                 normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z],
                 origin: [pxToMm(facePlane.origin.x), pxToMm(facePlane.origin.y), pxToMm(facePlane.origin.z)],
@@ -4115,123 +4551,155 @@ export default function App() {
               } : {}),
             }
           : {
-              pts, depthMm: cutDepthMm, planeId, direction: cutDirection,
-              circle: pts.circleMeta || null,
+              pts: p, depthMm: cutDepthMm, planeId, direction: cutDirection,
+              circle: p.circleMeta || null,
               ...(facePlane ? {
                 normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z],
                 origin: [pxToMm(facePlane.origin.x), pxToMm(facePlane.origin.y), pxToMm(facePlane.origin.z)],
                 uAxis:  [facePlane.uAxis.x,  facePlane.uAxis.y,  facePlane.uAxis.z],
               } : {}),
             }
+        // Revolve-cutouts stay single-profile — a sketch axis line implies one
+        // profile in practice, and revolve is explicitly out of scope for the
+        // multi-profile cutout below — any extra profiles are ignored.
+        const cutProfiles = revolveAxis ? [pts] : profiles
 
-        if (editingId && editingFeat?.groupId) {
-          // Editing a grouped (multi-body) cutout — apply the new sketch/extent
-          // to every solid the group originally spanned. Membership stays fixed
-          // (we don't re-detect overlap here): nudging a depth or sketch should
-          // keep affecting the same bodies it did before, not silently change
-          // which ones are included.
-          const groupId = editingFeat.groupId
-          const groupMembers = features.filter(f => f.groupId === groupId)
+        if (editingId && !overrideState) {
+          // GEAR icon: extent-only edit (depth/direction/extentMode changed,
+          // profile geometry did NOT — handleEditExtent always reaches
+          // commitExtrude() via the Step-3 popup, i.e. with no explicit
+          // overrideState, whether or not the feature is grouped; a pencil
+          // re-sketch always passes an explicit overrideState — see
+          // handleFinishSketch). Refresh every member's cut from ITS OWN
+          // stored profile — never the single representative `pts`
+          // handleEditExtent seeds `profiles` with — so a multi-hole group
+          // keeps each hole's own position/size and only depth/direction change.
+          const groupMembers = editingFeat.groupId
+            ? features.filter(f => f.groupId === editingFeat.groupId)
+            : [editingFeat]
           const updatedById = new Map()
           for (const member of groupMembers) {
             const baseSolid = solids.find(s => s.id === member.solidId)
             if (!baseSolid) continue
-            // `member` IS the cutout feature for this solid within the group being edited.
-            const meshData = await rebuildSolidChain(baseSolid, { overrideId: member.id, overrideCut: cut })
+            const memberCut = buildCutWorkerParams({
+              ...member, cutDepthMm, cutDirection, extentMode, revolveReverse,
+              angleDeg: member.revolveAxis ? angleDeg : member.angleDeg,
+            })
+            const meshData = await rebuildSolidChain(baseSolid, { overrideId: member.id, overrideCut: memberCut })
             const group = replicadMeshToThree(meshData, baseSolid.color, baseSolid.id)
             const updatedSolid = { ...baseSolid, group }
             setSolids(prev => prev.map(s => s.id === baseSolid.id ? updatedSolid : s))
-            updatedById.set(member.id, {
-              ...member, depthMm, cutDepthMm, cutDirection, extentMode, profilePts: pts, facePlane,
-              revolveAxis, angleDeg, revolveReverse, ...sketchGeom,
-            })
+            updatedById.set(member.id, { ...member, depthMm, cutDepthMm, cutDirection, extentMode })
             await rebuildDependentMirrors(updatedSolid)
           }
           setFeatures(prev => prev.map(f => updatedById.get(f.id) || f))
 
-        } else if (!editingId) {
-          // Brand new cutout: find every solid body the cut's actual volume
-          // overlaps (not just the one whose face was sketched on), so cutting
-          // through two stacked extrusions affects both — whether it's a
-          // through-all cut or a value-extent one deep enough to reach the
-          // second body.
-          // Cheap 3D overlap test using the already-rendered geometry: build the
-          // cut's own bounding box, then check which solids' bounding boxes it
-          // intersects. OCC does the real, precise boolean cut below — this is
-          // only a candidate filter so we don't create no-op cutout features
-          // for bodies the cut never touches.
-          let cutBox
-          if (revolveAxis) {
-            // Swept-volume box, sampled across the sweep angle (see revolveSweepBoxPx).
-            cutBox = revolveSweepBoxPx(pts, revolveAxis, angleDeg, revolveReverse, planeId, facePlane)
-          } else {
-            // XZ's world normal is -Y, not +Y — see the matching comment on
-            // Viewport3D.jsx's planeExtrudeDirection (same bug class fixed there).
-            const worldNormals = { XY:[0,0,1], XZ:[0,-1,0], YZ:[1,0,0] }
-            const [nx, ny, nz] = facePlane
-              ? [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z]
-              : (worldNormals[planeId] || [0,0,1])
-            const normalVec = new THREE.Vector3(nx, ny, nz)
-            const worldPts = pts.map(p => {
-              const w = facePlane ? facePlane.sketchToWorld(p.x, p.y) : sketchToWorld(p.x, p.y, planeId)
+        } else {
+          // Fresh profile set: a brand new cutout, or a pencil re-sketch
+          // (always an explicit overrideState) of an existing one — grouped
+          // or not, at any new profile count. Both cut every profile in
+          // `cutProfiles` into every affected target solid, sequentially per
+          // target (the worker's own shapeStore threads each solid's running
+          // result between subtract calls — same technique the per-letter
+          // hole-punching loop below relies on), and (re)create one cutout
+          // feature per (target, profile) pair sharing one groupId — a group
+          // of exactly one member is harmless (every simple single-circle
+          // cutout already works this way today).
+          // Each profile's OWN bounding box (footprint extended by the cut's
+          // actual depth/direction span) — kept separate per profile, never
+          // unioned into one big box. A union would make target-detection too
+          // coarse: a solid sitting between two holes (but touching neither)
+          // would get falsely swept in just because it falls inside the outer
+          // span of the whole grid. These same per-profile boxes are reused
+          // below to skip a profile that doesn't actually touch a given
+          // target, so a solid near ONE hole doesn't get N pointless no-op
+          // cuts attempted against it.
+          const worldNormals = { XY:[0,0,1], XZ:[0,-1,0], YZ:[1,0,0] }
+          const [nx, ny, nz] = facePlane
+            ? [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z]
+            : (worldNormals[planeId] || [0,0,1])
+          const normalVec = new THREE.Vector3(nx, ny, nz)
+          const profileBoxes = cutProfiles.map(p => {
+            if (revolveAxis) return revolveSweepBoxPx(p, revolveAxis, angleDeg, revolveReverse, planeId, facePlane)
+            const worldPts = p.map(pt => {
+              const w = facePlane ? facePlane.sketchToWorld(pt.x, pt.y) : sketchToWorld(pt.x, pt.y, planeId)
               return new THREE.Vector3(w.x, w.y, w.z)
             })
-            // Profile footprint extended by its ACTUAL depth/direction span — see cutExtentRangeMm.
             const [minMm, maxMm] = cutExtentRangeMm(cutDepthMm, cutDirection, planeId)
-            cutBox = new THREE.Box3().setFromPoints(worldPts)
-            const boxAtMin = cutBox.clone().translate(normalVec.clone().multiplyScalar(mmToPx(minMm)))
-            const boxAtMax = cutBox.clone().translate(normalVec.clone().multiplyScalar(mmToPx(maxMm)))
-            cutBox.union(boxAtMin).union(boxAtMax)
+            const profBox = new THREE.Box3().setFromPoints(worldPts)
+            const box = profBox.clone()
+            box.union(profBox.clone().translate(normalVec.clone().multiplyScalar(mmToPx(minMm))))
+            box.union(profBox.clone().translate(normalVec.clone().multiplyScalar(mmToPx(maxMm))))
+            return box
+          })
+
+          let targets, oldMembers = []
+          if (editingId) {
+            // Re-sketch: keep cutting the SAME target solid(s) the feature
+            // originally spanned (don't re-detect overlap — matches this
+            // codebase's existing "membership stays fixed" philosophy for
+            // grouped-cutout edits) and remove the old members first.
+            oldMembers = editingFeat.groupId
+              ? features.filter(f => f.groupId === editingFeat.groupId)
+              : [editingFeat]
+            const targetIds = [...new Set(oldMembers.map(m => m.solidId))]
+            targets = targetIds.map(id => solids.find(s => s.id === id)).filter(Boolean)
+            if (targets.length === 0) throw new Error('No base solid to cut from')
+          } else {
+            // Brand new cutout: find every solid body the cut's actual volume
+            // overlaps (not just the one whose face was sketched on), so cutting
+            // through two stacked extrusions affects both — a solid only
+            // counts if at least one INDIVIDUAL profile actually touches it.
+            // OCC does the real, precise boolean cut below — this is only a
+            // candidate filter.
+            const candidates = solids.filter(s => s.operation !== 'cutout' && s.group)
+            targets = candidates.filter(s => {
+              const sBox = new THREE.Box3().setFromObject(s.group)
+              return profileBoxes.some(pb => pb.intersectsBox(sBox))
+            })
+            if (targets.length === 0) throw new Error('No base solid to cut from')
           }
 
-          const candidates = solids.filter(s => s.operation !== 'cutout' && s.group)
-          const affected = candidates.filter(s =>
-            cutBox.intersectsBox(new THREE.Box3().setFromObject(s.group)))
-          if (affected.length === 0) throw new Error('No base solid to cut from')
+          // Preserve the edited feature's own id in the common case (single
+          // target, single profile, wasn't already a group) — matters for
+          // anything that stored a reference to this exact feature id.
+          // Every other case (grouped, or the profile count changed) mints
+          // fresh ids, same as the whole-word text-extrude re-edit already does.
+          const reuseId = editingId && !editingFeat.groupId && targets.length === 1 && cutProfiles.length === 1
 
           const groupId = `cutgroup-${Date.now()}`
           const newFeats = []
-          for (const target of affected) {
+          for (let target of targets) {
+            // Re-sketch: rebuild this target clean of just the OLD group's
+            // cuts on it (everything else — other cutouts/fillets — replays
+            // as-is), THEN apply the fresh cuts below on top of that result.
+            const idsToSkipHere = oldMembers.filter(m => m.solidId === target.id).map(m => m.id)
+            if (idsToSkipHere.length) {
+              const meshData = await rebuildSolidChain(target, { skipIds: idsToSkipHere })
+              target = { ...target, group: replicadMeshToThree(meshData, target.color, target.id) }
+              setSolids(prev => prev.map(s => s.id === target.id ? target : s))
+            }
+            const targetBox = new THREE.Box3().setFromObject(target.group)
             const targetBaseParams = buildBaseWorkerParams(target)
-            const meshData = await cadEngine.subtract({ baseSolidId: target.id, cut, base: targetBaseParams })
-            const group = replicadMeshToThree(meshData, target.color, target.id)
-            const updatedSolid = { ...target, group }
-            setSolids(prev => prev.map(s => s.id === target.id ? updatedSolid : s))
-            newFeats.push({
-              id: `cutout-${target.id}-${Date.now()}`,
-              type: 'extrude', name: nextExtrudeName(), groupId,
-              solidId: target.id, sketchId: lastSketch?.id || null,
-              depthMm, cutDepthMm, cutDirection, extentMode, color, operation: 'cutout', planeId, profilePts: pts, facePlane,
-              revolveAxis, angleDeg, revolveReverse, ...sketchGeom,
-            })
-            await rebuildDependentMirrors(updatedSolid)
+            for (let i = 0; i < cutProfiles.length; i++) {
+              if (!profileBoxes[i].intersectsBox(targetBox)) continue
+              const p = cutProfiles[i]
+              const meshData = await cadEngine.subtract({ baseSolidId: target.id, cut: buildCut(p), base: targetBaseParams })
+              const group = replicadMeshToThree(meshData, target.color, target.id)
+              target = { ...target, group }
+              setSolids(prev => prev.map(s => s.id === target.id ? target : s))
+              newFeats.push({
+                id: reuseId ? editingId : `cutout-${target.id}-${Date.now()}-${newFeats.length}`,
+                type: 'extrude', name: editingFeat?.name || nextCutoutName(), groupId,
+                solidId: target.id, sketchId: lastSketch?.id || null,
+                depthMm, cutDepthMm, cutDirection, extentMode, color, operation: 'cutout', planeId, profilePts: p, facePlane,
+                revolveAxis, angleDeg, revolveReverse, ...sketchGeom,
+              })
+            }
+            await rebuildDependentMirrors(target)
           }
-          setFeatures(prev => [...prev, ...newFeats])
-
-        } else {
-          // Editing an existing, non-grouped (single-body) cutout.
-          const baseSolid = solids.find(s => s.id === editingFeat.solidId)
-          if (!baseSolid) throw new Error('No base solid to cut from')
-
-          // Re-editing: the worker's shapeStore for this solidId currently holds
-          // the OLD compounded result, so a plain subtract here would stack the
-          // new cut on top of the old one instead of replacing it. Rebuild the
-          // base clean and replay every cutout/fillet on it in order,
-          // substituting the new profile/extent for the one being edited.
-          const meshData = await rebuildSolidChain(baseSolid, { overrideId: editingId, overrideCut: cut })
-          const group = replicadMeshToThree(meshData, baseSolid.color, baseSolid.id)
-          const updatedSolid = { ...baseSolid, group }
-          setSolids(prev => prev.map(s =>
-            s.id === baseSolid.id ? updatedSolid : s
-          ))
-          const cutoutFeat = {
-            id: editingId, type: 'extrude', name: editingFeat?.name || nextExtrudeName(),
-            solidId: baseSolid.id, sketchId: lastSketch?.id || null,
-            depthMm, cutDepthMm, cutDirection, extentMode, color, operation: 'cutout', planeId, profilePts: pts, facePlane,
-            revolveAxis, angleDeg, revolveReverse, ...sketchGeom,
-          }
-          setFeatures(prev => prev.map(f => f.id === editingId ? cutoutFeat : f))
-          await rebuildDependentMirrors(updatedSolid)
+          const oldMemberIds = oldMembers.map(m => m.id)
+          setFeatures(prev => [...prev.filter(f => !oldMemberIds.includes(f.id)), ...newFeats])
         }
 
       } else if (revolveAxis) {
@@ -4267,26 +4735,99 @@ export default function App() {
         }
         await rebuildDependentMirrors(solid)
 
-      } else if (textGroup) {
-        // Whole-word text extrude: one solid per letter (each already carries
-        // its own .holes from detectProfiles/resolveTextHoles), grouped under
-        // one groupId so the feature tree shows one row. Re-editing the sketch
-        // (editingFeat has a groupId) re-detects from scratch — the letters
-        // may be entirely different now — so remove the old members first.
-        const groupId = editingFeat?.groupId || `textgroup-${Date.now()}`
+      } else if (editingId && !overrideState) {
+        // GEAR icon: extent-only edit (depth/direction changed, profile
+        // geometry did NOT — see the matching comment on the cutout branch
+        // above for why `!overrideState` is the reliable signal). Refresh
+        // every member (or the lone feature, if not grouped) from ITS OWN
+        // stored profile/holes, keeping each solid's own shape/position and
+        // only updating depth/direction.
+        const groupMembers = editingFeat.groupId
+          ? features.filter(f => f.groupId === editingFeat.groupId)
+          : [editingFeat]
+        const updatedById = new Map()
+        for (const member of groupMembers) {
+          const memberPts = member.profilePts
+          const memberWorkerParams = {
+            pts: memberPts, depthMm, planeId: member.planeId, direction,
+            circle: memberPts.circleMeta || null,  // true circle → real curve, not a polygon prism
+            ...(member.facePlane ? {
+              normal: [member.facePlane.normal.x, member.facePlane.normal.y, member.facePlane.normal.z],
+              origin: [pxToMm(member.facePlane.origin.x), pxToMm(member.facePlane.origin.y), pxToMm(member.facePlane.origin.z)],
+              uAxis:  [member.facePlane.uAxis.x,  member.facePlane.uAxis.y,  member.facePlane.uAxis.z],
+              vAxis:  [member.facePlane.vAxis.x,  member.facePlane.vAxis.y,  member.facePlane.vAxis.z],
+            } : {}),
+          }
+          let meshData = await cadEngine.extrude({ ...memberWorkerParams, solidId: member.solidId })
+          for (const holePts of (memberPts.holes || [])) {
+            const holeCut = {
+              pts: holePts, depthMm: depthMm*4+10, planeId: member.planeId, direction: 'both',
+              ...(member.facePlane ? {
+                normal: [member.facePlane.normal.x, member.facePlane.normal.y, member.facePlane.normal.z],
+                origin: [pxToMm(member.facePlane.origin.x), pxToMm(member.facePlane.origin.y), pxToMm(member.facePlane.origin.z)],
+                uAxis:  [member.facePlane.uAxis.x,  member.facePlane.uAxis.y,  member.facePlane.uAxis.z],
+              } : {}),
+            }
+            meshData = await cadEngine.subtract({ baseSolidId: member.solidId, cut: holeCut, base: memberWorkerParams })
+          }
+          const group = replicadMeshToThree(meshData, member.color, member.solidId)
+          // filter+push, not .map() — handleEditExtent already removed this
+          // solid from state (to hide it while the popup is open, for a
+          // plain extrude/revolve; cutouts leave their base solid in place),
+          // so a .map() here would silently find no matching entry to update
+          // and the solid would never come back until an unrelated re-sketch
+          // (which uses this same filter+push pattern) happened to re-add it.
+          setSolids(prev => [...prev.filter(s => s.id !== member.solidId), {
+            id: member.solidId, group, planeId: member.planeId, operation: 'extrude',
+            direction, depth: mmToPx(depthMm), depthMm,
+            profilePts: memberPts, color: member.color, facePlane: member.facePlane,
+          }])
+          updatedById.set(member.id, { ...member, depthMm, direction, extentMode })
+        }
+        setFeatures(prev => prev.map(f => updatedById.get(f.id) || f))
+
+      } else {
+        // Fresh profile set: a brand new extrude, or a pencil re-sketch
+        // (always an explicit overrideState) of an existing one — at any
+        // profile count, whole-word text included (letters are just profiles
+        // like any other; each already carries its own .holes from
+        // detectProfiles/resolveTextHoles). Extrudes every profile into its
+        // own solid and (re)creates one feature per profile sharing a single
+        // groupId — a group of exactly one member is harmless (FeatureTree
+        // only shows the "N bodies" suffix when > 1).
+        const groupId = editingFeat?.groupId || `profilegroup-${Date.now()}`
+        // Preserve the edited feature's own id/solid in the common case
+        // (single profile, wasn't already a MULTI-member group) — matters for
+        // anything that stored a reference to this exact feature/solid id
+        // (e.g. a dependent mirror or cutout keyed by sourceSolidId). Every
+        // extrude carries a groupId even when solo (see comment above), so
+        // checking `!editingFeat.groupId` alone never matched an existing
+        // feature — reuse was always false, which both reordered the row to
+        // the end of the Feature Tree AND minted a brand-new solidId on
+        // every edit, silently orphaning anything (a cutout, a fillet) that
+        // targeted the old one. A solo groupId (exactly one member) counts
+        // the same as no groupId at all.
+        const wasSoloBody = !editingId || !editingFeat.groupId ||
+          features.filter(f => f.groupId === editingFeat.groupId).length === 1
+        const reuse = editingId && wasSoloBody && profiles.length === 1
         if (editingFeat?.groupId) {
           const oldMembers = features.filter(f => f.groupId === editingFeat.groupId)
           const oldSolidIds = new Set(oldMembers.map(f => f.solidId))
           setSolids(prev => prev.filter(s => !oldSolidIds.has(s.id)))
+        } else if (editingId && !reuse) {
+          // Was a single (non-grouped) extrude, but the re-sketch produced a
+          // different profile count — its old solid gets replaced by N new ones.
+          setSolids(prev => prev.filter(s => s.id !== editingFeat.solidId))
         }
 
         const newFeats = []
-        let letterIdx = -1
-        for (const letterPts of textGroup) {
-          letterIdx++
-          const solidId = Date.now() + Math.random()
-          const letterWorkerParams = {
-            pts: letterPts, depthMm, planeId, direction,
+        let profIdx = -1
+        for (const profPts of profiles) {
+          profIdx++
+          const solidId = reuse ? editingFeat.solidId : Date.now() + Math.random()
+          const memberWorkerParams = {
+            pts: profPts, depthMm, planeId, direction,
+            circle: profPts.circleMeta || null,  // true circle → real curve, not a polygon prism
             ...(facePlane ? {
               normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z],
               origin: [pxToMm(facePlane.origin.x), pxToMm(facePlane.origin.y), pxToMm(facePlane.origin.z)],
@@ -4296,20 +4837,21 @@ export default function App() {
           }
           let meshData
           try {
-            meshData = await cadEngine.extrude({ ...letterWorkerParams, solidId })
+            meshData = await cadEngine.extrude({ ...memberWorkerParams, solidId })
           } catch (e) {
-            console.error(`[textGroup] letter ${letterIdx} extrude failed, pts:`, letterPts.length, e)
+            console.error(`[multi-profile extrude] profile ${profIdx} extrude failed, pts:`, profPts.length, e)
             throw e
           }
-          setSolids(prev => [...prev, {
+          // filter+push: a reused solidId's old entry (or nothing, for a fresh one) gets replaced
+          setSolids(prev => [...prev.filter(s => s.id !== solidId), {
             id: solidId, group: replicadMeshToThree(meshData, color, solidId), planeId, operation:'extrude',
-            direction, depth: mmToPx(depthMm), depthMm, profilePts: letterPts, color, facePlane,
+            direction, depth: mmToPx(depthMm), depthMm, profilePts: profPts, color, facePlane,
           }])
-          // Punch each hole (the counter in O/A/8/etc.) all the way through the
-          // letter regardless of its own extrude direction — generous depth,
-          // symmetric direction, guarantees full penetration either way.
+          // Punch each hole (the counter in O/A/8/etc., or any nested loop in
+          // a plain profile) all the way through regardless of extrude
+          // direction — generous depth, symmetric direction, guarantees full penetration.
           let holeIdx = -1
-          for (const holePts of (letterPts.holes || [])) {
+          for (const holePts of (profPts.holes || [])) {
             holeIdx++
             const holeCut = {
               pts: holePts, depthMm: depthMm*4+10, planeId, direction: 'both',
@@ -4320,96 +4862,67 @@ export default function App() {
               } : {}),
             }
             try {
-              meshData = await cadEngine.subtract({ baseSolidId: solidId, cut: holeCut, base: letterWorkerParams })
+              meshData = await cadEngine.subtract({ baseSolidId: solidId, cut: holeCut, base: memberWorkerParams })
             } catch (e) {
-              console.error(`[textGroup] letter ${letterIdx} hole ${holeIdx} cut failed, holePts:`, holePts.length, e)
+              console.error(`[multi-profile extrude] profile ${profIdx} hole ${holeIdx} cut failed, holePts:`, holePts.length, e)
               throw e
             }
             const group = replicadMeshToThree(meshData, color, solidId)
             setSolids(prev => prev.map(s => s.id === solidId ? { ...s, group } : s))
           }
+          // Reusing this solidId means cadEngine.extrude() above just
+          // overwrote the worker's cached shape with a bare, uncut base —
+          // any separately-created Cutout/Fillet FEATURES that were already
+          // baked into the old version of this solid (distinct from the
+          // profile-intrinsic holes just punched above) are gone from that
+          // cache now, even though their feature rows still exist in the
+          // tree. Same replay this solid's rebuildSolidChain() would do,
+          // inlined here since the base mesh is already in hand — avoids
+          // re-extruding it a second time.
+          if (reuse) {
+            const depOps = features.filter(f => f.solidId === solidId && (f.operation === 'cutout' || f.type === 'fillet'))
+            for (const opFeat of depOps) {
+              try {
+                meshData = opFeat.type === 'fillet'
+                  ? await cadEngine.fillet3d({ solidId, edgePoints: opFeat.edgePoints, radius: opFeat.radius, base: memberWorkerParams })
+                  : await cadEngine.subtract({ baseSolidId: solidId, cut: buildCutWorkerParams(opFeat), base: memberWorkerParams })
+              } catch (e) {
+                console.error(`[extrude edit] replaying dependent op ${opFeat.id} failed:`, e)
+                throw e
+              }
+            }
+            if (depOps.length > 0) {
+              const group = replicadMeshToThree(meshData, color, solidId)
+              setSolids(prev => prev.map(s => s.id === solidId ? { ...s, group } : s))
+            }
+          }
           newFeats.push({
-            id: `extrude-${solidId}`, type:'extrude', name: nextExtrudeName(), groupId,
+            id: reuse ? editingId : `extrude-${solidId}`, type:'extrude', name: editingFeat?.name || nextExtrudeName(), groupId,
             solidId, sketchId: lastSketch?.id || null,
             depthMm, direction, extentMode, color, operation:'extrude', planeId,
-            profilePts: letterPts, facePlane, ...sketchGeom,
+            profilePts: profPts, facePlane, ...sketchGeom,
           })
+          // Only the plain single-profile case supports dependent mirrors
+          // today (matches the pre-existing behavior this branch replaces —
+          // a multi-body group was never mirror-able, unchanged here).
+          if (reuse) {
+            await rebuildDependentMirrors({
+              id: solidId, group: replicadMeshToThree(meshData, color, solidId), planeId, operation:'extrude',
+              direction, depth: mmToPx(depthMm), depthMm, profilePts: profPts, color, facePlane,
+            })
+          }
         }
 
-        if (editingFeat?.groupId) {
-          setFeatures(prev => [...prev.filter(f => f.groupId !== editingFeat.groupId), ...newFeats])
+        if (reuse) {
+          setFeatures(prev => prev.map(f => f.id === editingId ? newFeats[0] : f))
+        } else if (editingId) {
+          const oldIds = editingFeat.groupId
+            ? features.filter(f => f.groupId === editingFeat.groupId).map(f => f.id)
+            : [editingId]
+          setFeatures(prev => [...prev.filter(f => !oldIds.includes(f.id)), ...newFeats])
         } else {
           setFeatures(prev => [...prev, ...newFeats])
         }
-
-      } else if (editingId && editingFeat?.groupId) {
-        // Extent-only edit (gear icon) of an existing grouped text extrude —
-        // reapply the new depth/direction to every letter the group already
-        // has, keeping each letter's own profile/holes fixed (no re-detection;
-        // matches the grouped-cutout extent-edit behavior).
-        const groupId = editingFeat.groupId
-        const groupMembers = features.filter(f => f.groupId === groupId)
-        const updatedById = new Map()
-        for (const member of groupMembers) {
-          const letterPts = member.profilePts
-          const letterWorkerParams = {
-            pts: letterPts, depthMm, planeId: member.planeId, direction,
-            ...(member.facePlane ? {
-              normal: [member.facePlane.normal.x, member.facePlane.normal.y, member.facePlane.normal.z],
-              origin: [pxToMm(member.facePlane.origin.x), pxToMm(member.facePlane.origin.y), pxToMm(member.facePlane.origin.z)],
-              uAxis:  [member.facePlane.uAxis.x,  member.facePlane.uAxis.y,  member.facePlane.uAxis.z],
-              vAxis:  [member.facePlane.vAxis.x,  member.facePlane.vAxis.y,  member.facePlane.vAxis.z],
-            } : {}),
-          }
-          let meshData = await cadEngine.extrude({ ...letterWorkerParams, solidId: member.solidId })
-          for (const holePts of (letterPts.holes || [])) {
-            const holeCut = {
-              pts: holePts, depthMm: depthMm*4+10, planeId: member.planeId, direction: 'both',
-              ...(member.facePlane ? {
-                normal: [member.facePlane.normal.x, member.facePlane.normal.y, member.facePlane.normal.z],
-                origin: [pxToMm(member.facePlane.origin.x), pxToMm(member.facePlane.origin.y), pxToMm(member.facePlane.origin.z)],
-                uAxis:  [member.facePlane.uAxis.x,  member.facePlane.uAxis.y,  member.facePlane.uAxis.z],
-              } : {}),
-            }
-            meshData = await cadEngine.subtract({ baseSolidId: member.solidId, cut: holeCut, base: letterWorkerParams })
-          }
-          const group = replicadMeshToThree(meshData, member.color, member.solidId)
-          setSolids(prev => prev.map(s => s.id === member.solidId ? { ...s, group, direction, depth: mmToPx(depthMm), depthMm } : s))
-          updatedById.set(member.id, { ...member, depthMm, direction, extentMode })
-        }
-        setFeatures(prev => prev.map(f => updatedById.get(f.id) || f))
-
-      } else {
-        // Run geometry in worker (OpenCascade WASM); solidId lets worker cache this shape
-        const solidId = editingFeat?.solidId || Date.now()
-        const meshData = await cadEngine.extrude({ ...workerParams, solidId })
-        const group = replicadMeshToThree(meshData, color, solidId)
-        const solid = { id:solidId, group, planeId, operation:'extrude', direction,
-          depth:mmToPx(depthMm), depthMm, profilePts:pts, color, facePlane }
-        // filter+push: old solid was removed when entering edit mode, map would find nothing
-        setSolids(prev => [...prev.filter(s => s.id !== solidId), solid])
-        const extrudeFeat = {
-          id:        editingId || `extrude-${solidId}`,
-          type:      'extrude',
-          name:      editingFeat?.name || nextExtrudeName(),
-          solidId,
-          sketchId:  lastSketch?.id || null,
-          depthMm,
-          direction,
-          extentMode,
-          color,
-          operation: 'extrude',
-          planeId,
-          profilePts: pts,
-          facePlane,
-          ...sketchGeom,
-        }
-        if (editingId) {
-          setFeatures(prev => prev.map(f => f.id === editingId ? extrudeFeat : f))
-        } else {
-          setFeatures(prev => [...prev, extrudeFeat])
-        }
-        await rebuildDependentMirrors(solid)
       }
 
       commit(snapshot())
@@ -4618,6 +5131,22 @@ export default function App() {
     ))
   }
 
+  // Toggle a body's visibility in the 3D view. Cutouts/fillets aren't
+  // separate solids (see FeatureTree's isBodyOwner) so this only ever runs
+  // for rows that own one — a plain single-solid feature, or a grouped one
+  // (whole-word text extrude, multi-profile cutout) where every member
+  // sharing groupId has its own solidId and must hide/show together.
+  function handleToggleBodyVisible(featureId) {
+    const feat = features.find(f => f.id === featureId)
+    if (!feat) return
+    const solidIds = feat.groupId
+      ? [...new Set(features.filter(f => f.groupId === feat.groupId).map(f => f.solidId))]
+      : [feat.solidId]
+    const newHidden = !solids.find(s => s.id === feat.solidId)?.hidden
+    setSolids(prev => prev.map(s => solidIds.includes(s.id) ? {...s, hidden:newHidden} : s))
+  }
+  const hiddenSolidIds = solids.filter(s => s.hidden).map(s => s.id)
+
   // Delete a feature
   async function handleDeleteFeature(featureId) {
     const feat = features.find(f => f.id === featureId)
@@ -4659,20 +5188,24 @@ export default function App() {
 
     if (feat.operation === 'cutout') {
       // A grouped (multi-body) cutout deletes every member together — they're
-      // one logical cut that happened to span several solids.
+      // one logical cut that happened to span several solids (legacy: one
+      // profile cut through N stacked bodies) or several holes in one solid
+      // (multi-profile: N profiles cut into one body) — either way, group
+      // members can now share a solidId, so rebuild each DISTINCT target
+      // solid once, skipping every to-be-deleted member on it in one pass,
+      // rather than one redundant full rebuild-and-replay per member.
       const idsToDelete = feat.groupId
         ? features.filter(f => f.groupId === feat.groupId).map(f => f.id)
         : [featureId]
+      const membersToDelete = idsToDelete.map(id => features.find(f => f.id === id)).filter(Boolean)
+      const targetIds = [...new Set(membersToDelete.map(m => m.solidId))]
 
-      for (const idToDelete of idsToDelete) {
-        const thisFeat = features.find(f => f.id === idToDelete)
-        const baseSolid = thisFeat && solids.find(s => s.id === thisFeat.solidId)
+      for (const targetId of targetIds) {
+        const baseSolid = solids.find(s => s.id === targetId)
         if (!baseSolid) continue
+        const skipIds = membersToDelete.filter(m => m.solidId === targetId).map(m => m.id)
         try {
-          // Rebuild the base solid clean, replaying every other cutout/fillet
-          // on it in order (skip the one being deleted — group members each
-          // belong to a different solid, so at most one id applies here).
-          const meshData = await rebuildSolidChain(baseSolid, { skipId: idToDelete })
+          const meshData = await rebuildSolidChain(baseSolid, { skipIds })
           const group = replicadMeshToThree(meshData, baseSolid.color, baseSolid.id)
           setSolids(prev => prev.map(s => s.id === baseSolid.id ? { ...s, group } : s))
         } catch (err) {
@@ -4722,23 +5255,75 @@ export default function App() {
     ))
   }
 
-  // Export every top-level solid — each with its own cutouts already applied —
-  // fused into ONE continuous body and saved as a single STL, for 3D printing.
-  // This only fuses at export time; live editing keeps solids independent
-  // (see project-scope-vision memory: multi-body assembly union was explicitly
-  // ruled out as too complex for this tool's editing model).
-  async function handleExportSTL() {
-    if (solids.length === 0) {
+  // ── Export STL (selectable bodies) ────────────────────────────────────────
+  // Click bodies directly in the 3D view to multi-select (toggle) which top-
+  // level solids get included in the exported STL — reuses Join3D's cyan
+  // multi-highlight (highlightJoinMembers/clearJoinHighlight are solid-
+  // agnostic, just keyed by solidId, so there's no need for a parallel set of
+  // Viewport3D methods). Enter commits; an empty selection exports every
+  // solid, preserving the old one-click "export everything" behavior for
+  // whoever doesn't care to pick.
+  const [exportSTLSel, setExportSTLSel] = useState([])   // [solidId, ...] accumulated picks
+  const [exportSTLBusy, setExportSTLBusy] = useState(false)
+
+  function activateExportSTLTool() {
+    resetSelection()
+    resetDrawState()
+    if (sketchModeRef.current) {
+      setSketchMode(false)
+      setActivePlane(null)
+      setActiveSketchId(null)
+      activePlaneRef.current = null
+    }
+    setTool('exportstl')
+    setExtrudeTool(null)
+    setExtrudeState(null)
+    setEditingFeatureId(null)
+    setExportSTLSel([])
+    viewport3dRef.current?.restoreSavedView()
+  }
+
+  function resetExportSTL() {
+    setExportSTLSel([])
+  }
+
+  function handleExportSTLClick(e) {
+    if (tool !== 'exportstl') return
+    const vp = viewport3dRef.current; if (!vp) return
+    const hit = vp.raycastSolidFace(e.clientX, e.clientY)
+    if (!hit || hit.solidId == null) return
+    setExportSTLSel(prev =>
+      prev.includes(hit.solidId) ? prev.filter(id => id !== hit.solidId) : [...prev, hit.solidId])
+  }
+
+  // Keeps every currently-selected body glowing in the 3D view, live as the
+  // selection changes — same effect shape as Join3D's own highlight sync.
+  useEffect(() => {
+    if (tool !== 'exportstl') { viewport3dRef.current?.clearJoinHighlight(); return }
+    viewport3dRef.current?.highlightJoinMembers(exportSTLSel)
+  }, [exportSTLSel, tool])
+
+  // Export the selected top-level solids — each with its own cutouts already
+  // applied — fused into ONE continuous body and saved as a single STL, for
+  // 3D printing. This only fuses at export time; live editing keeps solids
+  // independent (see project-scope-vision memory: multi-body assembly union
+  // was explicitly ruled out as too complex for this tool's editing model).
+  async function commitExportSTL() {
+    if (exportSTLBusy) return
+    const targetIds = exportSTLSel.length > 0 ? exportSTLSel : solids.map(s => s.id)
+    const targetSolids = solids.filter(s => targetIds.includes(s.id))
+    if (targetSolids.length === 0) {
       setCadError('Nothing to export — add at least one solid first.')
       setTimeout(() => setCadError(null), 5000)
       return
     }
+    setExportSTLBusy(true)
     try {
       // Ordered ops (cutout + fillet interleaved, in feature-array order) —
       // only used by the worker's cold-rebuild fallback when a solid isn't
       // already cached in shapeStore (e.g. right after a fresh page load);
       // the common case just reuses the live cached shape directly.
-      const solidsForExport = solids.map(solid => {
+      const solidsForExport = targetSolids.map(solid => {
         const base = buildBaseWorkerParams(solid)
         const ops = features
           .filter(f => f.solidId === solid.id && (f.operation === 'cutout' || f.type === 'fillet'))
@@ -4749,18 +5334,13 @@ export default function App() {
       })
 
       const { stlBlob } = await cadEngine.exportSTL({ solids: solidsForExport })
-      const url = URL.createObjectURL(stlBlob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = 'model.stl'
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
+      await saveBlobAs(stlBlob, 'model.stl', 'STL model', { 'model/stl': ['.stl'] })
     } catch (err) {
       console.error('STL export failed:', err)
       setCadError(`STL export failed: ${err.message || String(err)}`)
       setTimeout(() => setCadError(null), 8000)
+    } finally {
+      setExportSTLBusy(false)
     }
   }
 
@@ -4886,6 +5466,15 @@ export default function App() {
       return
     }
 
+    // Face picking is handled entirely via sketchArmed + onFaceClick (see
+    // handleFaceClick) — a click here means the ray missed every face, a no-op.
+    if (tool==='exportfacedxf') return
+
+    if (tool==='exportstl') {
+      handleExportSTLClick(e)
+      return
+    }
+
     if (tool==='trace'){
       setTraceInsertPt(raw);setTraceOpen(true);return
     }
@@ -4900,7 +5489,7 @@ export default function App() {
     // Only one axis per sketch: placing a new one replaces the old.
     if (tool==='axis'){
       if (!startPoint){
-        const geo=getGeoSnap(raw,snapLines,circles,arcs,null,false,splines,intersectionPts)
+        const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,null,false,splines,intersectionPts)
         setStartPoint(geo?{x:geo.x,y:geo.y}:raw)
         return
       }
@@ -4961,7 +5550,7 @@ export default function App() {
     }
 
     if (tool==='dim'){
-      const snap=getGeoSnap(raw,snapLines,circles,arcs,null,false,splines,intersectionPts)
+      const snap=getGeoSnap(raw,snapLines,snapCircles,snapArcs,null,false,splines,intersectionPts)
       const pt=snap?{x:snap.x,y:snap.y}:raw
 
       // Circle / arc: one click places dim
@@ -4996,7 +5585,7 @@ export default function App() {
         if (joinHover) setJoinFirstPt(joinHover)
       } else {
         // Second click — move free endpoint to snap/click position
-        const snap=getGeoSnap(raw,snapLines,circles,arcs,{x:joinFirstPt.x,y:joinFirstPt.y},false,splines,intersectionPts)
+        const snap=getGeoSnap(raw,snapLines,snapCircles,snapArcs,{x:joinFirstPt.x,y:joinFirstPt.y},false,splines,intersectionPts)
         const targetPt=snap?{x:snap.x,y:snap.y}:raw
         commit(snapshot())
         if (joinFirstPt.kind==='line'){
@@ -5061,7 +5650,7 @@ export default function App() {
 
     if (tool==='spline'){
       if (e.detail > 1) return  // ignore second click of double-click — handled by handleDoubleClick
-      const geo=getGeoSnap(raw,snapLines,circles,arcs,splinePoints.length?splinePoints[splinePoints.length-1]:null,false,splines,intersectionPts)
+      const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,splinePoints.length?splinePoints[splinePoints.length-1]:null,false,splines,intersectionPts)
       const pt=geo&&geo.type!=='tan'&&geo.type!=='oncircle'?{x:geo.x,y:geo.y}:raw
       const newPts=[...splinePoints,pt]
       splinePointsRef.current=newPts
@@ -5106,14 +5695,14 @@ export default function App() {
         else setMirrorSel(p=>[...p,hit])
       } else {
         if (!mirrorP1){
-          const geo=getGeoSnap(raw,snapLines,circles,arcs,null,false,splines,intersectionPts)
+          const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,null,false,splines,intersectionPts)
           const pt=geo&&geo.type!=='tan'&&geo.type!=='oncircle'?{x:geo.x,y:geo.y}:raw
           setMirrorP1(pt)
           // Seed tracking from first mirror point
           setTrackedPts([]);trackedPtsRef.current=[]
         } else {
           if (!mirrorPreview) return
-          const hSnap=getGeoSnap(raw,snapLines,circles,arcs,mirrorP1,false,splines,intersectionPts)
+          const hSnap=getGeoSnap(raw,snapLines,snapCircles,snapArcs,mirrorP1,false,splines,intersectionPts)
           let endPt
           if (hSnap&&hSnap.type!=='tan'&&hSnap.type!=='oncircle'){
             endPt={x:hSnap.x,y:hSnap.y}
@@ -5157,7 +5746,7 @@ export default function App() {
         if (already>=0) setMoveCopySel(p=>p.filter((_,i)=>i!==already))
         else setMoveCopySel(p=>[...p,hit])
       } else if (!startPoint){
-        const geo=getGeoSnap(raw,snapLines,circles,arcs,null,false,splines,intersectionPts)
+        const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,null,false,splines,intersectionPts)
         setStartPoint(geo?{x:geo.x,y:geo.y}:raw)
         setDimInput('');setDimLocked(false);setAngleInput('');setAngleLocked(false);setFocusField('dim')
         setTrackedPts([]);trackedPtsRef.current=[]
@@ -5188,7 +5777,7 @@ export default function App() {
         if (already>=0) setRotateCopySel(p=>p.filter((_,i)=>i!==already))
         else setRotateCopySel(p=>[...p,hit])
       } else if (!startPoint){
-        const geo=getGeoSnap(raw,snapLines,circles,arcs,null,false,splines,intersectionPts)
+        const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,null,false,splines,intersectionPts)
         setStartPoint(geo?{x:geo.x,y:geo.y}:raw)
         setAngleInput('');setAngleLocked(false);setTrackedPts([]);trackedPtsRef.current=[]
       } else {
@@ -5220,7 +5809,7 @@ export default function App() {
         else setResizeSel(p=>[...p,hit])
       } else {
         const s=parseFloat(resizeScaleInput);if(!s||s<=0)return
-        const geo=getGeoSnap(raw,snapLines,circles,arcs,null,false,splines,intersectionPts)
+        const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,null,false,splines,intersectionPts)
         const anchor=geo?{x:geo.x,y:geo.y}:raw
         commit(snapshot())
         const scaled=buildScaled(resizeSel,lines,circles,arcs,splines,anchor.x,anchor.y,s)
@@ -5278,7 +5867,7 @@ export default function App() {
           setTrackedPts([]);trackedPtsRef.current=[]
           return
         }
-        const geo=getGeoSnap(raw,snapLines,circles,arcs,null,tKeyDown,splines,intersectionPts)
+        const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,null,tKeyDown,splines,intersectionPts)
         if (geo?.type==='tan'){
           const circData=geo.circleIdx!==undefined?{...circles[geo.circleIdx],circleIdx:geo.circleIdx}:{cx:geo.cx,cy:geo.cy,r:geo.r,arcIdx:geo.arcIdx}
           setDeferredTangent(circData);setStartPoint({x:geo.x,y:geo.y})
@@ -5286,7 +5875,7 @@ export default function App() {
         setDimInput('');setDimLocked(false);setAngleInput('');setAngleLocked(false);setFocusField('dim')
         setTrackedPts([]);trackedPtsRef.current=[]
       } else if (deferredTangent){
-        const dc=deferredTangent,geo=getGeoSnap(raw,snapLines,circles,arcs,null,tKeyDown,splines,intersectionPts)
+        const dc=deferredTangent,geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,null,tKeyDown,splines,intersectionPts)
         if (geo?.type==='tan'&&geo.circleIdx!==undefined&&dc.circleIdx!==undefined&&geo.circleIdx!==dc.circleIdx){
           const pairs=getExternalTangentPairs(dc,circles[geo.circleIdx])
           const best=pairs.length?pairs.reduce((a,b)=>Math.hypot(a.t1.x-startPoint.x,a.t1.y-startPoint.y)<Math.hypot(b.t1.x-startPoint.x,b.t1.y-startPoint.y)?a:b):null
@@ -5321,7 +5910,7 @@ export default function App() {
           resetDrawState()
           return
         }
-        const geo=getGeoSnap(raw,snapLines,circles,arcs,startPoint,tKeyDown,splines,intersectionPts)
+        const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,startPoint,tKeyDown,splines,intersectionPts)
         if (geo?.type==='tan'){
           const c=geo.circleIdx!==undefined?circles[geo.circleIdx]:{cx:geo.cx,cy:geo.cy,r:geo.r}
           const tanPts=getTanPtsOnCircle(startPoint.x,startPoint.y,c.cx,c.cy,c.r)
@@ -5334,16 +5923,42 @@ export default function App() {
         resetDrawState()
       }
     } else if (tool==='circle'){
-      if (!circleCenter){
-        const geo=getGeoSnap(raw,snapLines,circles,arcs,null,false,splines,intersectionPts)
-        setCircleCenter(geo?{x:geo.x,y:geo.y}:raw)
-        setDimInput('');setDimLocked(false);setTrackedPts([]);trackedPtsRef.current=[]
+      if (circleTanA&&!circleTanB){
+        // Picking second tangent target circle. circleIdx from getGeoSnap indexes
+        // into snapCircles (circles + read-only face-reference circles appended
+        // after, when sketching on a solid face) — restrict to geo.circleIdx<circles.length
+        // so a face-ref circle (out of scope for this tool) is never a valid target.
+        const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,null,tKeyDown,splines,intersectionPts)
+        if (tKeyDown&&geo?.type==='tan'&&geo.circleIdx!==undefined&&geo.circleIdx<circles.length&&geo.circleIdx!==circleTanA.circleIdx){
+          setCircleTanB({...circles[geo.circleIdx],circleIdx:geo.circleIdx})
+          setDimInput('');setDimLocked(false)
+        }
+      } else if (circleTanA&&circleTanB){
+        // Both targets locked — click commits using the typed radius, or the live cursor radius
+        const r=tanCircleCurrentRadius(raw)
+        const sol=tanCircleSolution(r,raw)
+        if (sol){
+          commit(snapshot())
+          setCircles(p=>[...p,{cx:sol.best.x,cy:sol.best.y,r,...(drawStyle?{style:drawStyle}:{}),...planeTag()}])
+        }
+        resetDrawState()
+      } else if (!circleCenter){
+        // Passing tKeyDown (was hardcoded false) so a T+click on a circle edge
+        // can register as picking the first tangent target instead of a plain centre.
+        const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,null,tKeyDown,splines,intersectionPts)
+        if (tKeyDown&&geo?.type==='tan'&&geo.circleIdx!==undefined&&geo.circleIdx<circles.length){
+          setCircleTanA({...circles[geo.circleIdx],circleIdx:geo.circleIdx})
+          setDimInput('');setDimLocked(false)
+        } else {
+          setCircleCenter(geo?{x:geo.x,y:geo.y}:raw)
+          setDimInput('');setDimLocked(false);setTrackedPts([]);trackedPtsRef.current=[]
+        }
       } else {
         let r
         if (dimLocked){
           r=mmToPx(parseFloat(dimInput)||1)
         } else {
-          const geo=getGeoSnap(raw,snapLines,circles,arcs,circleCenter,tKeyDown,splines,intersectionPts)
+          const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,circleCenter,tKeyDown,splines,intersectionPts)
           if (tKeyDown&&geo?.type==='tan'){
             // Tangent to circle/arc
             const tc=geo.circleIdx!==undefined?circles[geo.circleIdx]:{cx:geo.cx,cy:geo.cy,r:geo.r}
@@ -5417,6 +6032,8 @@ export default function App() {
     // Fillet: raycasts solid edges directly (no sketch-plane projection involved)
     if (tool==='fillet3d') { handleFillet3DHover(e); return }
     if (tool==='measure') { handleMeasureHover(e); return }
+    // exportfacedxf's face hover is handled entirely inside Viewport3D via
+    // sketchArmed (the same square face-plane indicator Mirror3D/Loft3D use).
 
     const worldPos=screenToWorld(sx,sy)
 
@@ -5481,7 +6098,7 @@ export default function App() {
     }
     if (e.ctrlKey&&e.key==='z'){e.preventDefault();undo(snapshot(),restore);return}
     if (e.ctrlKey&&e.key==='y'){e.preventDefault();redo(snapshot(),restore);return}
-    if (e.ctrlKey&&e.key==='s'){e.preventDefault();saveJSON(lines,circles,arcs,splines,dims);return}
+    if (e.ctrlKey&&e.key==='s'){e.preventDefault();sketchMode?handleSave():handleSaveProject();return}
     if ((e.key==='f'||e.key==='F')&&!e.ctrlKey){zoomToFit();return}
     // Escape in sketch mode: cancel whatever 2D tool is mid-interaction only
     // (an in-progress line/circle/offset/etc.) — it no longer exits the sketch
@@ -5541,6 +6158,18 @@ export default function App() {
       // a second Escape (nothing pending) leaves the tool.
       if (measureP1 || measureResult) { resetMeasure(); return }
       resetMeasure(); setTool('select'); return
+    }
+    if (e.key==='Escape'&&tool==='exportfacedxf'){
+      setTool('select'); return
+    }
+    if (e.key==='Enter'&&tool==='exportstl'){
+      e.preventDefault()
+      commitExportSTL()
+      return
+    }
+    if (e.key==='Escape'&&tool==='exportstl'){
+      if (exportSTLSel.length>0) { resetExportSTL(); return }
+      resetExportSTL(); setTool('select'); return
     }
     if ((e.key==='Enter'||e.key==='Tab')&&tool==='join3d'&&joinSel.length>=2){
       e.preventDefault()
@@ -5853,7 +6482,25 @@ export default function App() {
       return
     }
 
-    if (!startPoint&&!circleCenter&&!deferredTangent) return
+    if (tool==='circle'&&circleTanA&&circleTanB){
+      if (e.key==='Escape'){resetDrawState();return}
+      if (e.key==='Enter'){
+        e.preventDefault()
+        const r=tanCircleCurrentRadius(mousePos)
+        const sol=tanCircleSolution(r,mousePos)
+        if (sol){
+          commit(snapshot())
+          setCircles(p=>[...p,{cx:sol.best.x,cy:sol.best.y,r,...(drawStyle?{style:drawStyle}:{}),...planeTag()}])
+        }
+        resetDrawState()
+        return
+      }
+      if (e.key==='Backspace'){setDimInput(p=>p.slice(0,-1));return}
+      if (/^[0-9.]$/.test(e.key)){setDimInput(p=>p+e.key);return}
+      return
+    }
+
+    if (!startPoint&&!circleCenter&&!deferredTangent&&!circleTanA) return
     if (e.key==='Escape'){resetDrawState();return}
     if (e.key==='Tab'){
       e.preventDefault()
@@ -5923,12 +6570,18 @@ export default function App() {
     }
 
     if (tool==='circle') {
+      if (circleTanA&&circleTanB) return { step:null, total:null, color:'#4CAF50',
+        action:`${dimInput?'R ':'R ~'}${dimInput||(mousePos?pxToMm(tanCircleGuessRadius(mousePos)).toFixed(1):'—')} mm`,
+        hints:[K('type + Enter','exact radius'), K('Esc')] }
+      if (circleTanA) return { step:null, total:null, color:'#4CAF50',
+        action:'TAN — click 2nd circle',
+        hints:[K('Esc')] }
       if (circleCenter) return { step:2, total:2, color:c,
         action:`${dimLocked?'🔒 R ':'R '}${dimInput||'—'} mm`,
         hints:[K('type + Enter','exact radius'), K('T','tangent'), K('Esc')] }
       return { step:1, total:2, color:c,
         action:'Click centre point',
-        hints:[] }
+        hints:[K('T','tangent to 2 circles')] }
     }
 
     if (tool==='spline') {
@@ -6173,13 +6826,16 @@ export default function App() {
           /* ── SKETCH sidebar: all 2D draw tools ── */
           <>
             {toolConfig.map(([t,Icon,title,activeColor])=>(
-              <button key={t}
-                onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim()}}
-                title={title}
-                style={{...btnBase,background:tool===t?activeColor+'33':'transparent',
-                  outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
-                <Icon active={tool===t}/>
-              </button>
+              <div key={t} style={{position:'relative'}}>
+                <button
+                  ref={el => { toolBtnRefs.current[t] = el }}
+                  onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim()}}
+                  title={title}
+                  style={{...btnBase,background:tool===t?activeColor+'33':'transparent',
+                    outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
+                  <Icon active={tool===t}/>
+                </button>
+              </div>
             ))}
           </>
         ) : (
@@ -6244,6 +6900,21 @@ export default function App() {
               <IconMeasure3D color="#4FC3F7"/>
               <span style={{fontSize:10,fontFamily:'monospace',color:'#4FC3F7',letterSpacing:'0.04em'}}>
                 MEASURE
+              </span>
+            </button>
+
+            {/* EXPORT FACE DXF — click a solid face to export its exact OCC
+                boundary (outer loop + every hole) as a .dxf file. */}
+            <button title="Export Face as DXF" onClick={activateExportFaceDXFTool}
+              style={{...btnBase, flexDirection:'column', gap:2,
+                width:102, height:102,
+                background: tool==='exportfacedxf' ? '#B47EFF33' : 'transparent',
+                outline: tool==='exportfacedxf' ? '2px solid #B47EFF' : '1px dashed #B47EFF55',
+                outlineOffset:'-2px',
+              }}>
+              <IconDXF/>
+              <span style={{fontSize:10,fontFamily:'monospace',color:'#B47EFF',letterSpacing:'0.04em'}}>
+                FACE DXF
               </span>
             </button>
           </>
@@ -6321,13 +6992,35 @@ export default function App() {
               <span style={{color:'#555',fontFamily:'monospace',fontSize:9,
                 textTransform:'uppercase',letterSpacing:'0.1em',marginRight:2}}>Modify</span>
               {modifyConfig.map(([t,Icon,title,activeColor])=>(
-                <button key={t}
-                  onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim()}}
-                  title={title}
-                  style={{...btnBase,background:tool===t?activeColor+'33':'transparent',
-                    outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
-                  <Icon active={tool===t}/>
-                </button>
+                <div key={t} style={{position:'relative'}}>
+                  <button
+                    onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim()}}
+                    title={title}
+                    style={{...btnBase,background:tool===t?activeColor+'33':'transparent',
+                      outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
+                    <Icon active={tool===t}/>
+                  </button>
+                  {t==='movecopy'&&tool==='movecopy'&&(
+                    <CopyModePanel
+                      toolColor={activeColor}
+                      primaryKey="M" primaryLabel="Move" primaryMode="move"
+                      mode={moveCopyMode} count={moveCopyCountInput}
+                      onSetMode={setMoveCopyMode}
+                      onSetCount={n=>setMoveCopyCountInput(String(Math.max(1,Math.min(100,n))))}
+                      locked={!!startPoint}
+                    />
+                  )}
+                  {t==='rotatecopy'&&tool==='rotatecopy'&&(
+                    <CopyModePanel
+                      toolColor={activeColor}
+                      primaryKey="R" primaryLabel="Rotate" primaryMode="rotate"
+                      mode={rotateCopyMode} count={rotateCopyCountInput}
+                      onSetMode={setRotateCopyMode}
+                      onSetCount={n=>setRotateCopyCountInput(String(Math.max(1,Math.min(100,n))))}
+                      locked={!!startPoint}
+                    />
+                  )}
+                </div>
               ))}
 
               <div style={{flex:1}}/>
@@ -6373,9 +7066,9 @@ export default function App() {
               <span style={{color:'#555',fontFamily:'monospace',fontSize:9,
                 textTransform:'uppercase',letterSpacing:'0.1em',marginRight:2}}>View</span>
               {[
-                {id:'top',   label:'TOP',  title:'Top view (XY)',  fn:()=>viewport3dRef.current?.snapToPlane('XY')},
-                {id:'front', label:'FRONT',title:'Front view (XZ)', fn:()=>viewport3dRef.current?.snapToPlane('XZ')},
-                {id:'side',  label:'SIDE', title:'Side view (YZ)',  fn:()=>viewport3dRef.current?.snapToPlane('YZ')},
+                {id:'top',   label:'TOP',  title:'Top view (XY)',  fn:()=>viewport3dRef.current?.snapToPlane('XY', {resetZoom:false})},
+                {id:'front', label:'FRONT',title:'Front view (XZ)', fn:()=>viewport3dRef.current?.snapToPlane('XZ', {resetZoom:false})},
+                {id:'side',  label:'SIDE', title:'Side view (YZ)',  fn:()=>viewport3dRef.current?.snapToPlane('YZ', {resetZoom:false})},
                 {id:'iso',   label:'ISO',  title:'Isometric view',  fn:()=>viewport3dRef.current?.snapToIsometric()},
               ].map(({id,label,title,fn})=>(
                 <button key={label} title={title} onClick={fn}
@@ -6401,16 +7094,18 @@ export default function App() {
             </>
           )}
 
-          {/* Guide — always visible */}
-          <button
-            onClick={()=>setGuideOpen(p=>!p)}
-            title="Toggle Guide Panel"
-            style={{...btnBase,
-              background:guideOpen?'#f7fb0422':'transparent',
-              outline:guideOpen?'2px solid #f7fb04':'none',
-              outlineOffset:'-2px'}}>
-            <IconGuide active={guideOpen}/>
-          </button>
+          {/* Guide — sketch profile environment only, not the 3D environment */}
+          {sketchMode && (
+            <button
+              onClick={()=>setGuideOpen(p=>!p)}
+              title="Toggle Guide Panel"
+              style={{...btnBase,
+                background:guideOpen?'#f7fb0422':'transparent',
+                outline:guideOpen?'2px solid #f7fb04':'none',
+                outlineOffset:'-2px'}}>
+              <IconGuide active={guideOpen}/>
+            </button>
+          )}
         </div>
         {/* ── Viewport3D + Guide side by side ── */}
         <div style={{flex:1,display:'flex',minHeight:0,position:'relative',
@@ -6434,11 +7129,14 @@ export default function App() {
             onScaleChange={handleScaleChange}
             onPlaneClick={handlePlaneClick}
             onFaceClick={handleFaceClick}
-            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode) || (tool==='mirror3d' && !!mirror3dSourceFeatureId) || (tool==='loft3d' && !loftState)}
+            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode) || (tool==='mirror3d' && !!mirror3dSourceFeatureId) || (tool==='loft3d' && !loftState) || tool==='exportfacedxf'}
+            dxfPickMode={tool==='exportfacedxf'}
             extrudeArmed={!!extrudeState}
-            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure'}
+            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl'}
             activePlane={activePlane}
             sketchMode={sketchMode}
+            gridVisible={gridVisible}
+            gridSizeMm={gridSizeMm}
             extrudeTool={extrudeTool}
             filletActive={tool==='fillet3d'}
             measureActive={tool==='measure'}
@@ -6508,6 +7206,18 @@ export default function App() {
             }}
           />
 
+          {/* ── SmartStep bar: overlays bottom of viewport during Export STL ── */}
+          <SmartStepBar
+            op={tool==='exportstl' ? 'STL' : null}
+            steps={[{ id:1, label:'Select Bodies' }]}
+            currentStep={1}
+            color="#4CAF50"
+            hint={exportSTLSel.length>0
+              ? `${exportSTLSel.length} selected · Enter to export`
+              : 'Click bodies to choose (none = export all) · Enter to export'}
+            onStepBack={()=>{}}
+          />
+
           {/* ── SmartStep bar: overlays bottom of viewport during Mirror3D ── */}
           <SmartStepBar
             op={tool==='mirror3d' ? 'MIRROR' : null}
@@ -6563,7 +7273,7 @@ export default function App() {
                 <IconRedo active={canRedo}/>
               </button>
               <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
-              <button onClick={()=>saveJSON(lines,circles,arcs,splines,dims)} title="Save (Ctrl+S)" style={{...btnBase,background:'transparent',border:'none'}}>
+              <button onClick={handleSave} title="Save (Ctrl+S)" style={{...btnBase,background:'transparent',border:'none'}}>
                 <IconSave/>
               </button>
               <button onClick={()=>loadFileRef.current.click()} title="Load drawing" style={{...btnBase,background:'transparent',border:'none'}}>
@@ -6604,13 +7314,26 @@ export default function App() {
               <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
             </>
           )}
-          <button onClick={handleExportSTL} title="Export STL (for 3D printing — fuses all bodies into one)"
-            style={{...btnBase,background:'transparent',border:'none'}}>
+          <button onClick={activateExportSTLTool}
+            title="Export STL — click bodies in the 3D view to choose which ones to export (none selected = export all)"
+            style={{...btnBase, background: tool==='exportstl' ? '#4CAF5033' : 'transparent',
+              border: tool==='exportstl' ? '1px solid #4CAF50' : 'none'}}>
             <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
               <path d="M11 2l8 4.5v9L11 20l-8-4.5v-9L11 2z" stroke="#aaa" strokeWidth="1.5" strokeLinejoin="round"/>
               <path d="M3 6.5L11 11l8-4.5M11 11v9" stroke="#aaa" strokeWidth="1.2"/>
               <text x="4.5" y="19.5" fontSize="5" fill="#4CAF50" fontFamily="monospace" fontWeight="bold">STL</text>
             </svg>
+          </button>
+          <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
+          {/* Whole-PROJECT save/open (.trc) — always visible (not gated
+              behind sketchMode like the sketch-buffer Save/Load above),
+              since the feature tree exists independent of whether you're
+              currently sketching. */}
+          <button onClick={handleSaveProject} title="Save Project (Ctrl+S)" style={{...btnBase,background:'transparent',border:'none'}}>
+            <IconSave/>
+          </button>
+          <button onClick={()=>loadProjectFileRef.current.click()} title="Open Project" style={{...btnBase,background:'transparent',border:'none'}}>
+            <IconLoad/>
           </button>
           <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
           {/* Grid toggle — stays visible in 3D mode too: gridSnap/gridSizeMm
@@ -6729,7 +7452,18 @@ export default function App() {
                     {['front','both','back'].map(dir => (
                       <button key={dir}
                         title={dir==='both'?'Symmetric (both sides)':dir==='front'?'Front only':'Back only'}
-                        onClick={()=>setExtrudeState(prev=>({...prev,direction:dir}))}
+                        onClick={()=>setExtrudeState(prev=>{
+                          // Also write the ref synchronously — extrudeStateRef only
+                          // updates via a useEffect (see its declaration), which runs
+                          // AFTER this click's render commits. commitExtrude() prefers
+                          // the ref, so confirming (Enter/Finish) fast enough right
+                          // after this click could otherwise read the PRE-click
+                          // direction and silently commit the wrong one (e.g.
+                          // "Symmetric" selected but a one-sided extrude gets built).
+                          const next = {...prev, direction:dir}
+                          extrudeStateRef.current = next
+                          return next
+                        })}
                         style={{
                           padding:'2px 6px', fontSize:10, fontFamily:'monospace',
                           background: extrudeState.direction===dir ? '#3a7bd5' : '#1e1e38',
@@ -6892,7 +7626,11 @@ export default function App() {
                   const active = k==='both' ? extrudeState.direction==='both' : extrudeState.direction!=='both'
                   return (
                     <button key={k}
-                      onClick={()=>setExtrudeState(prev=>({...prev, direction: k==='both' ? 'both' : 'front'}))}
+                      onClick={()=>setExtrudeState(prev=>{
+                        const next = {...prev, direction: k==='both' ? 'both' : 'front'}
+                        extrudeStateRef.current = next
+                        return next
+                      })}
                       title={label}
                       style={{
                         flex:1, padding:'4px 0', fontSize:13, cursor:'pointer',
@@ -6976,7 +7714,15 @@ export default function App() {
                 const active = extrudeState.extentMode === k
                 return (
                   <button key={k} title={label}
-                    onClick={()=>setExtrudeState(prev=>({...prev, extentMode:k}))}
+                    onClick={()=>setExtrudeState(prev=>{
+                      // Same ref-lag hazard as the direction toggle above —
+                      // extrudeStateRef only catches up via a useEffect, and
+                      // commitExtrude() prefers the ref, so a fast confirm right
+                      // after this click could read the extentMode from before it.
+                      const next = {...prev, extentMode:k}
+                      extrudeStateRef.current = next
+                      return next
+                    })}
                     style={{
                       padding:'6px 12px', cursor:'pointer', fontSize:15,
                       background: active ? '#FF3B5C' : '#050505',
@@ -7004,7 +7750,11 @@ export default function App() {
                   const active = k==='both' ? extrudeState.direction==='both' : extrudeState.direction!=='both'
                   return (
                     <button key={k}
-                      onClick={()=>setExtrudeState(prev=>({...prev, direction: k==='both' ? 'both' : 'front'}))}
+                      onClick={()=>setExtrudeState(prev=>{
+                        const next = {...prev, direction: k==='both' ? 'both' : 'front'}
+                        extrudeStateRef.current = next
+                        return next
+                      })}
                       title={label}
                       style={{
                         flex:1, padding:'4px 0', fontSize:13, cursor:'pointer',
@@ -7124,6 +7874,18 @@ export default function App() {
                   <span style={{color:'#6688aa', fontSize:11}}>mm</span>
                 </div>
               </div>
+              <label
+                title="Off: smooth blended surface between profiles. On: straight faceted panels instead."
+                style={{display:'flex', gap:6, alignItems:'center', cursor:'pointer', color:'#6688aa', fontSize:11}}
+              >
+                <input
+                  type="checkbox"
+                  checked={!!loftState.ruled}
+                  onChange={e=>setLoftState(prev=>({...prev, ruled:e.target.checked}))}
+                  style={{accentColor:'#33D5EC', cursor:'pointer'}}
+                />
+                Ruled
+              </label>
               <div style={{display:'flex', gap:6}}>
                 <button
                   onClick={loftPreviousProfile}
@@ -7330,6 +8092,8 @@ export default function App() {
         joinSel={joinSel}
         onToggleJoinMember={handleToggleJoinMember}
         onEditLoft={handleEditLoft}
+        hiddenSolidIds={hiddenSolidIds}
+        onToggleBodyVisible={handleToggleBodyVisible}
       />
 
       {/* Hidden file input */}
@@ -7344,6 +8108,15 @@ export default function App() {
             setLines(data.lines);setCircles(data.circles);setArcs(data.arcs);setSplines(data.splines||[])
             resetDrawState()
           } catch(err) {setLoadError(err.message);setTimeout(()=>setLoadError(null),3000)}
+        }}
+      />
+      {/* Hidden file input — whole-project open (.trc), falls back to
+          importing pre-.trc save files as a bare sketch — see handleOpenProject. */}
+      <input ref={loadProjectFileRef} type="file" accept=".trc,.json" style={{display:'none'}}
+        onChange={async e=>{
+          const file=e.target.files[0];e.target.value=''
+          if (!file) return
+          await handleOpenProject(file)
         }}
       />
       {loadError&&<div style={{position:'fixed',top:10,left:'50%',transform:'translateX(-50%)',background:'#b71c1c',color:'white',padding:'6px 16px',borderRadius:4,fontFamily:'monospace',fontSize:12,pointerEvents:'none'}}>⚠ {loadError}</div>}
@@ -7372,6 +8145,47 @@ export default function App() {
         />
       )}
 
+      {flyoutAnchor && (
+        <div style={{position:'fixed', top:flyoutAnchor.top, left:flyoutAnchor.right, zIndex:60}}>
+          {tool==='line' && (
+            <LineSnapPanel
+              toolColor={toolConfig.find(([t])=>t==='line')[3]}
+              tKeyDown={tKeyDown} pKeyDown={pKeyDown}
+              onToggleT={()=>setTKeyDown(p=>!p)}
+              onToggleP={()=>setPKeyDown(p=>!p)}
+            />
+          )}
+          {tool==='circle' && (
+            <CircleSnapPanel
+              toolColor={toolConfig.find(([t])=>t==='circle')[3]}
+              tKeyDown={tKeyDown}
+              onToggleT={()=>setTKeyDown(p=>!p)}
+              circleTanA={circleTanA} circleTanB={circleTanB}
+            />
+          )}
+          {tool==='spline' && (
+            <SplineSnapPanel
+              toolColor={toolConfig.find(([t])=>t==='spline')[3]}
+              splineClosed={splineClosed}
+              onToggleC={()=>setSplineClosed(p=>!p)}
+              splinePoints={splinePoints}
+            />
+          )}
+        </div>
+      )}
+
+      {saveAsOpen&&(
+        <SaveAsPanel
+          defaultName="drawing"
+          extension={saveAsOpen==='project' ? '.trc' : '.json'}
+          onSave={async filename=>{
+            setSaveAsOpen(false)
+            if (saveAsOpen==='project') await saveProjectFileAs(features, solids, filename)
+            else await saveProjectAs(lines,circles,arcs,splines,dims,filename)
+          }}
+          onClose={()=>setSaveAsOpen(false)}
+        />
+      )}
       {pageSetupOpen&&(
         <PageSetupPanel
           lines={lines} circles={circles} arcs={arcs} splines={splines} dims={dims}

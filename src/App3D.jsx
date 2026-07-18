@@ -1265,6 +1265,13 @@ export default function App() {
   const splinesRef=useRef([])
   const loadFileRef=useRef(null)
   const loadProjectFileRef=useRef(null)
+  // The FileSystemFileHandle from the last successful project save — lets
+  // handleSaveProject silently re-write the SAME file on subsequent saves
+  // instead of always re-opening the native picker and re-suggesting the
+  // generic "drawing.trc" default (see saveProjectFileAs's comment). Reset
+  // whenever a *different* project is loaded, so saves after Opening a file
+  // don't silently overwrite the previous one.
+  const projectFileHandleRef=useRef(null)
   const [loadError,setLoadError]=useState(null)
   useEffect(()=>{trackedPtsRef.current=trackedPts},[trackedPts])
   useEffect(()=>{splinePointsRef.current=splinePoints},[splinePoints])
@@ -1292,8 +1299,17 @@ export default function App() {
   // the always-visible SAVE/OPEN toolbar buttons and Ctrl+S (outside sketch
   // mode) use.
   async function handleSaveProject(){
-    if (canPickSaveLocation()) await saveProjectFileAs(features, solids)
-    else setSaveAsOpen('project')
+    if (canPickSaveLocation()) {
+      try {
+        const { handle } = await saveProjectFileAs(features, solids, 'drawing.trc', projectFileHandleRef.current)
+        if (handle) projectFileHandleRef.current = handle
+      } catch (err) {
+        setCadError('Save failed: ' + (err.message || String(err)))
+        setTimeout(() => setCadError(null), 6000)
+      }
+    } else {
+      setSaveAsOpen('project')
+    }
   }
 
   // New Project — a full page reload rather than a soft in-memory reset.
@@ -1345,6 +1361,11 @@ export default function App() {
       return
     }
     resetAllToolState()
+    // Opening a project reads it via a plain <input type="file"> (no
+    // writable handle), and it's a DIFFERENT file from whatever was saved
+    // before — clear the cached handle so the next Save prompts fresh
+    // instead of silently overwriting the previous project.
+    projectFileHandleRef.current = null
     if (projectData) {
       setFeatures(projectData.features)
       try {

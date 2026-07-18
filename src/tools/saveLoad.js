@@ -166,25 +166,52 @@ function serializeProject(features, solids) {
 
 // Saves the whole feature tree under a chosen name — the .trc counterpart of
 // saveProjectAs() above. Same native-Save-dialog-or-download behavior.
-export async function saveProjectFileAs(features, solids, suggestedName = 'drawing.trc') {
-  const data = serializeProject(features, solids)
-  if (canPickSaveLocation()) {
+//
+// `existingHandle` (a FileSystemFileHandle from a previous save) lets a
+// caller implement real "Save" semantics on top of this "Save As" primitive:
+// pass the handle back in and this re-writes the SAME file silently, with no
+// dialog at all — skipping both the repeated native-dialog popup AND the
+// dialog re-suggesting the generic `suggestedName` every time, which is what
+// made every Ctrl+S look like it was always saving a fresh "drawing.trc".
+// Falls through to a fresh picker if the handle has gone stale (file moved/
+// deleted/permission revoked) rather than failing outright.
+//
+// The native picker is opened BEFORE serializing (`serializeProject` can be
+// non-trivial for a large feature tree — dense splines, text-extrude glyph
+// outlines, etc.) so the dialog appears immediately instead of after a
+// noticeable blocked-main-thread delay.
+//
+// Returns {status: 'saved'|'cancelled'|'downloaded', handle: FileSystemFileHandle|null}.
+export async function saveProjectFileAs(features, solids, suggestedName = 'drawing.trc', existingHandle = null) {
+  if (existingHandle) {
     try {
-      const handle = await window.showSaveFilePicker({
+      const data = serializeProject(features, solids)
+      const writable = await existingHandle.createWritable()
+      await writable.write(data)
+      await writable.close()
+      return { status: 'saved', handle: existingHandle }
+    } catch { /* stale handle — fall through to a fresh picker below */ }
+  }
+  if (canPickSaveLocation()) {
+    let handle
+    try {
+      handle = await window.showSaveFilePicker({
         suggestedName,
         types: [{ description: '3D Retro CAD project', accept: { 'application/json': ['.trc'] } }],
       })
-      const writable = await handle.createWritable()
-      await writable.write(data)
-      await writable.close()
-      return 'saved'
     } catch (err) {
-      if (err && err.name === 'AbortError') return 'cancelled'
+      if (err && err.name === 'AbortError') return { status: 'cancelled', handle: null }
       throw err
     }
+    const data = serializeProject(features, solids)
+    const writable = await handle.createWritable()
+    await writable.write(data)
+    await writable.close()
+    return { status: 'saved', handle }
   }
+  const data = serializeProject(features, solids)
   dlText(suggestedName, data, 'application/json')
-  return 'downloaded'
+  return { status: 'downloaded', handle: null }
 }
 
 // Parses a .trc (or legacy-incompatible) file. Throws if `features` isn't

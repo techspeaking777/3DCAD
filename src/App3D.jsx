@@ -2904,9 +2904,19 @@ export default function App() {
   // every OTHER activate*Tool function didn't touch it at all, leaving the
   // solid hidden with no way back short of a page reload.
   function restoreHiddenEditSolid() {
-    if (hiddenEditSolidRef.current) {
-      setSolids(prev => [...prev, ...hiddenEditSolidRef.current])
+    const hidden = hiddenEditSolidRef.current
+    if (hidden) {
+      // Null the ref BEFORE queuing the state update, not after — React
+      // doesn't run this updater synchronously at the setSolids() call site,
+      // it runs it later during its own render pass. Reading the ref again
+      // inside the updater (the original code did `...hiddenEditSolidRef.
+      // current`) meant it always saw whatever the ref held by the time
+      // React got around to calling the updater — which was already null,
+      // since the very next line nulled it — throwing "is not iterable".
+      // Capturing the array into `hidden` first and closing over THAT
+      // instead sidesteps the timing entirely.
       hiddenEditSolidRef.current = null
+      setSolids(prev => [...prev, ...hidden])
     }
   }
 

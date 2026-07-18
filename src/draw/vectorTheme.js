@@ -11,7 +11,7 @@ export const VECTOR_GLOW = {
   cutout:   '#FF4D6D',
   fillet3d: '#A470F2',
   mirror3d: '#8E65F3',
-  loft3d:   '#33D5EC',
+  loft3d:   '#FBDA2D',
   join3d:   '#FFEE88',
 }
 

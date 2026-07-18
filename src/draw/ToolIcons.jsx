@@ -281,7 +281,7 @@ export function IconMirror3D({ color = '#8E65F3' }) {
   )
 }
 
-export function IconLoft3D({ color = '#33D5EC' }) {
+export function IconLoft3D({ color = '#FBDA2D' }) {
   return (
     <svg width="70" height="70" viewBox="0 0 70 70" fill="none" style={glow(color)}>
       {/* small top profile, dashed extension flaring out to the lofted body's

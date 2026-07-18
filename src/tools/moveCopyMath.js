@@ -7,20 +7,24 @@ export function nearestMoveCopyEntity(mouse, lines, circles, arcs, splines = [])
   const sd = SELECT_DIST / zoomRef.scale
   let best = null, bestDist = sd + 1
   lines.forEach((l, idx) => {
+    if (l.ghostRef) return
     const d = distToSeg(mouse.x, mouse.y, l.x1, l.y1, l.x2, l.y2)
     if (d < bestDist) { bestDist = d; best = { kind: 'line', idx } }
   })
   circles.forEach((c, idx) => {
+    if (c.ghostRef) return
     const d = Math.abs(Math.hypot(mouse.x - c.cx, mouse.y - c.cy) - c.r)
     if (d < bestDist) { bestDist = d; best = { kind: 'circle', idx } }
   })
   arcs.forEach((arc, idx) => {
+    if (arc.ghostRef) return
     const angle = norm2pi(Math.atan2(mouse.y - arc.cy, mouse.x - arc.cx))
     if (!angleOnArc(angle, arc.startAngle, arc.endAngle)) return
     const d = Math.abs(Math.hypot(mouse.x - arc.cx, mouse.y - arc.cy) - arc.r)
     if (d < bestDist) { bestDist = d; best = { kind: 'arc', idx } }
   })
   splines.forEach((sp, idx) => {
+    if (sp.ghostRef) return
     if (sp.points.length < 2) return
     const d = distToSpline(mouse.x, mouse.y, sp.points, sp.closed)
     if (d < bestDist) { bestDist = d; best = { kind: 'spline', idx } }

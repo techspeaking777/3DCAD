@@ -6,6 +6,7 @@ export function nearestFilletLine(mouse, lines) {
   const sd = SELECT_DIST / zoomRef.scale
   let best = null, bestDist = sd + 1
   lines.forEach((l, idx) => {
+    if (l.ghostRef) return
     const d = distToSeg(mouse.x, mouse.y, l.x1, l.y1, l.x2, l.y2)
     if (d < bestDist) { bestDist = d; best = { kind: 'line', idx, clickPt: { x: mouse.x, y: mouse.y } } }
   })

@@ -32,6 +32,41 @@ function fuseTolerant(a, b) {
   return result
 }
 
+// Builds the shape to subtract for one cut op — linear extrude (plain),
+// revolve (`axis` present), or loft (`profiles` present, e.g. a tapered
+// pocket cut via App3D.jsx's Loft Cutout tool). Same discriminator
+// convention buildBase() below already uses for cold-rebuild fallbacks;
+// this is the cut-shape counterpart, shared by every op-replay loop
+// (subtract, mirrorShape, joinShapes, exportSTL) so all four stay in sync.
+// isCut adds a 1mm protrusion so a cut ending flush with a solid's face
+// doesn't fail on coincident-face booleans — see extendLoftCutProfiles for
+// the loft-shaped-cut equivalent (buildRevolve has no such treatment yet).
+function buildCutShape(cut) {
+  return cut.profiles ? buildLoft({ ...cut, profiles: extendLoftCutProfiles(cut.profiles) })
+    : cut.axis ? buildRevolve(cut) : buildExtrude({ ...cut, isCut: true })
+}
+
+// Pushes a loft cutout's first/last profile 1mm further out along the
+// shared normal — buildExtrude's isCut protrusion (above) exists because a
+// cut ending exactly flush with a target's face can leave an uncut sliver
+// there (OCC's boolean treats an exactly-coincident face as ambiguous, not
+// "definitely overlapping"); buildLoft has no equivalent margin, so a loft
+// cutout whose length exactly matches the material it's punching through
+// (e.g. a hole meant to go clean through a 200mm cylinder, sketched 200mm
+// deep) can fail to fully cut the far end face. Only touches the two
+// endpoint planes' position — the profile shapes/points themselves, and
+// every profile in between, are untouched, so the taper the user actually
+// sketched is preserved; the 1mm extension just falls outside the target
+// solid either way.
+const LOFT_CUT_OVH_MM = 1
+function extendLoftCutProfiles(profiles) {
+  if (profiles.length < 2) return profiles
+  const extended = profiles.map(p => ({ ...p }))
+  extended[0].offsetMm -= LOFT_CUT_OVH_MM
+  extended[extended.length - 1].offsetMm += LOFT_CUT_OVH_MM
+  return extended
+}
+
 let ocReady = false
 async function initOC() {
   const OC = await opencascade({ locateFile: () => opencascadeWasm })
@@ -68,8 +103,7 @@ self.onmessage = async function(e) {
                 op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
               ))
             } else {
-              const cut = op.params
-              shape = shape.cut(cut.axis ? buildRevolve(cut) : buildExtrude({ ...cut, isCut: true }))
+              shape = shape.cut(buildCutShape(op.params))
             }
           }
         }
@@ -193,14 +227,13 @@ self.onmessage = async function(e) {
       }
       let cutShape
       try {
-        // A revolve-cutout's params carry `axis` (no depthMm/direction) — build
-        // a solid of revolution to subtract instead of a linear prism. Plain
-        // cuts: App3D sets depthMm=10000+direction='both' for through-all, or
-        // user values for blind cut; isCut=true adds 1mm protrusion on the
-        // entry side to avoid coincident-face OCC failures.
-        cutShape = params.cut.axis
-          ? buildRevolve(params.cut)
-          : buildExtrude({ ...params.cut, isCut: true })
+        // A revolve-cutout's params carry `axis` (no depthMm/direction), a
+        // loft-cutout's carry `profiles` — build the matching shape to
+        // subtract instead of assuming a linear prism. Plain cuts: App3D
+        // sets depthMm=10000+direction='both' for through-all, or user
+        // values for blind cut; isCut=true adds 1mm protrusion on the entry
+        // side to avoid coincident-face OCC failures (see buildCutShape).
+        cutShape = buildCutShape(params.cut)
       } catch(e) {
         throw new Error(`Step2-CUT: ${e.message} | planeId=${params.cut.planeId} facePlane=${!!params.cut.normal} store=${fromStore}`)
       }
@@ -227,7 +260,7 @@ self.onmessage = async function(e) {
             op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
           ))
         } else {
-          base = base.cut(op.params.axis ? buildRevolve(op.params) : buildExtrude({ ...op.params, isCut: true }))
+          base = base.cut(buildCutShape(op.params))
         }
       }
       // Work-plane mirror: pass the PlaneName string directly — replicad's
@@ -258,7 +291,7 @@ self.onmessage = async function(e) {
                 op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
               ))
             } else {
-              s = s.cut(op.params.axis ? buildRevolve(op.params) : buildExtrude({ ...op.params, isCut: true }))
+              s = s.cut(buildCutShape(op.params))
             }
           }
         }

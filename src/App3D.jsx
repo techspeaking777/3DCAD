@@ -47,6 +47,10 @@ import { glowStroke, glowFill } from './draw/vectorTheme.js'
 const SOLID_ICON_COMPONENTS = {
   extrude: IconExtrude3D, cutout: IconCutout3D, fillet3d: IconFillet3D,
   mirror3d: IconMirror3D, loft3d: IconLoft3D, join3d: IconJoin3D,
+  // Reuses the additive Loft icon's shape, rendered in Cutout's color (see
+  // the button color below) — same "one glyph, color signals cut variant"
+  // convention Extrude/Cutout already lean on, no separate icon needed.
+  loftcutout: IconLoft3D,
 }
 
 // Pixel-art view-preset icons (src/assets/view-op-icons.png) — same
@@ -138,6 +142,17 @@ function buildCutWorkerParams(cutFeat) {
     origin: [pxToMm(fp.origin.x), pxToMm(fp.origin.y), pxToMm(fp.origin.z)],
     uAxis:  [fp.uAxis.x, fp.uAxis.y, fp.uAxis.z],
   } : {}
+  // Loft cutout (see commitLoft's isLoftCutout branch) — profiles/normal/
+  // origin/uAxis are already plain mm/unit-vector arrays on the feature
+  // (same shape buildBaseWorkerParams' own loft branch reads off a `solid`
+  // object), so no facePlaneParams wrapping needed — the loft basis IS the
+  // plane.
+  if (cutFeat.profiles) {
+    return {
+      profiles: cutFeat.profiles.map(p => ({ pts: p.pts, circle: p.circle, offsetMm: p.offsetMm })),
+      normal: cutFeat.normal, origin: cutFeat.origin, uAxis: cutFeat.uAxis, ruled: !!cutFeat.ruled,
+    }
+  }
   if (cutFeat.revolveAxis) {
     return {
       pts: cutFeat.profilePts, planeId: cutFeat.planeId,
@@ -243,9 +258,22 @@ function workPlaneToFacePlaneBasisPx(planeId) {
 // does). Uses basis.vAxis directly (see workPlaneToFacePlaneBasisPx) rather
 // than re-deriving it, so it stays correct for every plane, not just the
 // ones where cross(normal,uAxis) happens to agree with SketchPlane.js.
+//
+// basis.normal is the SWEEP direction — for a loft cutout this is negated
+// (see startLoftProfile1) so profiles step INTO the material, and that's
+// also what offsets each profile's origin here. But FacePlane.normal feeds
+// getCameraView(), which positions the camera at origin + normal*distance —
+// if that were the (negated, into-material) sweep normal, the camera would
+// snap to the FAR side of the profile from the viewer, looking back through
+// the material. Same up vector (vAxis), but forward flips, which flips the
+// camera's local right axis too — every click renders mirrored left-right
+// from where the mouse actually is. basis.viewNormal is always the true
+// outward-facing normal, kept separate from the sweep direction for exactly
+// this reason — use it for the FacePlane's own orientation, falling back to
+// basis.normal for older basis objects that predate this split.
 function buildLoftFacePlane(basis, offsetMm) {
   const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(offsetMm))
-  return new FacePlane(origin, basis.normal, basis.uAxis, basis.vAxis)
+  return new FacePlane(origin, basis.viewNormal || basis.normal, basis.uAxis, basis.vAxis)
 }
 
 // Ordered cutout/fillet ops for `solid`, in the shape cadWorker.js's
@@ -305,6 +333,27 @@ function revolveSweepBoxPx(pts, axis, angleDeg, reverse, planeId, facePlane) {
       allPts.push(v.clone().sub(axisOrigin).applyAxisAngle(axisDir, ang).add(axisOrigin))
     }
   }
+  return new THREE.Box3().setFromPoints(allPts)
+}
+
+// Cheap bounding-box estimate for a loft cutout's swept volume — same
+// candidate-filter role as revolveSweepBoxPx above, just for a stack of
+// profiles at increasing offsets along the shared loft normal instead of a
+// revolve sweep. Each profile's own plane origin is derived the same way
+// buildLoftFacePlane derives it (basis origin pushed out along the normal by
+// that profile's offsetMm), and points project into world space the same way
+// FacePlane.sketchToWorld does (uAxis for x, -vAxis for Y-down sketch y).
+function loftSweepBoxPx(profiles, basis) {
+  const allPts = []
+  profiles.filter(Boolean).forEach(p => {
+    const planeOrigin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(p.offsetMm || 0))
+    p.pts.forEach(pt => {
+      allPts.push(new THREE.Vector3()
+        .copy(planeOrigin)
+        .addScaledVector(basis.uAxis, pt.x)
+        .addScaledVector(basis.vAxis, -pt.y))
+    })
+  })
   return new THREE.Box3().setFromPoints(allPts)
 }
 
@@ -522,7 +571,7 @@ function featureOpColor(feat) {
   const op = feat.operation || 'extrude'
   return {
     extrude: '#FBDA2D', revolve: '#FBDA2D', cutout: '#53D3E4',
-    mirror: '#8E65F3', loft: '#33D5EC', join: '#FFEE88',
+    mirror: '#8E65F3', loft: '#FBDA2D', join: '#FFEE88',
   }[op] || '#FBDA2D'
 }
 
@@ -644,9 +693,18 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           const isMirror = isExtrude && feat.operation === 'mirror'
           const isJoin = isExtrude && feat.operation === 'join'
           const isLoft = isExtrude && feat.operation === 'loft'
+          // A loft-cutout is stored as an ordinary operation:'cutout' feature
+          // (see commitLoft's isLoftCutout branch) so it replays through the
+          // same cutout machinery everywhere else, but it carries `profiles`
+          // instead of `profilePts`/`planeId` — needs its own UI branches
+          // wherever the tree assumed every cutout has the plain shape.
+          const isLoftCutout = isExtrude && feat.operation === 'cutout' && !!feat.profiles
           const isLocked = !!feat.joinedInto
           const hasDependentMirror = features.some(f => f.operation === 'mirror' && f.sourceSolidId === feat.solidId)
-          const isMirrorEligible = isExtrude && !isMirror && !isLocked
+          // Mirroring-a-cutout (commitMirrorCutout) reflects profilePts/
+          // planeId/facePlane — fields a loft-cutout doesn't have — so it's
+          // excluded from mirror-source eligibility rather than crashing.
+          const isMirrorEligible = isExtrude && !isMirror && !isLocked && !isLoftCutout
           const isJoinEligible = isExtrude && feat.operation !== 'cutout' && !isJoin && !isLocked && !hasDependentMirror
           // Only rows that own an independent solid can be hidden — a cutout/
           // fillet (or a mirrored cutout, which shows up as operation:'cutout'
@@ -784,21 +842,21 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                   )}
                   {isExtrude && !isLocked && (
                     <>
-                      {!sketchMode && isLoft && (
+                      {!sketchMode && (isLoft || isLoftCutout) && (
                         <button title="Edit loft profiles"
                           onClick={e=>{e.stopPropagation(); onEditLoft(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
                             padding:'1px 3px', display:'flex', alignItems:'center'}}
                         ><PencilGlyph/></button>
                       )}
-                      {!sketchMode && !isLoft && feat.sketchLines !== undefined && (
+                      {!sketchMode && !isLoft && !isLoftCutout && feat.sketchLines !== undefined && (
                         <button title="Edit sketch"
                           onClick={e=>{e.stopPropagation(); onEditSketch(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
                             padding:'1px 3px', display:'flex', alignItems:'center'}}
                         ><PencilGlyph/></button>
                       )}
-                      {!sketchMode && !isMirror && !isJoin && !isLoft && (
+                      {!sketchMode && !isMirror && !isJoin && !isLoft && !isLoftCutout && (
                         <button title={feat.operation==='cutout' ? 'Edit cutout extent' : 'Edit extrusion extent'}
                           onClick={e=>{e.stopPropagation(); onEditExtent(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
@@ -876,7 +934,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                 <div style={{marginLeft:20, marginTop:3}}>
                   <div style={{display:'flex', alignItems:'center', gap:5}}>
                     <div style={{width:8,height:8,borderRadius:'50%',
-                      background:feat.color||'#33D5EC', flexShrink:0}}/>
+                      background:feat.color||'#FBDA2D', flexShrink:0}}/>
                     <span style={{color:'#8fa0b8', fontSize:10}}>
                       loft · {(feat.profiles||[]).length} profiles
                     </span>
@@ -884,8 +942,21 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                 </div>
               )}
 
+              {/* Loft cutout subtitle: colour + profile count */}
+              {isLoftCutout && (
+                <div style={{marginLeft:20, marginTop:3}}>
+                  <div style={{display:'flex', alignItems:'center', gap:5}}>
+                    <div style={{width:8,height:8,borderRadius:'50%',
+                      background:feat.color||'#e05a4e', flexShrink:0}}/>
+                    <span style={{color:'#8fa0b8', fontSize:10}}>
+                      {(feat.profiles||[]).length} profiles · loft cutout
+                    </span>
+                  </div>
+                </div>
+              )}
+
               {/* Extrude subtitle: colour + depth + operation */}
-              {isExtrude && !isMirror && !isJoin && !isLoft && (
+              {isExtrude && !isMirror && !isJoin && !isLoft && !isLoftCutout && (
                 <div style={{marginLeft:20, marginTop:3}}>
                   <div style={{display:'flex', alignItems:'center', gap:5}}>
                     <div style={{width:8,height:8,borderRadius:'50%',
@@ -2846,11 +2917,15 @@ export default function App() {
   function activateFillet3DTool() {
     resetSelection()
     resetDrawState()
+    // See activateLoft3DTool's comment — restoreSavedView() must stay inside
+    // this guard, not fire unconditionally, or it jumps the camera to
+    // whatever unrelated view was last saved by some other snap elsewhere.
     if (sketchModeRef.current) {
       setSketchMode(false)
       setActivePlane(null)
       setActiveSketchId(null)
       activePlaneRef.current = null
+      viewport3dRef.current?.restoreSavedView()
     }
     setTool('fillet3d')
     setExtrudeTool(null)
@@ -2861,7 +2936,6 @@ export default function App() {
     setFillet3dHover(null)
     setFillet3dRadiusInput('2')
     setFillet3dHandlePos(null)
-    viewport3dRef.current?.restoreSavedView()
   }
 
   // ── Measure (3D) state machine ────────────────────────────────────────────
@@ -2881,18 +2955,21 @@ export default function App() {
   function activateMeasureTool() {
     resetSelection()
     resetDrawState()
+    // See activateLoft3DTool's comment — restoreSavedView() must stay inside
+    // this guard, not fire unconditionally, or it jumps the camera to
+    // whatever unrelated view was last saved by some other snap elsewhere.
     if (sketchModeRef.current) {
       setSketchMode(false)
       setActivePlane(null)
       setActiveSketchId(null)
       activePlaneRef.current = null
+      viewport3dRef.current?.restoreSavedView()
     }
     setTool('measure')
     setExtrudeTool(null)
     setExtrudeState(null)
     setEditingFeatureId(null)
     resetMeasure()
-    viewport3dRef.current?.restoreSavedView()
   }
 
   function resetMeasure() {
@@ -3080,17 +3157,20 @@ export default function App() {
   function activateExportFaceDXFTool() {
     resetSelection()
     resetDrawState()
+    // See activateLoft3DTool's comment — restoreSavedView() must stay inside
+    // this guard, not fire unconditionally, or it jumps the camera to
+    // whatever unrelated view was last saved by some other snap elsewhere.
     if (sketchModeRef.current) {
       setSketchMode(false)
       setActivePlane(null)
       setActiveSketchId(null)
       activePlaneRef.current = null
+      viewport3dRef.current?.restoreSavedView()
     }
     setTool('exportfacedxf')
     setExtrudeTool(null)
     setExtrudeState(null)
     setEditingFeatureId(null)
-    viewport3dRef.current?.restoreSavedView()
   }
 
   // facePlane.solidId/.point are stamped on by Viewport3D's handleClickInternal
@@ -3124,11 +3204,15 @@ export default function App() {
   function activateMirror3DTool() {
     resetSelection()
     resetDrawState()
+    // See activateLoft3DTool's comment — restoreSavedView() must stay inside
+    // this guard, not fire unconditionally, or it jumps the camera to
+    // whatever unrelated view was last saved by some other snap elsewhere.
     if (sketchModeRef.current) {
       setSketchMode(false)
       setActivePlane(null)
       setActiveSketchId(null)
       activePlaneRef.current = null
+      viewport3dRef.current?.restoreSavedView()
     }
     setTool('mirror3d')
     setExtrudeTool(null)
@@ -3136,7 +3220,6 @@ export default function App() {
     setEditingFeatureId(null)
     setMirror3dSourceFeatureId(null)
     viewport3dRef.current?.clearSolidHighlight()
-    viewport3dRef.current?.restoreSavedView()
   }
 
   function resetMirror3D() {
@@ -3153,18 +3236,21 @@ export default function App() {
   function activateJoin3DTool() {
     resetSelection()
     resetDrawState()
+    // See activateLoft3DTool's comment — restoreSavedView() must stay inside
+    // this guard, not fire unconditionally, or it jumps the camera to
+    // whatever unrelated view was last saved by some other snap elsewhere.
     if (sketchModeRef.current) {
       setSketchMode(false)
       setActivePlane(null)
       setActiveSketchId(null)
       activePlaneRef.current = null
+      viewport3dRef.current?.restoreSavedView()
     }
     setTool('join3d')
     setExtrudeTool(null)
     setExtrudeState(null)
     setEditingFeatureId(null)
     setJoinSel([])
-    viewport3dRef.current?.restoreSavedView()
   }
 
   function resetJoin3D() {
@@ -3252,23 +3338,37 @@ export default function App() {
   // loftState.basis = {origin, normal, uAxis} — THREE.Vector3, SCENE (px) units.
   const [loftState, setLoftState] = useState(null)
   const [loftEditingFeatureId, setLoftEditingFeatureId] = useState(null)
+  // 'loft' (additive, new solid) | 'loftcutout' (subtracts from whatever
+  // solid(s) the lofted shape overlaps) — mirrors extrudeTool's 'extrude'/
+  // 'cutout' split. Picking/sketching (startLoftProfile1/loftNextProfile/
+  // loftPreviousProfile) is identical for both; only commitLoft() branches.
+  const [loftTool, setLoftTool] = useState('loft')
 
-  function activateLoft3DTool() {
+  function activateLoft3DTool(op = 'loft') {
     resetSelection()
     resetDrawState()
+    // restoreSavedView() must stay INSIDE this guard, not fire unconditionally
+    // after it — s.savedPos is a single global "camera before the last snap"
+    // slot, overwritten by every snapToFace/snapToPlane/snapToIsometric call
+    // in the app (TOP/FRONT/SIDE/ISO buttons, any prior sketch, mirror, or
+    // extrude). Calling restoreSavedView() when there was no active sketch to
+    // leave jumps the camera to whatever unrelated view was last saved —
+    // isometric, front, or some arbitrary orbited angle — instead of leaving
+    // the current view alone.
     if (sketchModeRef.current) {
       setSketchMode(false)
       setActivePlane(null)
       setActiveSketchId(null)
       activePlaneRef.current = null
+      viewport3dRef.current?.restoreSavedView()
     }
     setTool('loft3d')
+    setLoftTool(op)
     setExtrudeTool(null)
     setExtrudeState(null)
     setEditingFeatureId(null)
     setLoftState(null)
     setLoftEditingFeatureId(null)
-    viewport3dRef.current?.restoreSavedView()
   }
 
   function resetLoft3D() {
@@ -3281,8 +3381,30 @@ export default function App() {
   // Mirror3D's own single-click plane pick).
   async function startLoftProfile1(pick) {
     const basis = pick.kind === 'face'
-      ? { origin: pick.facePlane.origin.clone(), normal: pick.facePlane.normal.clone(), uAxis: pick.facePlane.uAxis.clone(), vAxis: pick.facePlane.vAxis.clone() }
-      : workPlaneToFacePlaneBasisPx(pick.planeId)
+      ? {
+          origin: pick.facePlane.origin.clone(),
+          // Loft Cutout: a picked face's normal points OUTWARD (away from
+          // the solid) — negate it so stepping through Next Profile builds
+          // INTO the material, not away from it into empty space (which
+          // would never overlap the solid to cut from — see commitLoft's
+          // "No base solid to cut from" failure otherwise). Additive Loft
+          // keeps the outward normal — a boss sticking OUT of the face is
+          // the expected direction there.
+          normal: loftTool === 'loftcutout' ? pick.facePlane.normal.clone().negate() : pick.facePlane.normal.clone(),
+          // Always the TRUE outward normal, regardless of loftTool — used by
+          // buildLoftFacePlane for the sketch's camera/raycast orientation
+          // only. The sweep normal above intentionally points into the
+          // material for a cutout; the camera must still look FROM the
+          // outward (viewer's) side at every profile depth, or it snaps
+          // behind the material and every click renders mirrored (see
+          // buildLoftFacePlane's comment).
+          viewNormal: pick.facePlane.normal.clone(),
+          uAxis: pick.facePlane.uAxis.clone(), vAxis: pick.facePlane.vAxis.clone(),
+        }
+      : (() => {
+          const wb = workPlaneToFacePlaneBasisPx(pick.planeId)
+          return { ...wb, viewNormal: wb.normal.clone() }
+        })()
     setLoftState({ basis, ruled: false, profiles: [], currentIdx: 0, currentOffsetMm: 0, distanceInput: '20' })
     const plane = buildLoftFacePlane(basis, 0)
     // Await the camera tween BEFORE opening the sketch — snapToFace's Promise
@@ -3355,6 +3477,17 @@ export default function App() {
     return {
       origin: new THREE.Vector3(mmToPx(feat.origin[0]), mmToPx(feat.origin[1]), mmToPx(feat.origin[2])),
       normal, uAxis,
+      // The true outward normal, stored explicitly at commit time (see
+      // commitLoft) — NOT re-derived here, because whether a stored cutout
+      // feature's `normal` is the (possibly negated) sweep direction depends
+      // on whether it started from a face pick or a work-plane pick (see
+      // startLoftProfile1), which isn't otherwise recoverable from the
+      // feature alone. Falls back to `normal` unchanged for projects saved
+      // before this field existed — re-editing one of those still has the
+      // pre-existing mirrored-camera bug, but that's a no-worse-than-before
+      // fallback rather than guessing and risking a NEW mirror on features
+      // that never had the bug (work-plane-started cutouts).
+      viewNormal: feat.viewNormal ? new THREE.Vector3(...feat.viewNormal) : normal.clone(),
       // Older/malformed data without a stored vAxis falls back to the cross
       // product — correct for XY/YZ, only wrong for XZ (see
       // workPlaneToFacePlaneBasisPx) — better than crashing on a missing field.
@@ -3367,9 +3500,14 @@ export default function App() {
   // (see commitLoft's editingId branch) instead of creating a new solid.
   function handleEditLoft(featureId) {
     const feat = features.find(f => f.id === featureId)
-    if (!feat || feat.operation !== 'loft') return
+    // A loft-cutout is stored as operation:'cutout' (see commitLoft), not
+    // operation:'loft' — distinguished here by carrying a `profiles` field,
+    // same check the Feature Tree's isLoftCutout uses.
+    const isLoftCutoutFeat = feat && feat.operation === 'cutout' && !!feat.profiles
+    if (!feat || !(feat.operation === 'loft' || isLoftCutoutFeat)) return
     resetSelection(); resetDrawState()
     setTool('loft3d')
+    setLoftTool(isLoftCutoutFeat ? 'loftcutout' : 'loft')
     const basis = featureLoftBasisPx(feat)
     setLoftState({ basis, ruled: !!feat.ruled, profiles: feat.profiles, currentIdx: 0, currentOffsetMm: feat.profiles[0].offsetMm, distanceInput: '20' })
     setLoftEditingFeatureId(featureId)
@@ -3397,6 +3535,7 @@ export default function App() {
     const editingId = loftEditingFeatureId
     const basis = st.basis
     const ruled = !!st.ruled
+    const isLoftCutout = loftTool === 'loftcutout'
     resetLoft3D()
     setTool('select')
     setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
@@ -3410,6 +3549,72 @@ export default function App() {
     // re-deriving it via cross(normal,uAxis) on edit wouldn't match for a
     // loft that started on the XZ work plane (see workPlaneToFacePlaneBasisPx).
     const vAxis  = [basis.vAxis.x, basis.vAxis.y, basis.vAxis.z]
+    // The true outward normal (see buildLoftFacePlane/startLoftProfile1) —
+    // stored so featureLoftBasisPx can restore it exactly on re-edit instead
+    // of guessing whether `normal` above was negated for this feature.
+    const viewNormal = [basis.viewNormal.x, basis.viewNormal.y, basis.viewNormal.z]
+
+    // Subtracts the lofted shape from whatever solid(s) it overlaps, instead
+    // of adding a new one — same "Extrude vs Cutout" split as commitExtrude,
+    // just for a lofted cut shape. Target resolution mirrors commitExtrude's
+    // own cutout branch (App3D.jsx ~4636-4661) exactly: re-edit reuses the
+    // previously cut solid(s) (via groupId, for a cut that spanned several
+    // solids), a brand-new cutout finds every solid the swept volume
+    // (loftSweepBoxPx) actually overlaps.
+    if (isLoftCutout) {
+      const editingFeat = editingId ? features.find(f => f.id === editingId) : null
+      const cutParams = {
+        profiles: profiles.map(p => ({ pts: p.pts, circle: p.circle, offsetMm: p.offsetMm })),
+        normal, origin, uAxis, ruled,
+      }
+      try {
+        let targets, oldMembers = []
+        if (editingFeat) {
+          oldMembers = editingFeat.groupId
+            ? features.filter(f => f.groupId === editingFeat.groupId)
+            : [editingFeat]
+          const targetIds = [...new Set(oldMembers.map(m => m.solidId))]
+          targets = targetIds.map(id => solids.find(s => s.id === id)).filter(Boolean)
+          if (targets.length === 0) throw new Error('No base solid to cut from')
+        } else {
+          const sweepBox = loftSweepBoxPx(profiles, basis)
+          const candidates = solids.filter(s => s.operation !== 'cutout' && s.group)
+          targets = candidates.filter(s => sweepBox.intersectsBox(new THREE.Box3().setFromObject(s.group)))
+          if (targets.length === 0) throw new Error('No base solid to cut from')
+        }
+
+        const reuseId = editingId && !editingFeat.groupId && targets.length === 1
+        const groupId = `loftcutgroup-${Date.now()}`
+        const newFeats = []
+        for (let target of targets) {
+          // Re-edit: rebuild this target clean of just the OLD cut on it
+          // (everything else replays as-is), then cut the fresh shape below.
+          const idsToSkipHere = oldMembers.filter(m => m.solidId === target.id).map(m => m.id)
+          if (idsToSkipHere.length) {
+            const meshData = await rebuildSolidChain(target, { skipIds: idsToSkipHere })
+            target = { ...target, group: replicadMeshToThree(meshData, target.color, target.id) }
+            setSolids(prev => prev.map(s => s.id === target.id ? target : s))
+          }
+          const meshData = await cadEngine.subtract({ baseSolidId: target.id, cut: cutParams, base: buildBaseWorkerParams(target) })
+          const group = replicadMeshToThree(meshData, target.color, target.id)
+          target = { ...target, group }
+          setSolids(prev => prev.map(s => s.id === target.id ? target : s))
+          newFeats.push({
+            id: reuseId ? editingId : `loftcutout-${target.id}-${Date.now()}-${newFeats.length}`,
+            type: 'extrude', operation: 'cutout', name: editingFeat?.name || nextCutoutName(), groupId,
+            solidId: target.id, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled, color: '#e05a4e',
+          })
+          await rebuildDependentMirrors(target)
+        }
+        const oldMemberIds = oldMembers.map(m => m.id)
+        setFeatures(prev => [...prev.filter(f => !oldMemberIds.includes(f.id)), ...newFeats])
+      } catch (err) {
+        console.error('Loft cutout failed:', err)
+        setCadError(`Loft cutout failed: ${err.message || String(err)}`)
+        setTimeout(() => setCadError(null), 6000)
+      }
+      return
+    }
 
     try {
       const solidId = editingId ? features.find(f => f.id === editingId)?.solidId : Date.now()
@@ -3423,11 +3628,11 @@ export default function App() {
 
       setSolids(prev => editingId ? prev.map(s => s.id === solidId ? solidData : s) : [...prev, solidData])
       if (editingId) {
-        setFeatures(prev => prev.map(f => f.id === editingId ? { ...f, normal, origin, uAxis, vAxis, profiles, ruled } : f))
+        setFeatures(prev => prev.map(f => f.id === editingId ? { ...f, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled } : f))
       } else {
         setFeatures(prev => [...prev, {
           id: `loft-${solidId}`, type: 'extrude', operation: 'loft', name: nextLoftName(),
-          solidId, normal, origin, uAxis, vAxis, profiles, ruled, color,
+          solidId, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled, color,
         }])
       }
       await rebuildDependentMirrors(solidData)
@@ -5085,8 +5290,11 @@ export default function App() {
       sketchArcs:    feat.sketchArcs    || [],
       sketchSplines: feat.sketchSplines || [],
     })
-
-    viewport3dRef.current?.restoreSavedView()
+    // No restoreSavedView() here — this function never enters sketch mode or
+    // snaps the camera (the profile isn't changing, only depth/direction), so
+    // there's nothing to restore from. Calling it anyway would jump the
+    // camera to whatever unrelated view was last saved elsewhere (see
+    // activateLoft3DTool's comment for the full mechanism).
   }
 
   // Legacy: depth-only edit (kept for undo compat)
@@ -5269,18 +5477,21 @@ export default function App() {
   function activateExportSTLTool() {
     resetSelection()
     resetDrawState()
+    // See activateLoft3DTool's comment — restoreSavedView() must stay inside
+    // this guard, not fire unconditionally, or it jumps the camera to
+    // whatever unrelated view was last saved by some other snap elsewhere.
     if (sketchModeRef.current) {
       setSketchMode(false)
       setActivePlane(null)
       setActiveSketchId(null)
       activePlaneRef.current = null
+      viewport3dRef.current?.restoreSavedView()
     }
     setTool('exportstl')
     setExtrudeTool(null)
     setExtrudeState(null)
     setEditingFeatureId(null)
     setExportSTLSel([])
-    viewport3dRef.current?.restoreSavedView()
   }
 
   function resetExportSTL() {
@@ -6847,9 +7058,13 @@ export default function App() {
               {id:'fillet3d', label:'FILLET',  color:'#A470F2'},
               {id:'mirror3d', label:'MIRROR',  color:'#8E65F3'},
               {id:'join3d',   label:'JOIN',    color:'#FFEE88'},
-              {id:'loft3d',   label:'LOFT',    color:'#33D5EC'},
+              {id:'loft3d',   label:'LOFT',    color:'#FBDA2D'},
+              {id:'loftcutout', label:'LOFT CUT', color:'#53D3E4'},
             ].map(({id,label,color})=>{
-              const isActive = id==='fillet3d' ? tool==='fillet3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d' : id==='loft3d' ? (tool==='loft3d' || !!loftState) : extrudeTool===id
+              const isActive = id==='fillet3d' ? tool==='fillet3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
+                : id==='loft3d' ? ((tool==='loft3d' || !!loftState) && loftTool!=='loftcutout')
+                : id==='loftcutout' ? ((tool==='loft3d' || !!loftState) && loftTool==='loftcutout')
+                : extrudeTool===id
               return (
               <button key={id}
                 title={label}
@@ -6858,7 +7073,8 @@ export default function App() {
                   else if (id==='fillet3d') activateFillet3DTool()
                   else if (id==='mirror3d') activateMirror3DTool()
                   else if (id==='join3d') activateJoin3DTool()
-                  else if (id==='loft3d') activateLoft3DTool()
+                  else if (id==='loft3d') activateLoft3DTool('loft')
+                  else if (id==='loftcutout') activateLoft3DTool('loftcutout')
                 }}
                 style={{...btnBase, flexDirection:'column', gap:2,
                   width:102, height:102,
@@ -7243,10 +7459,10 @@ export default function App() {
 
           {/* ── SmartStep bar: overlays bottom of viewport during Loft ── */}
           <SmartStepBar
-            op={(tool==='loft3d' || loftState) ? 'LOFT' : null}
+            op={(tool==='loft3d' || loftState) ? (loftTool==='loftcutout' ? 'LOFT CUTOUT' : 'LOFT') : null}
             steps={[{ id:1, label:'Pick Start Plane' }, { id:2, label:'Sketch Profiles' }]}
             currentStep={loftState ? 2 : 1}
-            color="#33D5EC"
+            color={loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}
             hint={loftState
               ? `Profile ${loftState.currentIdx+1} of ${Math.max(loftState.profiles.length, loftState.currentIdx+1)}${sketchMode ? ' · sketching' : ''}`
               : 'Click a work plane or face'}
@@ -7837,12 +8053,12 @@ export default function App() {
           display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 14,
           padding: '8px 16px',
           background: 'rgba(15,20,40,0.95)',
-          borderBottom: '1.5px solid #33D5EC',
+          borderBottom: `1.5px solid ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}`,
           fontFamily: 'monospace',
           pointerEvents: 'all',
         }}>
-          <div style={{color:'#33D5EC', fontSize:13, fontWeight:'bold', letterSpacing:'0.04em'}}>
-            LOFT · PROFILE {loftState.currentIdx+1}
+          <div style={{color: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D', fontSize:13, fontWeight:'bold', letterSpacing:'0.04em'}}>
+            {loftTool==='loftcutout' ? 'LOFT CUTOUT' : 'LOFT'} · PROFILE {loftState.currentIdx+1}
           </div>
 
           {sketchMode ? (
@@ -7882,7 +8098,7 @@ export default function App() {
                   type="checkbox"
                   checked={!!loftState.ruled}
                   onChange={e=>setLoftState(prev=>({...prev, ruled:e.target.checked}))}
-                  style={{accentColor:'#33D5EC', cursor:'pointer'}}
+                  style={{accentColor: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D', cursor:'pointer'}}
                 />
                 Ruled
               </label>
@@ -7903,7 +8119,7 @@ export default function App() {
                   title="Next profile"
                   style={{
                     padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold',
-                    background:'#33D5EC', color:'#0a0e1a', border:'none', borderRadius:4, cursor:'pointer',
+                    background: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D', color:'#0a0e1a', border:'none', borderRadius:4, cursor:'pointer',
                   }}
                 >Next ▶</button>
                 <button

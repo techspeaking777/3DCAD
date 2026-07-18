@@ -149,7 +149,21 @@ export function faceHitToPlane(hit, overrideEdge = null) {
   // caller substitute a Tab-cycled edge instead (see Viewport3D.jsx's
   // cycleFaceBottomEdge) — same {a,b} shape nearestBoundarySegment returns.
   const boundaryLoops = extractFaceBoundaryLoops3D(hit, normal)
-  const nearest = overrideEdge || nearestBoundarySegment(boundaryLoops, hit.point)
+  // A perfectly (or near-perfectly) round face — e.g. a cylinder's flat end
+  // cap — has no boundary edge that's genuinely "nearest" the click: every
+  // one of the tessellated micro-segments around the circle is roughly
+  // equidistant from a click anywhere near the face's centre, so
+  // nearestBoundarySegment's choice degenerates into whichever segment wins
+  // by sub-pixel floating-point margin — effectively an arbitrary rotation
+  // of the sketch's u/v axes that has nothing to do with where the user
+  // actually clicked. Skip the edge search for this case and fall through
+  // to the same deterministic Gram-Schmidt basis used when no boundary is
+  // found at all — every rotation looks identical on a circular face
+  // anyway, so there's no meaningful "wrong" choice to disambiguate here,
+  // just a need for it to be STABLE from click to click. An explicit
+  // overrideEdge (Tab-cycled) still wins — that's a deliberate user choice.
+  const allLoopsRound = !overrideEdge && boundaryLoops.length > 0 && boundaryLoops.every(loop => loopIsRound(loop))
+  const nearest = !allLoopsRound && (overrideEdge || nearestBoundarySegment(boundaryLoops, hit.point))
 
   let uAxis, vAxis
   if (nearest) {
@@ -260,6 +274,20 @@ function nearestBoundarySegment(loops, point) {
     }
   }
   return best
+}
+
+// Orientation-independent roundness test — works directly on raw 3D loop
+// points (all coplanar, since a loop always bounds one flat face region),
+// unlike fitCircleIfRound below which needs a FacePlane's own uAxis/vAxis
+// already chosen. Used by faceHitToPlane to detect "this face has no
+// meaningful edge to orient from" BEFORE picking uAxis/vAxis, not after.
+function loopIsRound(loop, tolerance = 0.03) {
+  if (loop.length < 5) return false
+  const centroid = loop.reduce((s, p) => s.add(p), new THREE.Vector3()).multiplyScalar(1 / loop.length)
+  const dists = loop.map(p => centroid.distanceTo(p))
+  const avgR = dists.reduce((a, b) => a + b, 0) / dists.length
+  if (avgR < 1e-6) return false
+  return dists.every(d => Math.abs(d - avgR) / avgR <= tolerance)
 }
 
 /**

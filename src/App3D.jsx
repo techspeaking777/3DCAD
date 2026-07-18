@@ -35,7 +35,7 @@ import CopyModePanel from './tools/CopyModePanel.jsx'
 import {
   IconLine, IconCircle, IconTrim, IconDelete, IconExtend, IconOffset,
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
-  IconUndo, IconRedo, IconFitView, IconSave, IconLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
+  IconUndo, IconRedo, IconFitView, IconNew, IconSave, IconLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
   IconIncludeFace,
   IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D,
 } from './draw/ToolIcons.jsx'
@@ -1294,6 +1294,20 @@ export default function App() {
   async function handleSaveProject(){
     if (canPickSaveLocation()) await saveProjectFileAs(features, solids)
     else setSaveAsOpen('project')
+  }
+
+  // New Project — a full page reload rather than a soft in-memory reset.
+  // Every solid lives as a replicad Shape in the cadWorker's shapeStore
+  // (keyed by id), and there's no "clear all shapes" worker message —
+  // resetting only React state would leave every old shape orphaned in the
+  // worker, leaking for the rest of the session. A reload also guarantees a
+  // truly clean slate for undo history, the worker connection, etc. — no
+  // partial-reset edge cases to chase down.
+  function handleNewProject(){
+    if (features.length === 0 && solids.length === 0) { window.location.reload(); return }
+    if (window.confirm('Start a new file? This discards everything currently on screen — save first if you want to keep it.')) {
+      window.location.reload()
+    }
   }
 
   // Clears every tool's in-progress state — used before loading a project,
@@ -7532,24 +7546,31 @@ export default function App() {
           )}
           <button onClick={activateExportSTLTool}
             title="Export STL — click bodies in the 3D view to choose which ones to export (none selected = export all)"
-            style={{...btnBase, background: tool==='exportstl' ? '#4CAF5033' : 'transparent',
+            style={{...btnBase, flexDirection:'column', gap:2, background: tool==='exportstl' ? '#4CAF5033' : 'transparent',
               border: tool==='exportstl' ? '1px solid #4CAF50' : 'none'}}>
             <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
               <path d="M11 2l8 4.5v9L11 20l-8-4.5v-9L11 2z" stroke="#aaa" strokeWidth="1.5" strokeLinejoin="round"/>
               <path d="M3 6.5L11 11l8-4.5M11 11v9" stroke="#aaa" strokeWidth="1.2"/>
               <text x="4.5" y="19.5" fontSize="5" fill="#4CAF50" fontFamily="monospace" fontWeight="bold">STL</text>
             </svg>
+            <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>STL</span>
           </button>
           <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
-          {/* Whole-PROJECT save/open (.trc) — always visible (not gated
+          {/* Whole-PROJECT new/save/open (.trc) — always visible (not gated
               behind sketchMode like the sketch-buffer Save/Load above),
               since the feature tree exists independent of whether you're
               currently sketching. */}
-          <button onClick={handleSaveProject} title="Save Project (Ctrl+S)" style={{...btnBase,background:'transparent',border:'none'}}>
-            <IconSave/>
+          <button onClick={handleNewProject} title="New Project" style={{...btnBase,flexDirection:'column',gap:2,background:'transparent',border:'none'}}>
+            <IconNew/>
+            <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>NEW</span>
           </button>
-          <button onClick={()=>loadProjectFileRef.current.click()} title="Open Project" style={{...btnBase,background:'transparent',border:'none'}}>
+          <button onClick={handleSaveProject} title="Save Project (Ctrl+S)" style={{...btnBase,flexDirection:'column',gap:2,background:'transparent',border:'none'}}>
+            <IconSave/>
+            <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>SAVE</span>
+          </button>
+          <button onClick={()=>loadProjectFileRef.current.click()} title="Open Project" style={{...btnBase,flexDirection:'column',gap:2,background:'transparent',border:'none'}}>
             <IconLoad/>
+            <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>OPEN</span>
           </button>
           <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
           {/* Grid toggle — stays visible in 3D mode too: gridSnap/gridSizeMm

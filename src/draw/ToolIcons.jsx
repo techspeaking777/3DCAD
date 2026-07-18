@@ -733,6 +733,15 @@ export function IconSave() {
   )
 }
 
+export function IconNew() {
+  return (
+    <V>
+      <rect x="4" y="3" width="20" height="22" rx="2" fill="#374151" stroke="#f59e0b" strokeWidth="1.5"/>
+      <path d="M14 8v10M9 13h10" stroke="#f59e0b" strokeWidth="2.5" strokeLinecap="round"/>
+    </V>
+  )
+}
+
 export function IconLoad() {
   return (
     <V>

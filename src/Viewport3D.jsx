@@ -253,12 +253,21 @@ function buildFill(pts, plane, facePlane, color=0xaaccff) {
       geo.applyMatrix4(new THREE.Matrix4().makeScale(1, 1, -1))        // flip Z so -y→+z
       geo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI/2))  // lay flat on XZ
       break
-    case 'YZ':
+    case 'YZ': {
       // pt2three YZ: Vector3(0, sx, -sy)
-      // ShapeGeometry vertex (x,y,0) → world (0, x, -y)
-      geo.applyMatrix4(new THREE.Matrix4().makeScale(1, 1, -1))        // flip Z
-      geo.applyMatrix4(new THREE.Matrix4().makeRotationY(Math.PI/2))   // stand on YZ
+      // ShapeGeometry vertex (x,y,0) → world (0, x, -y). A rotation around Y
+      // can never produce this — Y-axis rotation always leaves the Y
+      // component untouched, but the target needs local X to land in world
+      // Y, which only a rotation with a DIFFERENT axis can do. (The old
+      // makeScale+makeRotationY here silently produced world (0, y, -x)
+      // instead — x/y swapped — rendering the closed-profile fill preview
+      // as a point-reflection of the actual sketch through the origin.)
+      // rotateX(-90°) maps local (x,y,0) -> (x,0,-y); rotateZ(+90°) then
+      // swaps that x into the Y slot, landing on the correct (0,x,-y).
+      geo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI/2))
+      geo.applyMatrix4(new THREE.Matrix4().makeRotationZ(Math.PI/2))
       break
+    }
     case 'face':
       if (facePlane) {
         geo.applyMatrix4(new THREE.Matrix4().makeScale(1, -1, 1))      // un-flip sketch Y

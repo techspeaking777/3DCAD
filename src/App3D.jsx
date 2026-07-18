@@ -2896,14 +2896,25 @@ export default function App() {
   // Escape does now — see the sketchMode Escape handler). Only meaningful
   // while extrudeTool or loftState is set; a plain standalone sketch has no
   // "feature" to cancel, so this button isn't shown for that case.
-  function cancelFeature() {
-    resetDrawState();resetSpline();resetOffset();resetMirror();resetCenter();resetMoveCopy()
-    resetRotateCopy();resetResize();resetFillet();resetText();resetSelection()
-    resetJoin();resetDim()
+  // Restores a solid hidden mid-edit by handleEditSketch/handleEditExtent
+  // (see hiddenEditSolidRef's declaration) if one is still pending. Every
+  // tool-activation function below calls this first — switching tools
+  // mid-edit without going through Cancel must not silently orphan the
+  // hidden solid. It used to: activateExtrudeTool just nulled the ref, and
+  // every OTHER activate*Tool function didn't touch it at all, leaving the
+  // solid hidden with no way back short of a page reload.
+  function restoreHiddenEditSolid() {
     if (hiddenEditSolidRef.current) {
       setSolids(prev => [...prev, ...hiddenEditSolidRef.current])
       hiddenEditSolidRef.current = null
     }
+  }
+
+  function cancelFeature() {
+    resetDrawState();resetSpline();resetOffset();resetMirror();resetCenter();resetMoveCopy()
+    resetRotateCopy();resetResize();resetFillet();resetText();resetSelection()
+    resetJoin();resetDim()
+    restoreHiddenEditSolid()
     setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
     activePlaneRef.current = null
     setLines([]); setCircles([]); setArcs([]); setSplines([])
@@ -2928,12 +2939,12 @@ export default function App() {
       setActiveSketchId(null)
       activePlaneRef.current = null
     }
+    restoreHiddenEditSolid()
     setTool(op)
     setExtrudeTool(op)
     setExtrudeState(null)
     setExtrudeHandlePos(null)
     setEditingFeatureId(null)
-    hiddenEditSolidRef.current = null
     // Fresh canvas for the integrated sketch (step 2)
     setLines([]); setCircles([]); setArcs([]); setSplines([])
     setCachedProfiles([])
@@ -2959,6 +2970,7 @@ export default function App() {
   function activateFillet3DTool() {
     resetSelection()
     resetDrawState()
+    restoreHiddenEditSolid()
     // See activateLoft3DTool's comment — restoreSavedView() must stay inside
     // this guard, not fire unconditionally, or it jumps the camera to
     // whatever unrelated view was last saved by some other snap elsewhere.
@@ -2997,6 +3009,7 @@ export default function App() {
   function activateMeasureTool() {
     resetSelection()
     resetDrawState()
+    restoreHiddenEditSolid()
     // See activateLoft3DTool's comment — restoreSavedView() must stay inside
     // this guard, not fire unconditionally, or it jumps the camera to
     // whatever unrelated view was last saved by some other snap elsewhere.
@@ -3199,6 +3212,7 @@ export default function App() {
   function activateExportFaceDXFTool() {
     resetSelection()
     resetDrawState()
+    restoreHiddenEditSolid()
     // See activateLoft3DTool's comment — restoreSavedView() must stay inside
     // this guard, not fire unconditionally, or it jumps the camera to
     // whatever unrelated view was last saved by some other snap elsewhere.
@@ -3246,6 +3260,7 @@ export default function App() {
   function activateMirror3DTool() {
     resetSelection()
     resetDrawState()
+    restoreHiddenEditSolid()
     // See activateLoft3DTool's comment — restoreSavedView() must stay inside
     // this guard, not fire unconditionally, or it jumps the camera to
     // whatever unrelated view was last saved by some other snap elsewhere.
@@ -3278,6 +3293,7 @@ export default function App() {
   function activateJoin3DTool() {
     resetSelection()
     resetDrawState()
+    restoreHiddenEditSolid()
     // See activateLoft3DTool's comment — restoreSavedView() must stay inside
     // this guard, not fire unconditionally, or it jumps the camera to
     // whatever unrelated view was last saved by some other snap elsewhere.
@@ -3389,6 +3405,7 @@ export default function App() {
   function activateLoft3DTool(op = 'loft') {
     resetSelection()
     resetDrawState()
+    restoreHiddenEditSolid()
     // restoreSavedView() must stay INSIDE this guard, not fire unconditionally
     // after it — s.savedPos is a single global "camera before the last snap"
     // slot, overwritten by every snapToFace/snapToPlane/snapToIsometric call
@@ -5457,7 +5474,9 @@ export default function App() {
         try {
           const meshData = await rebuildSolidChain(baseSolid, { skipIds })
           const group = replicadMeshToThree(meshData, baseSolid.color, baseSolid.id)
-          setSolids(prev => prev.map(s => s.id === baseSolid.id ? { ...s, group } : s))
+          const updatedSolid = { ...baseSolid, group }
+          setSolids(prev => prev.map(s => s.id === baseSolid.id ? updatedSolid : s))
+          await rebuildDependentMirrors(updatedSolid)
         } catch (err) {
           console.error('Cutout delete restore failed:', err)
         }
@@ -5472,7 +5491,9 @@ export default function App() {
         try {
           const meshData = await rebuildSolidChain(baseSolid, { skipId: featureId })
           const group = replicadMeshToThree(meshData, baseSolid.color, baseSolid.id)
-          setSolids(prev => prev.map(s => s.id === baseSolid.id ? { ...s, group } : s))
+          const updatedSolid = { ...baseSolid, group }
+          setSolids(prev => prev.map(s => s.id === baseSolid.id ? updatedSolid : s))
+          await rebuildDependentMirrors(updatedSolid)
         } catch (err) {
           console.error('Fillet delete restore failed:', err)
         }
@@ -5519,6 +5540,7 @@ export default function App() {
   function activateExportSTLTool() {
     resetSelection()
     resetDrawState()
+    restoreHiddenEditSolid()
     // See activateLoft3DTool's comment — restoreSavedView() must stay inside
     // this guard, not fire unconditionally, or it jumps the camera to
     // whatever unrelated view was last saved by some other snap elsewhere.
@@ -6367,10 +6389,7 @@ export default function App() {
     }
     if (e.key==='Escape'&&extrudeTool){
       // Cancel from step 3 (depth) — restore any hidden solid
-      if (hiddenEditSolidRef.current) {
-        setSolids(prev => [...prev, ...hiddenEditSolidRef.current])
-        hiddenEditSolidRef.current = null
-      }
+      restoreHiddenEditSolid()
       setExtrudeState(null); setExtrudeTool(null); setEditingFeatureId(null)
       setLines([]); setCircles([]); setArcs([]); setSplines([])
       return

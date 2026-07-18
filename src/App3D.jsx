@@ -28,6 +28,7 @@ import TextPanel from './tools/TextPanel.jsx'
 import PageSetupPanel from './tools/PageSetupPanel.jsx'
 import GuidePanel from './tools/GuidePanel.jsx'
 import SaveAsPanel from './tools/SaveAsPanel.jsx'
+import SplashScreen from './SplashScreen.jsx'
 import LineSnapPanel from './tools/LineSnapPanel.jsx'
 import CircleSnapPanel from './tools/CircleSnapPanel.jsx'
 import SplineSnapPanel from './tools/SplineSnapPanel.jsx'
@@ -1265,6 +1266,12 @@ export default function App() {
   const splinesRef=useRef([])
   const loadFileRef=useRef(null)
   const loadProjectFileRef=useRef(null)
+  // Arcade attract-screen shown once per page load — "1 PLAYER"/"2 PLAYER"
+  // map to New/Open Project (see SplashScreen.jsx). Dismissing via New is
+  // just hiding the overlay (a fresh load is already a blank project);
+  // dismissing via Open also fires the same file input the OPEN toolbar
+  // button uses.
+  const [showSplash, setShowSplash] = useState(true)
   // The FileSystemFileHandle from the last successful project save — lets
   // handleSaveProject silently re-write the SAME file on subsequent saves
   // instead of always re-opening the native picker and re-suggesting the
@@ -6313,6 +6320,7 @@ export default function App() {
   }
 
   function handleKeyDown(e){
+    if (showSplash) return
     if ((e.key==='t'||e.key==='T')&&!e.ctrlKey&&!e.shiftKey&&(tool==='line'||tool==='circle')){setTKeyDown(p=>!p);return}
     if ((e.key==='p'||e.key==='P')&&!e.ctrlKey&&!e.shiftKey&&tool==='line'){setPKeyDown(p=>!p);return}
     if ((e.key==='d'||e.key==='D')&&!e.ctrlKey&&!e.shiftKey){
@@ -7053,6 +7061,13 @@ export default function App() {
       onMouseMove={e=>{ handleExtrudeDragMove(e) }}
       onMouseUp={e=>{ }}
     >
+
+      {showSplash && (
+        <SplashScreen onChoose={which => {
+          setShowSplash(false)
+          if (which === 'open') loadProjectFileRef.current?.click()
+        }} />
+      )}
 
       {cadError && (
         <div style={{position:'fixed',top:16,left:'50%',transform:'translateX(-50%)',

@@ -1264,6 +1264,19 @@ export default function App() {
   const circlesRef=useRef([])
   const arcsRef=useRef([])
   const splinesRef=useRef([])
+  // Mirrors of snapLines/snapCircles/snapArcs (own geometry + the picked
+  // face's own reference edges, see their declaration above) — updateTracking
+  // is a stable useCallback([]) so it can only read fresh data through refs,
+  // same reason every other working array gets a ref mirror in this file.
+  // Without these it fell back to linesRef/circlesRef/arcsRef (own geometry
+  // only), so a vertex that exists purely on the solid's ghost boundary could
+  // be snapped to directly (getGeoSnap already used snapLines/snapCircles/
+  // snapArcs) but could never become a tracked point — no horizontal/
+  // vertical alignment guide ever appeared off a solid edge, only off
+  // geometry you'd actually drawn yourself.
+  const snapLinesRef=useRef([])
+  const snapCirclesRef=useRef([])
+  const snapArcsRef=useRef([])
   const loadFileRef=useRef(null)
   const loadProjectFileRef=useRef(null)
   // Arcade attract-screen shown once per page load — "1 PLAYER"/"2 PLAYER"
@@ -1286,6 +1299,9 @@ export default function App() {
   useEffect(()=>{circlesRef.current=circles},[circles])
   useEffect(()=>{arcsRef.current=arcs},[arcs])
   useEffect(()=>{splinesRef.current=splines},[splines])
+  useEffect(()=>{snapLinesRef.current=snapLines},[snapLines])
+  useEffect(()=>{snapCirclesRef.current=snapCircles},[snapCircles])
+  useEffect(()=>{snapArcsRef.current=snapArcs},[snapArcs])
 
   function resetDrawState(){
     setStartPoint(null);setCircleCenter(null)
@@ -1574,7 +1590,7 @@ export default function App() {
 
   const updateTracking=useCallback((pos)=>{
     const sc=viewTransformRef.current.scale
-    const allPts=getAllSnapPoints(linesRef.current,circlesRef.current,arcsRef.current,splinesRef.current)
+    const allPts=getAllSnapPoints(snapLinesRef.current,snapCirclesRef.current,snapArcsRef.current,splinesRef.current)
     const current=trackedPtsRef.current
     for (const p of allPts){
       if (Math.hypot(pos.x-p.x,pos.y-p.y)<ACQUIRE_DIST/sc){

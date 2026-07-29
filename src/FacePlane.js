@@ -485,11 +485,34 @@ function segmentLoopIntoPrimitives(loop, facePlane, opts = {}) {
   const n = pts.length
   if (n < 3) return { lines: [], arcs: [] }
 
+  // Angular sweep needed to visit ptsIn IN ORDER around fit's centre — NOT
+  // just Math.min(max-min, 2pi-(max-min)) on the raw angle set, which was
+  // the original implementation and is wrong whenever two of the points
+  // land near opposite sides of the atan2 wraparound seam (angle ≈ ±π) by
+  // coincidence, rather than because the path between them is actually
+  // short. That happens exactly at a SHARP square corner: the 3-point
+  // circle fit for two perpendicular edges puts the point diametrically
+  // opposite the corner right at that seam, so the raw min/max reports a
+  // deceptively tiny span (the seam-adjacent points look "close" after
+  // wrapping) even though the true a→b→p sweep is close to a full
+  // half-circle. That falsely qualified a 90° corner as "gentle arc start,"
+  // which went on to absorb the corner's OTHER edge too, then collapsed to
+  // a single chord between its endpoints — silently dropping the corner
+  // vertex and drawing a phantom diagonal across two real edges (reported
+  // as "Include From Face loses a corner" on a plain rectangular face).
+  // Fix: unwrap each step's angle to the shortest rotation from the
+  // PREVIOUS point (not from a fixed reference), accumulate, then span is
+  // just the unwrapped sequence's own max-min — this measures the actual
+  // visiting-order sweep regardless of where the ±π seam falls.
   const angleSpan = (fit, ptsIn) => {
     const angles = ptsIn.map(p => Math.atan2(p.y-fit.cy, p.x-fit.cx))
-    let min = Math.min(...angles), max = Math.max(...angles)
-    // Two ways around a circle — use whichever span is smaller.
-    return Math.min(max - min, Math.PI*2 - (max - min))
+    const unwrapped = [angles[0]]
+    for (let i = 1; i < angles.length; i++) {
+      let d = angles[i] - angles[i-1]
+      d -= Math.round(d / (Math.PI*2)) * Math.PI*2   // wrap delta into (-π, π]
+      unwrapped.push(unwrapped[i-1] + d)
+    }
+    return Math.max(...unwrapped) - Math.min(...unwrapped)
   }
 
   const tryExtend = run => {

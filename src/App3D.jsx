@@ -6173,16 +6173,24 @@ export default function App() {
           setPerpSourceLineIdx(hit?hit.idx:null)
           setStartPoint({x:pt.x,y:pt.y})
           setDimInput('');setDimLocked(false);setAngleInput('');setAngleLocked(false);setFocusField('dim')
-          setTrackedPts([]);trackedPtsRef.current=[]
+          // Seed tracking with the point we just started from, so VERT/HORIZ
+          // alignment off the line's own start is available immediately —
+          // without this, trackedPts stays empty until the mouse happens to
+          // wander back near some other snap point, which then re-acquires
+          // it (the reported "works if I detour past the edge's endpoint
+          // first, not otherwise" symptom).
+          setTrackedPts([{x:pt.x,y:pt.y}]);trackedPtsRef.current=[{x:pt.x,y:pt.y}]
           return
         }
         const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,null,tKeyDown,splines,intersectionPts)
+        let startPt
         if (geo?.type==='tan'){
           const circData=geo.circleIdx!==undefined?{...circles[geo.circleIdx],circleIdx:geo.circleIdx}:{cx:geo.cx,cy:geo.cy,r:geo.r,arcIdx:geo.arcIdx}
-          setDeferredTangent(circData);setStartPoint({x:geo.x,y:geo.y})
-        } else setStartPoint(geo?{x:geo.x,y:geo.y}:raw)
+          startPt={x:geo.x,y:geo.y}
+          setDeferredTangent(circData);setStartPoint(startPt)
+        } else { startPt=geo?{x:geo.x,y:geo.y}:raw; setStartPoint(startPt) }
         setDimInput('');setDimLocked(false);setAngleInput('');setAngleLocked(false);setFocusField('dim')
-        setTrackedPts([]);trackedPtsRef.current=[]
+        setTrackedPts([startPt]);trackedPtsRef.current=[startPt]
       } else if (deferredTangent){
         const dc=deferredTangent,geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,null,tKeyDown,splines,intersectionPts)
         if (geo?.type==='tan'&&geo.circleIdx!==undefined&&dc.circleIdx!==undefined&&geo.circleIdx!==dc.circleIdx){

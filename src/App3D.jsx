@@ -1568,7 +1568,15 @@ export default function App() {
   function computeEnd(start,raw,tracked){
     if (!dimLocked&&!angleLocked){
       const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,start,false,splines,intersectionPts)
-      if (geo&&geo.type!=='tan') return{x:geo.x,y:geo.y,snapType:geo.type,angleSnap:checkAngle(start,geo),tracks:[]}
+      // 'online' is the weakest geo-snap tier (any point along an edge, not a
+      // specific feature) — when an alignment track is actively engaged, let
+      // it win instead, otherwise it could never apply near a solid edge:
+      // the cursor is within LINE_SNAP_DIST of the edge (triggering online)
+      // well before it's off the tracked vertical/horizontal line, so online
+      // would always fire first and VERT/HORIZ would show but never snap.
+      const ad=ALIGN_SNAP_DIST/zoomRef.scale
+      const trackActive=tracked.some(tp=>Math.abs(raw.y-tp.y)<ad||Math.abs(raw.x-tp.x)<ad)
+      if (geo&&geo.type!=='tan'&&!(geo.type==='online'&&trackActive)) return{x:geo.x,y:geo.y,snapType:geo.type,angleSnap:checkAngle(start,geo),tracks:[]}
     }
     const{snapped,tracks}=applyTracking(raw,tracked)
     let endX=snapped.x,endY=snapped.y,angleSnap=null

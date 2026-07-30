@@ -1,9 +1,19 @@
 // CircleSnapPanel.jsx — kid-friendly popover shown next to the Circle toolbar button.
-// Lets a child see and click the Tangent (T) snap toggle, while staying in sync
-// with the same keyboard shortcut. Tip text follows the tangent-to-2-circles chain.
-import React from 'react'
+// Section 1: Tangent (T) snap toggle, always shown.
+// Section 2: once a centre is placed (or both tangent circles are picked),
+// a real Radius input box appears. Typing + Lock It In only sets that value —
+// placing the actual circle still requires a click on the canvas.
+import { useEffect, useRef } from 'react'
 
-export default function CircleSnapPanel({toolColor, tKeyDown, onToggleT, circleTanA, circleTanB}){
+export default function CircleSnapPanel({
+  toolColor, tKeyDown, onToggleT, circleTanA, circleTanB,
+  circleCenter, dimInput, dimLocked, onChangeDim, onApply, liveRadiusMm,
+}){
+  const dimRef = useRef(null)
+  const drawing = !!circleCenter || (!!circleTanA && !!circleTanB)
+
+  useEffect(()=>{ if (drawing) dimRef.current?.focus() }, [drawing])
+
   const keycapStyle=(active)=>({
     width:44,height:44,borderRadius:8,
     display:'flex',alignItems:'center',justifyContent:'center',
@@ -20,10 +30,13 @@ export default function CircleSnapPanel({toolColor, tKeyDown, onToggleT, circleT
   const label = circleTanA&&circleTanB?'Adjust the Size':circleTanA?'Pick 2nd Circle':tKeyDown?'Tangent Mode':'Circle'
 
   let tip
-  if (circleTanA&&circleTanB) tip='👉 Move mouse or type a number'
+  if (circleTanA&&circleTanB) tip='👉 Now click the canvas to place it'
   else if (circleTanA) tip='👉 Click a different circle\'s edge'
+  else if (circleCenter) tip='👉 Now click the canvas to place it'
   else if (tKeyDown) tip='👉 Click a circle\'s edge'
   else tip='👉 Click T to touch other circles'
+
+  const canApply = dimInput&&parseFloat(dimInput)>0
 
   return (
     <div style={{
@@ -47,6 +60,41 @@ export default function CircleSnapPanel({toolColor, tKeyDown, onToggleT, circleT
           <button onClick={onToggleT} style={keycapStyle(tKeyDown)}>T</button>
         </div>
       </div>
+
+      {drawing && (
+        <>
+          <div style={{height:1,background:'#2a2a4a',margin:'10px 0'}}/>
+          <div style={{textAlign:'center',color:'#888',fontSize:9,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:6}}>
+            Radius
+          </div>
+          <div style={{display:'flex',alignItems:'center',gap:6,justifyContent:'center'}}>
+            <input
+              ref={dimRef}
+              value={dimInput}
+              onChange={e=>{ if(/^[0-9.]*$/.test(e.target.value)) onChangeDim(e.target.value) }}
+              onKeyDown={e=>{ if(e.key!=='Escape')e.stopPropagation(); if(e.key==='Enter') e.target.blur() }}
+              placeholder={liveRadiusMm!=null?liveRadiusMm.toFixed(1):'0'}
+              style={{
+                width:70,textAlign:'center',fontFamily:'monospace',fontSize:16,fontWeight:'bold',
+                background:'#0d0d1a',color: dimLocked?'#FF9800':dimInput?'#fff':'#888',
+                border:`2px solid ${dimLocked?'#FF9800':toolColor}`,borderRadius:6,
+                padding:'6px 4px',
+              }}
+            />
+            <span style={{color:'#888',fontSize:11}}>mm</span>
+          </div>
+
+          <button
+            onClick={onApply}
+            style={{
+              marginTop:8,width:'100%',padding:'6px 0',borderRadius:6,border:'none',
+              background:canApply?toolColor:'#2a2a4a',color:canApply?'#0d0d1a':'#666',
+              fontFamily:'monospace',fontWeight:'bold',fontSize:12,cursor:'pointer',
+            }}>
+            ✓ Lock It In
+          </button>
+        </>
+      )}
 
       <div style={{marginTop:8,textAlign:'center',fontSize:9,color:'#666'}}>
         {tip}

@@ -120,8 +120,8 @@ const Diagrams = {
       <rect width="180" height="60" fill="#0d0d1a" rx="4"/>
       <line x1="20" y1="50" x2="90" y2="50" stroke="#26A69A" strokeWidth="2.5"/>
       <line x1="90" y1="50" x2="90" y2="10" stroke="#26A69A" strokeWidth="2.5"/>
-      <rect x="108" y="18" width="62" height="16" rx="3" fill="#26A69A33" stroke="#26A69A" strokeWidth="1"/>
-      <text x="139" y="29" textAnchor="middle" fill="#26A69A" fontSize="8" fontFamily="monospace">Tab / R-click</text>
+      <text x="130" y="30" textAnchor="middle" fill="#4CAF50" fontSize="9" fontFamily="monospace">✓ 2 picked!</text>
+      <text x="130" y="44" textAnchor="middle" fill="#666" fontSize="7.5" fontFamily="monospace">no confirm needed</text>
     </svg>,
     // Step 3 — type radius
     <svg width="100%" height="60" viewBox="0 0 180 60">
@@ -247,9 +247,9 @@ const Diagrams = {
     // Step 2 — Tab to confirm
     <svg width="100%" height="60" viewBox="0 0 180 60">
       <rect width="180" height="60" fill="#0d0d1a" rx="4"/>
-      <rect x="30" y="15" width="50" height="35" fill="#FF980022" stroke="#FF9800" strokeWidth="2"/>
-      <rect x="100" y="22" width="60" height="16" rx="3" fill="#FF980033" stroke="#FF9800" strokeWidth="1"/>
-      <text x="130" y="33" textAnchor="middle" fill="#FF9800" fontSize="8" fontFamily="monospace">Tab / R-click</text>
+      <rect x="20" y="15" width="50" height="35" fill="#FF980022" stroke="#FF9800" strokeWidth="2"/>
+      <rect x="82" y="20" width="86" height="20" rx="4" fill="#FF980033" stroke="#FF9800" strokeWidth="1.2"/>
+      <text x="125" y="33" textAnchor="middle" fill="#FF9800" fontSize="9" fontFamily="monospace">✓ Done Selecting</text>
     </svg>,
     // Step 3 — press C for copies
     <svg width="100%" height="60" viewBox="0 0 180 60">
@@ -289,8 +289,8 @@ const Diagrams = {
     <svg width="100%" height="60" viewBox="0 0 180 60">
       <rect width="180" height="60" fill="#0d0d1a" rx="4"/>
       <rect x="60" y="15" width="50" height="30" fill="#00BCD422" stroke="#00BCD4" strokeWidth="2"/>
-      <rect x="95" y="25" width="60" height="16" rx="3" fill="#00BCD433" stroke="#00BCD4" strokeWidth="1"/>
-      <text x="125" y="36" textAnchor="middle" fill="#00BCD4" fontSize="8" fontFamily="monospace">Tab / R-click</text>
+      <rect x="82" y="20" width="86" height="20" rx="4" fill="#00BCD433" stroke="#00BCD4" strokeWidth="1.2"/>
+      <text x="125" y="33" textAnchor="middle" fill="#00BCD4" fontSize="9" fontFamily="monospace">✓ Done Selecting</text>
     </svg>,
     // Step 3 — press C for copies
     <svg width="100%" height="60" viewBox="0 0 180 60">
@@ -333,24 +333,19 @@ const Diagrams = {
     <svg width="100%" height="60" viewBox="0 0 180 60">
       <rect width="180" height="60" fill="#0d0d1a" rx="4"/>
       <rect x="65" y="20" width="40" height="28" fill="#E91E6322" stroke="#E91E63" strokeWidth="2"/>
-      <rect x="95" y="25" width="60" height="16" rx="3" fill="#E91E6333" stroke="#E91E63" strokeWidth="1"/>
-      <text x="125" y="36" textAnchor="middle" fill="#E91E63" fontSize="8" fontFamily="monospace">Tab / R-click</text>
+      <rect x="95" y="20" width="70" height="20" rx="4" fill="#E91E6333" stroke="#E91E63" strokeWidth="1.2"/>
+      <text x="130" y="33" textAnchor="middle" fill="#E91E63" fontSize="8.5" fontFamily="monospace">✓ Done Selecting</text>
     </svg>,
-    // Step 3 — click base point
+    // Step 3 — type scale factor, click to place (sets base point + applies)
     <svg width="100%" height="60" viewBox="0 0 180 60">
       <rect width="180" height="60" fill="#0d0d1a" rx="4"/>
-      <rect x="65" y="20" width="40" height="28" fill="none" stroke="#E91E63" strokeWidth="2"/>
-      <circle cx="65" cy="48" r="5" fill="#E91E63"/>
-      <text x="85" y="12" textAnchor="middle" fill="#E91E63" fontSize="9" fontFamily="monospace">click base point</text>
-    </svg>,
-    // Step 4 — type scale factor, result
-    <svg width="100%" height="60" viewBox="0 0 180 60">
-      <rect width="180" height="60" fill="#0d0d1a" rx="4"/>
-      <rect x="55" y="25" width="25" height="18" fill="none" stroke="#555" strokeWidth="1" strokeDasharray="3 2"/>
-      <rect x="55" y="10" width="70" height="42" fill="none" stroke="#E91E63" strokeWidth="2"/>
-      <circle cx="55" cy="52" r="4" fill="#E91E63"/>
-      <text x="115" y="30" fill="#E91E63" fontSize="9" fontFamily="monospace">×2</text>
-      <text x="90" y="58" textAnchor="middle" fill="#4CAF50" fontSize="8" fontFamily="monospace">✓ scaled up</text>
+      <rect x="20" y="25" width="25" height="18" fill="none" stroke="#555" strokeWidth="1" strokeDasharray="3 2"/>
+      <rect x="20" y="10" width="70" height="42" fill="none" stroke="#E91E63" strokeWidth="2"/>
+      <circle cx="20" cy="52" r="4" fill="#E91E63"/>
+      <rect x="100" y="20" width="46" height="18" rx="3" fill="#0d0d1a" stroke="#E91E63" strokeWidth="1.2"/>
+      <text x="123" y="33" textAnchor="middle" fill="#fff" fontSize="9" fontFamily="monospace">×2</text>
+      <text x="123" y="52" textAnchor="middle" fill="#E91E63" fontSize="8" fontFamily="monospace">type, then click</text>
+      <text x="90" y="8" textAnchor="middle" fill="#4CAF50" fontSize="8" fontFamily="monospace">✓ scaled up</text>
     </svg>,
   ],
   mirror: [
@@ -365,8 +360,8 @@ const Diagrams = {
     <svg width="100%" height="60" viewBox="0 0 180 60">
       <rect width="180" height="60" fill="#0d0d1a" rx="4"/>
       <path d="M 30 45 L 55 15 L 70 45 Z" fill="#9C27B022" stroke="#9C27B0" strokeWidth="2"/>
-      <rect x="80" y="22" width="60" height="16" rx="3" fill="#9C27B033" stroke="#9C27B0" strokeWidth="1"/>
-      <text x="110" y="33" textAnchor="middle" fill="#9C27B0" fontSize="8" fontFamily="monospace">Tab / R-click</text>
+      <rect x="72" y="20" width="86" height="20" rx="4" fill="#9C27B033" stroke="#9C27B0" strokeWidth="1.2"/>
+      <text x="115" y="33" textAnchor="middle" fill="#9C27B0" fontSize="9" fontFamily="monospace">✓ Done Selecting</text>
     </svg>,
     // Step 3 — click mirror line pt 1
     <svg width="100%" height="60" viewBox="0 0 180 60">
@@ -402,40 +397,25 @@ const Diagrams = {
       <text x="21" y="56" textAnchor="middle" fill="#64B5F6" fontSize="7.5" fontFamily="monospace">⇧ Shift</text>
       <text x="115" y="64" textAnchor="middle" fill="#64B5F6" fontSize="8" fontFamily="monospace">click · shift · drag box</text>
     </svg>,
-    // Step 2 — drag handle OR press Tab
+    // Step 2 — drag handle OR type in the Edit box that follows the shape
     <svg width="100%" height="68" viewBox="0 0 180 68">
       <rect width="180" height="68" fill="#0d0d1a" rx="4"/>
       {/* selected shape */}
-      <rect x="30" y="16" width="80" height="36" fill="none" stroke="#64B5F6" strokeWidth="1.5" strokeDasharray="4 2"/>
+      <rect x="14" y="16" width="70" height="34" fill="none" stroke="#64B5F6" strokeWidth="1.5" strokeDasharray="4 2"/>
       {/* corner handle being dragged */}
-      <rect x="104" y="9" width="10" height="10" rx="2" fill="#64B5F6"/>
-      <line x1="109" y1="14" x2="122" y2="4" stroke="#64B5F6" strokeWidth="1.2" strokeDasharray="3 2"/>
-      <circle cx="124" cy="3" r="3" fill="#FFD600"/>
-      {/* OR divider */}
-      <text x="90" y="62" textAnchor="middle" fill="#888" fontSize="8" fontFamily="monospace">drag handle  ·  or press Tab</text>
-      {/* Tab key */}
-      <rect x="134" y="18" width="36" height="18" rx="4" fill="#FF980022" stroke="#FF9800" strokeWidth="1"/>
-      <text x="152" y="31" textAnchor="middle" fill="#FF9800" fontSize="9" fontFamily="monospace">Tab</text>
-    </svg>,
-    // Step 3 — type value, pick anchor dot, Enter
-    <svg width="100%" height="68" viewBox="0 0 180 68">
-      <rect width="180" height="68" fill="#0d0d1a" rx="4"/>
-      {/* dim label being edited */}
-      <rect x="44" y="6" width="60" height="16" rx="3" fill="#FF980033" stroke="#FF9800" strokeWidth="1"/>
-      <text x="74" y="18" textAnchor="middle" fill="#FF9800" fontSize="9" fontFamily="monospace">✏ 51.33 mm</text>
-      {/* anchor grid 3x3 */}
-      <rect x="10" y="26" width="34" height="34" rx="3" fill="#00000055"/>
-      {['tl','tc','tr','ml','mc','mr','bl','bc','br'].map((id,i)=>{
-        const ci=i%3, ri=Math.floor(i/3)
-        const px=21+ci*11, py=37+ri*11
-        const isAnchor=id==='ml'
-        return <circle key={id} cx={px} cy={py} r={isAnchor?4.5:2.5} fill={isAnchor?'#FFD600':'#90CAF9'}/>
-      })}
-      <text x="27" y="66" textAnchor="middle" fill="#FFD600" fontSize="7.5" fontFamily="monospace">pick anchor</text>
-      {/* Enter key */}
-      <rect x="120" y="26" width="48" height="20" rx="4" fill="#4CAF5022" stroke="#4CAF50" strokeWidth="1"/>
-      <text x="144" y="40" textAnchor="middle" fill="#4CAF50" fontSize="9" fontFamily="monospace">Enter ↵</text>
-      <text x="144" y="62" textAnchor="middle" fill="#4CAF50" fontSize="7.5" fontFamily="monospace">apply changes</text>
+      <rect x="79" y="9" width="10" height="10" rx="2" fill="#64B5F6"/>
+      <line x1="84" y1="14" x2="96" y2="4" stroke="#64B5F6" strokeWidth="1.2" strokeDasharray="3 2"/>
+      <circle cx="98" cy="3" r="3" fill="#FFD600"/>
+      <text x="49" y="62" textAnchor="middle" fill="#64B5F6" fontSize="8" fontFamily="monospace">drag a handle</text>
+      {/* divider */}
+      <line x1="112" y1="10" x2="112" y2="58" stroke="#333" strokeWidth="1"/>
+      <text x="112" y="8" textAnchor="middle" fill="#666" fontSize="8" fontFamily="monospace">or</text>
+      {/* number box + apply, mirroring the real Edit panel */}
+      <rect x="122" y="14" width="46" height="16" rx="3" fill="#0d0d1a" stroke="#64B5F6" strokeWidth="1.2"/>
+      <text x="145" y="26" textAnchor="middle" fill="#fff" fontSize="8" fontFamily="monospace">51.33</text>
+      <rect x="122" y="34" width="46" height="16" rx="3" fill="#64B5F633" stroke="#64B5F6" strokeWidth="1"/>
+      <text x="145" y="46" textAnchor="middle" fill="#64B5F6" fontSize="7.5" fontFamily="monospace">✓ Apply</text>
+      <text x="145" y="62" textAnchor="middle" fill="#64B5F6" fontSize="8" fontFamily="monospace">type + apply</text>
     </svg>,
   ],
   dim: [
@@ -483,8 +463,7 @@ const GUIDES = {
     color: '#64B5F6',
     steps: [
       { label: 'Step 1 — Select', text: 'Click a shape to select it. Hold Shift and click to add more. Or click and drag on empty space to select everything inside the box.' },
-      { label: 'Step 2 — Reshape', text: 'Drag any handle on the bounding box to resize manually. Press Tab to switch to precise number entry instead.' },
-      { label: 'Step 3 — Precise edit', text: 'Tab toggles between the length and angle fields. Type your value. Click a dot in the anchor grid to choose which point stays fixed. Press Enter to apply.' },
+      { label: 'Step 2 — Reshape', text: 'Drag any handle on the bounding box to resize by eye. Or type exact numbers into the Edit box next to the shape — click a dot in the anchor grid to choose which point stays fixed, then click Apply.' },
     ],
     tips: ['Click empty space to deselect all.', 'Press Delete to remove selected shapes.', 'Shift+click to add or remove individual shapes from the selection.'],
   },
@@ -494,14 +473,14 @@ const GUIDES = {
     color: '#64B5F6',
     steps: [
       { label: 'Step 1 — Start', text: 'Click anywhere on the canvas to place your first point.' },
-      { label: 'Step 2 — End point', text: 'Move your mouse — a preview follows. Click to place the end point, or type a length and press Enter to lock it in. Press Tab to switch to the angle field and type an angle, then Enter to draw.' },
+      { label: 'Step 2 — End point', text: 'Move your mouse — a preview follows. Click to place the end point freehand. Or type a Length and/or Angle into the boxes next to the Line tool, click Lock It In, then click the canvas to draw that exact segment.' },
       { label: 'Step 3 — Continue or stop', text: 'Keep clicking to chain more lines from the last point. Press Escape or right-click to finish.' },
     ],
     tips: [
-      'Type a length and press Enter, or Tab to angle then Enter.',
+      'Type Length and/or Angle in the boxes, click Lock It In, then click the canvas.',
       'Coloured dots are snap points — hover near them to lock on.',
-      'Press T to toggle tangent snap — draws a line tangent to a circle or arc.',
-      'Press P to toggle perpendicular snap — draws a line perpendicular to another line.',
+      'Click T (or press T) to toggle tangent snap — draws a line tangent to a circle or arc.',
+      'Click P (or press P) to toggle perpendicular snap — draws a line perpendicular to another line.',
     ],
   },
   circle: {
@@ -510,12 +489,12 @@ const GUIDES = {
     color: '#2196F3',
     steps: [
       { label: 'Step 1 — Centre', text: 'Click to place the centre of the circle.' },
-      { label: 'Step 2 — Radius', text: 'Move your mouse out — a preview circle follows. Click to set the radius, or type a radius value and press Enter to draw an exact circle.' },
+      { label: 'Step 2 — Radius', text: 'Move your mouse out — a preview circle follows. Click to set the radius freehand. Or type a radius into the box next to the Circle tool, click Lock It In, then click the canvas to draw the exact size.' },
     ],
     tips: [
-      'Type a radius and press Enter for an exact size.',
-      'The live radius shows in the bottom bar.',
-      'Press T after placing the centre to snap the radius tangent to a nearby line, circle or arc.',
+      'Type a radius and click Lock It In for an exact size.',
+      'The live radius also shows in the bottom bar.',
+      'Click T (or press T) before picking your first circle to make the new circle tangent to it.',
     ],
   },
   spline: {
@@ -587,8 +566,8 @@ const GUIDES = {
     color: '#4CAF50',
     steps: [
       { label: 'Step 1', text: 'Click on the line or shape you want to copy parallel.' },
-      { label: 'Step 2', text: 'Type the distance in mm and press Enter.' },
-      { label: 'Step 3', text: 'Click on the side where the offset should appear.' },
+      { label: 'Step 2', text: 'Type the distance in mm into the box next to the Offset tool.' },
+      { label: 'Step 3', text: 'Click on the side where the offset should appear — that click sets the exact distance and side together.' },
     ],
     tips: ['Creates a new line parallel to the original at a set distance.'],
   },
@@ -623,8 +602,8 @@ const GUIDES = {
     color: '#26A69A',
     steps: [
       { label: 'Step 1', text: 'Click the first line at the corner you want to round.' },
-      { label: 'Step 2', text: 'Click the second line that meets it, then press Tab or right-click to confirm.' },
-      { label: 'Step 3', text: 'Type the corner radius in mm and press Enter.' },
+      { label: 'Step 2', text: 'Click the second line that meets it — no confirm needed, picking 2 lines is enough.' },
+      { label: 'Step 3', text: 'Type the corner radius in mm into the box next to the Fillet tool and press Enter (or click Apply).' },
       { label: 'Result', text: 'The sharp corner becomes a smooth rounded curve!' },
     ],
     tips: [
@@ -638,13 +617,13 @@ const GUIDES = {
     color: '#FF9800',
     steps: [
       { label: 'Step 1 — Select', text: 'Click or drag a window to select the shapes to move or copy.' },
-      { label: 'Step 2 — Confirm', text: 'Press Tab or right-click to confirm the selection.' },
-      { label: 'Step 3 — Copy mode (optional)', text: 'To copy instead of move: press C, then type the number of copies (1–100) and press Enter. Skip this step to just move.' },
+      { label: 'Step 2 — Confirm', text: 'Click ✓ Done Selecting in the box next to the tool (or press Tab / right-click).' },
+      { label: 'Step 3 — Copy mode (optional)', text: 'To copy instead of move: click C in the box, then use +/− to set the number of copies (1–100). Skip this to just move.' },
       { label: 'Step 4 — Base point', text: 'Click the point you are picking up from — this is your reference point.' },
       { label: 'Step 5 — Place', text: 'Click the destination point to drop the shape. For copies, each copy is spaced by the same distance from the last.' },
     ],
     tips: [
-      'Press C then a number to set copy count before picking base point.',
+      'Click C then use +/− (or type a number) to set copy count before picking base point.',
       'Type a distance in mm after picking the base point for precise placement.',
     ],
   },
@@ -654,13 +633,13 @@ const GUIDES = {
     color: '#00BCD4',
     steps: [
       { label: 'Step 1 — Select', text: 'Click or drag a window to select the shapes to rotate or copy.' },
-      { label: 'Step 2 — Confirm', text: 'Press Tab or right-click to confirm the selection.' },
-      { label: 'Step 3 — Copy mode (optional)', text: 'To make copies instead of rotating: press C, then type the number of copies (1–100) and press Enter. Each copy is placed at the rotation angle apart. Skip this step to just rotate.' },
+      { label: 'Step 2 — Confirm', text: 'Click ✓ Done Selecting in the box next to the tool (or press Tab / right-click).' },
+      { label: 'Step 3 — Copy mode (optional)', text: 'To make copies instead of rotating: click C in the box, then use +/− to set the number of copies (1–100). Each copy is placed at the rotation angle apart. Skip this to just rotate.' },
       { label: 'Step 4 — Centre point', text: 'Click the point to rotate around. All copies will be evenly distributed around this centre.' },
-      { label: 'Step 5 — Angle', text: 'Type the angle in degrees and press Enter. Or press Tab to lock the length, then click on screen to set the angle visually.' },
+      { label: 'Step 5 — Angle', text: 'Type the angle in degrees into the box next to the tool and click Lock It In. Or skip the box and just click the canvas to set the angle freehand.' },
     ],
     tips: [
-      'Press C then a number to set copy count — e.g. C then 6 = 6 evenly spaced copies.',
+      'Click C then use +/− to set copy count — e.g. 6 = 6 evenly spaced copies.',
       'Positive angle = counter-clockwise. Negative = clockwise.',
       'Example: C + 4 copies + 90° = one copy every 90°, filling a full circle.',
     ],
@@ -671,9 +650,8 @@ const GUIDES = {
     color: '#E91E63',
     steps: [
       { label: 'Step 1', text: 'Click or drag to select the shapes to scale.' },
-      { label: 'Step 2', text: 'Press Tab or right-click to confirm.' },
-      { label: 'Step 3', text: 'Click the base point (stays fixed during scaling).' },
-      { label: 'Step 4', text: 'Type the scale factor and press Enter.' },
+      { label: 'Step 2', text: 'Click ✓ Done Selecting in the box next to the tool (or press Tab / right-click).' },
+      { label: 'Step 3', text: 'Type the scale factor into the box, then click the canvas — that click sets the anchor point (stays fixed) and applies the scale together.' },
     ],
     tips: ['2 = double size. 0.5 = half size. 1 = no change.'],
   },
@@ -683,7 +661,7 @@ const GUIDES = {
     color: '#9C27B0',
     steps: [
       { label: 'Step 1', text: 'Click or drag to select the shapes to mirror.' },
-      { label: 'Step 2', text: 'Press Tab or right-click to confirm selection.' },
+      { label: 'Step 2', text: 'Click ✓ Done Selecting in the box next to the tool (or press Tab / right-click).' },
       { label: 'Step 3', text: 'Click the first point of the mirror line.' },
       { label: 'Step 4', text: 'Click the second point — the shape mirrors across the line.' },
     ],
@@ -727,8 +705,7 @@ function getActiveStep(tool, s) {
       return 4
     case 'resize':
       if (!s.resizeAccepted) return s.resizeSel.length === 0 ? 0 : 1
-      if (!s.startPoint) return 2
-      return 3
+      return 2
     case 'fillet':
       if (!s.filletAccepted) {
         if (s.filletSel.length === 0) return 0
@@ -759,9 +736,7 @@ function getActiveStep(tool, s) {
     case 'dim':
       return s.dimToolStep === 0 ? [0, 1] : s.dimToolStep
     case 'select':
-      if (s.selection.length === 0) return 0
-      if (!s.selectDimField) return 1
-      return 2
+      return s.selection.length === 0 ? 0 : 1
     case 'text':
       return [0, 1, 2]
     case 'trace':

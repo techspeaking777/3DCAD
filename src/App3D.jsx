@@ -33,6 +33,11 @@ import LineSnapPanel from './tools/LineSnapPanel.jsx'
 import CircleSnapPanel from './tools/CircleSnapPanel.jsx'
 import SplineSnapPanel from './tools/SplineSnapPanel.jsx'
 import CopyModePanel from './tools/CopyModePanel.jsx'
+import ResizeScalePanel from './tools/ResizeScalePanel.jsx'
+import MirrorPanel from './tools/MirrorPanel.jsx'
+import FilletRadiusPanel from './tools/FilletRadiusPanel.jsx'
+import OffsetDistPanel from './tools/OffsetDistPanel.jsx'
+import SelectDimPanel from './tools/SelectDimPanel.jsx'
 import {
   IconLine, IconCircle, IconTrim, IconDelete, IconExtend, IconOffset,
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
@@ -397,7 +402,7 @@ const EXTRUDE_STEPS = [
   { id: 3, label: 'Set Depth' },
 ]
 
-function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEPS, hint = null }) {
+function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEPS, hint = null, action = null }) {
   if (!op) return null
 
   return (
@@ -546,6 +551,25 @@ function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEP
         }}>
           {hint}
         </span>
+      )}
+
+      {/* Optional visible confirm button — the clickable equivalent of
+          whatever Enter/Tab/right-click already does, so open-ended
+          selection-count steps (Join3D, Export STL) don't require knowing
+          a hidden keyboard gesture. The keyboard shortcuts keep working. */}
+      {action && (
+        <button
+          onClick={action.onClick}
+          disabled={!action.enabled}
+          style={{
+            marginRight: 16, padding:'5px 14px', borderRadius: 20, border:'none',
+            background: action.enabled ? color : '#2a2a4a',
+            color: action.enabled ? '#0d0d1a' : '#666',
+            fontFamily:'monospace', fontWeight:'bold', fontSize: 11,
+            cursor: action.enabled ? 'pointer' : 'default',
+          }}>
+          {action.label}
+        </button>
       )}
 
       {/* Esc hint */}
@@ -1087,7 +1111,7 @@ export default function App() {
   const toolBtnRefs = useRef({})
   const [flyoutAnchor,setFlyoutAnchor] = useState(null)
   useEffect(() => {
-    if (sketchMode && (tool==='line'||tool==='circle'||tool==='spline')) {
+    if (sketchMode && (tool==='line'||tool==='circle'||tool==='spline'||tool==='fillet'||tool==='offset')) {
       const el = toolBtnRefs.current[tool]
       if (el) {
         const r = el.getBoundingClientRect()
@@ -1109,7 +1133,6 @@ export default function App() {
   const [deletePreview,setDeletePreview]=useState(null)
   const [offsetEntity,setOffsetEntity]=useState(null)    // locked entity after click
   const [offsetDistInput,setOffsetDistInput]=useState('')
-  const [offsetDistLocked,setOffsetDistLocked]=useState(false)
   const [offsetPreview,setOffsetPreview]=useState(null)
   const [offsetHover,setOffsetHover]=useState(null)
   const [mirrorSel,setMirrorSel]=useState([])
@@ -1137,6 +1160,7 @@ export default function App() {
   const [rotateCopyMode,setRotateCopyMode]=useState('rotate')
   const [rotateCopyCountInput,setRotateCopyCountInput]=useState('1')
   const [rotateCopyHover,setRotateCopyHover]=useState(null)
+  const [rotateCopyPreview,setRotateCopyPreview]=useState(null)
 
   // Resize tool state
   const [resizeSel,setResizeSel]=useState([])
@@ -1309,6 +1333,19 @@ export default function App() {
     setDimInput('');setDimLocked(false);setAngleInput('');setAngleLocked(false);setFocusField('dim')
     setTrackedPts([]);trackedPtsRef.current=[];setDeferredTangent(null);setTKeyDown(false);setPKeyDown(false);setPerpSourceLineIdx(null)
   }
+  // Line tool: typing a length and/or angle only locks that value in — placing
+  // the actual line still requires a canvas click (see LineSnapPanel.jsx). The
+  // existing Tab-key single-field lock (below, in handleKeyDown) keeps working
+  // as a fallback; this is the visible Lock-It-In button's handler.
+  function applyLineDims(){
+    if (dimInput&&parseFloat(dimInput)>0) setDimLocked(true)
+    if (angleInput&&parseFloat(angleInput)>=0) setAngleLocked(true)
+  }
+  // Circle tool: typing a radius only locks that value in — placing the
+  // actual circle still requires a canvas click (see CircleSnapPanel.jsx).
+  function applyCircleRadius(){
+    if (dimInput&&parseFloat(dimInput)>0) setDimLocked(true)
+  }
   // Save button / Ctrl+S: Chromium browsers get a native folder+filename dialog;
   // others fall back to a small filename prompt (still downloads to Downloads).
   async function handleSave(){
@@ -1439,12 +1476,113 @@ export default function App() {
     selectDragHandleRef.current=null;selectDragStartRef.current=null
     selectSnapshotRef.current=null;selectBBoxRef.current=null
   }
+  // Shared by the blind Tab/Enter flow and the visible SelectDimPanel's Apply
+  // button (see SelectDimPanel.jsx) — applies whichever dimension fields were
+  // typed (Length/Angle for a line, Radius for a circle, Radius/Angle for an
+  // arc, Width/Height for a multi-selection), keeping whichever bbox handle
+  // is the current anchor fixed in place.
+  function applySelectDims(finalPending){
+    commit(snapshot())
+    if (selection.length===1){
+      const ent=selection[0]
+      if (ent.kind==='line'){
+        const l=lines[ent.idx]
+        const dx=l.x2-l.x1,dy=l.y2-l.y1
+        const oldLen=Math.hypot(dx,dy)
+        let newLen=oldLen,newAngleRad=Math.atan2(dy,dx)
+        if (finalPending.length&&parseFloat(finalPending.length)>0)
+          newLen=mmToPx(parseFloat(finalPending.length))
+        if (finalPending.angle&&parseFloat(finalPending.angle)>=0)
+          newAngleRad=(360-parseFloat(finalPending.angle))*Math.PI/180
+        const nx=Math.cos(newAngleRad),ny=Math.sin(newAngleRad)
+        // Determine fixed point from anchor handle
+        const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
+        const handles2=bbox2?getBBoxHandles(bbox2):null
+        const anchorPt=handles2?handles2[selectDimAnchor]||handles2['mc']:null
+        if (!anchorPt||selectDimAnchor==='mc'){
+          // Anchor = midpoint
+          const mx=(l.x1+l.x2)/2,my=(l.y1+l.y2)/2
+          setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x1:mx-nx*newLen/2,y1:my-ny*newLen/2,x2:mx+nx*newLen/2,y2:my+ny*newLen/2}:ln))
+        } else {
+          // Find which endpoint is closest to anchor handle — that end stays fixed
+          const d1=Math.hypot(l.x1-anchorPt.x,l.y1-anchorPt.y)
+          const d2=Math.hypot(l.x2-anchorPt.x,l.y2-anchorPt.y)
+          if (d1<=d2){
+            // x1,y1 stays fixed — x2,y2 moves
+            setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x2:l.x1+nx*newLen,y2:l.y1+ny*newLen}:ln))
+          } else {
+            // x2,y2 stays fixed — x1,y1 moves
+            setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x1:l.x2-nx*newLen,y1:l.y2-ny*newLen}:ln))
+          }
+        }
+      } else if (ent.kind==='circle'&&finalPending.radius&&parseFloat(finalPending.radius)>0){
+        const c=circles[ent.idx]
+        const newR=mmToPx(parseFloat(finalPending.radius))
+        const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
+        const handles2=bbox2?getBBoxHandles(bbox2):null
+        const anchorPt=handles2?handles2[selectDimAnchor]||handles2['mc']:null
+        if (!anchorPt||selectDimAnchor==='mc'){
+          // Centre stays fixed
+          setCircles(p=>p.map((ci,i)=>i===ent.idx?{...ci,r:newR}:ci))
+        } else {
+          // Anchor point stays fixed — shift centre
+          const ocx=c.cx,ocy=c.cy
+          const fromAnchorX=ocx-anchorPt.x,fromAnchorY=ocy-anchorPt.y
+          const dist=Math.hypot(fromAnchorX,fromAnchorY)||1
+          const newCx=anchorPt.x+(fromAnchorX/dist)*newR
+          const newCy=anchorPt.y+(fromAnchorY/dist)*newR
+          setCircles(p=>p.map((ci,i)=>i===ent.idx?{...ci,cx:newCx,cy:newCy,r:newR}:ci))
+        }
+      } else if (ent.kind==='arc'&&(finalPending.radius||finalPending.angle)){
+        const a=arcs[ent.idx]
+        let r=a.r,span=norm2pi(a.endAngle-a.startAngle)
+        if (finalPending.radius&&parseFloat(finalPending.radius)>0) r=mmToPx(parseFloat(finalPending.radius))
+        if (finalPending.angle&&parseFloat(finalPending.angle)>0) span=parseFloat(finalPending.angle)*Math.PI/180
+        if (finalPending.radius&&parseFloat(finalPending.radius)>0){
+          const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
+          const handles2=bbox2?getBBoxHandles(bbox2):null
+          const anchorPt=handles2?handles2[selectDimAnchor]||handles2['mc']:null
+          if (anchorPt&&selectDimAnchor!=='mc'){
+            const fromAnchorX=a.cx-anchorPt.x,fromAnchorY=a.cy-anchorPt.y
+            const dist=Math.hypot(fromAnchorX,fromAnchorY)||1
+            const newCx=anchorPt.x+(fromAnchorX/dist)*r
+            const newCy=anchorPt.y+(fromAnchorY/dist)*r
+            const mid=(a.startAngle+a.endAngle)/2
+            setArcs(p=>p.map((ar,i)=>i===ent.idx?{...ar,cx:newCx,cy:newCy,r,startAngle:mid-span/2,endAngle:mid+span/2}:ar))
+          } else {
+            const mid=(a.startAngle+a.endAngle)/2
+            setArcs(p=>p.map((ar,i)=>i===ent.idx?{...ar,r,startAngle:mid-span/2,endAngle:mid+span/2}:ar))
+          }
+        } else {
+          const mid=(a.startAngle+a.endAngle)/2
+          setArcs(p=>p.map((ar,i)=>i===ent.idx?{...ar,r,startAngle:mid-span/2,endAngle:mid+span/2}:ar))
+        }
+      }
+    } else {
+      // Multi-select: apply W and/or H independently
+      const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
+      if (bbox2){
+        // Determine anchor world point from anchor handle id
+        const handles=getBBoxHandles(bbox2)
+        const anchorH=handles[selectDimAnchor]||handles['mc']
+        let sx=1,sy=1
+        if (finalPending.width&&parseFloat(finalPending.width)>0)
+          sx=mmToPx(parseFloat(finalPending.width))/bbox2.w
+        if (finalPending.height&&parseFloat(finalPending.height)>0)
+          sy=mmToPx(parseFloat(finalPending.height))/bbox2.h
+        const result=applySelectionTransform(selection,lines,circles,arcs,splines,{x:anchorH.x,y:anchorH.y},sx,sy,0,0)
+        setLines(result.lines);setCircles(result.circles);setArcs(result.arcs);setSplines(result.splines)
+      }
+    }
+    setSelectDimField(null);setSelectDimPending({});setSelectDimAnchor('mc')
+    setSelectDimInput('')
+  }
   function resetSpline(){
     setSplinePoints([]);setSplineClosed(false)
   }
   function resetOffset(){
     setOffsetEntity(null)
-    setOffsetDistInput('');setOffsetDistLocked(false)
+    setOffsetDistInput('')
     setOffsetPreview(null);setOffsetHover(null)
   }
   function resetMirror(){
@@ -1476,7 +1614,7 @@ export default function App() {
   function resetRotateCopy(){
     setRotateCopySel([]);setRotateCopyAccepted(false)
     setRotateCopyMode('rotate');setRotateCopyCountInput('1')
-    setRotateCopyHover(null)
+    setRotateCopyHover(null);setRotateCopyPreview(null)
   }
   function resetResize(){
     setResizeSel([]);setResizeAccepted(false)
@@ -1485,6 +1623,24 @@ export default function App() {
   function resetFillet(){
     setFilletSel([]);setFilletAccepted(false)
     setFilletRadiusInput('');setFilletHover(null);setFilletPreview(null)
+  }
+  // Shared by the blind Enter-key flow and the visible FilletRadiusPanel's
+  // Apply button (see FilletRadiusPanel.jsx).
+  function applyFillet(){
+    if (!filletPreview||filletPreview.tooLarge) return
+    const{newL1,newL2,arc}=filletPreview
+    // Carry style from source lines through fillet
+    const s1=lines[filletSel[0].idx]?.style
+    const s2=lines[filletSel[1].idx]?.style
+    commit(snapshot())
+    // Same plane/facePlane tagging every other commit needs — see the
+    // matching comment on the Mirror tool's commit, same bug class.
+    const flPt = planeTag()
+    setLines(p=>[...p.filter((_,i)=>!filletSel.some(s=>s.idx===i)),
+      {...newL1,...(s1?{style:s1}:{}),...flPt},
+      {...newL2,...(s2?{style:s2}:{}),...flPt}])
+    setArcs(p=>[...p,{...arc,...flPt}])
+    resetFillet()
   }
   function resetTrace(){
     setTraceOpen(false);setTraceInsertPt(null)
@@ -1676,11 +1832,11 @@ export default function App() {
     if (offsetEntity.kind==='arc')    entity=arcs[offsetEntity.idx]
     if (offsetEntity.kind==='spline') entity=splines[offsetEntity.idx]
     if (!entity){setOffsetPreview(null);return}
-    const distPx=offsetDistLocked
-      ? mmToPx(parseFloat(offsetDistInput)||1)
+    const distPx=offsetDistInput
+      ? mmToPx(parseFloat(offsetDistInput)||0)
       : distToEntity(mousePos,entity,offsetEntity.kind)
     setOffsetPreview(computeOffsetPreview(entity,offsetEntity.kind,distPx,mousePos))
-  },[tool,mousePos,offsetEntity,offsetDistInput,offsetDistLocked,lines,circles,arcs,splines])
+  },[tool,mousePos,offsetEntity,offsetDistInput,lines,circles,arcs,splines])
 
   useEffect(()=>{
     if (tool!=='offset'||!mousePos){setOffsetHover(null);return}
@@ -1696,6 +1852,20 @@ export default function App() {
     if (tool!=='center'||!mousePos){setCenterHover(null);return}
     setCenterHover(nearestMirrorEntity(mousePos,lines,circles,arcs,splines))
   },[tool,mousePos,lines,circles,arcs,splines])
+
+  // Live ghost preview once the rotate centre is picked — without this the
+  // panel greys out and its hint text disappears the moment startPoint is
+  // set (see CopyModePanel's `locked` prop), so the centre-point click had
+  // zero visible feedback and looked like it "didn't work" even though the
+  // state updated correctly underneath.
+  useEffect(()=>{
+    if (tool!=='rotatecopy'||!rotateCopyAccepted||!startPoint||!mousePos||!rotateCopySel.length){setRotateCopyPreview(null);return}
+    const dx=mousePos.x-startPoint.x,dy=mousePos.y-startPoint.y
+    let angleDeg=angleLocked?(parseFloat(angleInput)||0):(Math.atan2(dy,dx)*180/Math.PI)
+    if (!angleLocked&&angleDeg<0) angleDeg+=360
+    const count=Math.max(1,parseInt(rotateCopyCountInput)||1)
+    setRotateCopyPreview(buildRotatedCopies(rotateCopySel,lines,circles,arcs,splines,startPoint.x,startPoint.y,angleDeg,count))
+  },[tool,rotateCopyAccepted,startPoint,mousePos,rotateCopySel,angleInput,angleLocked,rotateCopyCountInput,lines,circles,arcs,splines])
 
   useEffect(()=>{
     if (tool!=='mirror'||!mirrorAccepted||!mirrorP1||!mousePos||!mirrorSel.length){setMirrorPreview(null);return}
@@ -1876,7 +2046,24 @@ export default function App() {
   }
   // Find nearest line to cursor within threshold (pixels).
   // Uses SELECT_DIST (generous) so user doesn't need pixel-perfect aim.
+  // Prefers snapping exactly onto an endpoint or midpoint when the cursor is
+  // close to one, instead of always using the raw perpendicular foot.
   function findNearestLineForPerp(mouse, lines, excludeIdx=null) {
+    const snapDist = SELECT_DIST * 1.5 / zoomRef.scale
+    let bestSnap=null, bestSnapDist=snapDist+1, bestSnapIdx=-1, bestSnapType=null
+    lines.forEach((l,idx)=>{
+      if (idx===excludeIdx) return
+      const pts=[
+        {x:l.x1,y:l.y1,type:'endpoint'},{x:l.x2,y:l.y2,type:'endpoint'},
+        {x:(l.x1+l.x2)/2,y:(l.y1+l.y2)/2,type:'midpoint'},
+      ]
+      pts.forEach(p=>{
+        const d=Math.hypot(mouse.x-p.x,mouse.y-p.y)
+        if (d<bestSnapDist){bestSnapDist=d;bestSnap=p;bestSnapIdx=idx;bestSnapType=p.type}
+      })
+    })
+    if (bestSnap) return { line:lines[bestSnapIdx], idx:bestSnapIdx, foot:bestSnap, isSnap:true, snapType:bestSnapType }
+
     const threshold = SELECT_DIST * 3 / zoomRef.scale
     let best=null, bestIdx=-1, bestDist=threshold+1
     lines.forEach((l,idx)=>{
@@ -1886,10 +2073,10 @@ export default function App() {
     })
     if (!best) return null
     // Foot clamped to segment so indicator stays on the visible line
-    return { line:best, idx:bestIdx, foot:calcPerpFoot(mouse.x,mouse.y,best.x1,best.y1,best.x2,best.y2,true) }
+    return { line:best, idx:bestIdx, foot:calcPerpFoot(mouse.x,mouse.y,best.x1,best.y1,best.x2,best.y2,true), isSnap:false }
   }
   // Draw the perp indicator — right-angle square + PERP label (no circles, no arc symbols)
-  function drawPerpIndicator(ctx, x, y, sc) {
+  function drawPerpIndicator(ctx, x, y, sc, labelDY=0) {
     ctx.save()
     ctx.translate(x,y); ctx.scale(1/sc,1/sc)
     ctx.strokeStyle='#00BCD4'; ctx.lineWidth=2.5; ctx.lineCap='round'
@@ -1902,7 +2089,7 @@ export default function App() {
     ctx.moveTo(-s, s-6); ctx.lineTo(-s+6, s-6); ctx.lineTo(-s+6, s)
     ctx.stroke()
     ctx.fillStyle='#00BCD4'; ctx.font='bold 11px monospace'
-    ctx.fillText('PERP', s+4, -s+8)
+    ctx.fillText('PERP', s+4, -s+8+labelDY)
     ctx.restore()
   }
 
@@ -2317,8 +2504,8 @@ export default function App() {
       else if (p.kind==='arc'){ctx.beginPath();ctx.arc(p.cx,p.cy,p.r,p.startAngle,p.endAngle,false);ctx.stroke()}
       else if (p.kind==='spline'&&p.points?.length>=2){const s2=p.polyline?p.points:sampleSpline(p.points,p.closed,16);ctx.beginPath();ctx.moveTo(s2[0].x,s2[0].y);s2.slice(1).forEach(pt=>ctx.lineTo(pt.x,pt.y));ctx.stroke()}
       ctx.setLineDash([]);ctx.restore()
-      const distMm=offsetDistLocked?parseFloat(offsetDistInput)||0:(offsetEntity&&mousePos?pxToMm(distToEntity(mousePos,offsetEntity.kind==='line'?drawLines[offsetEntity.idx]:offsetEntity.kind==='circle'?drawCircles[offsetEntity.idx]:offsetEntity.kind==='arc'?drawArcs[offsetEntity.idx]:drawSplines[offsetEntity.idx],offsetEntity.kind)):0)
-      drawLabel(ctx,(offsetDistLocked?'🔒 ':'')+distMm.toFixed(1)+' mm · click to place',mousePos.x,mousePos.y-24/sc,'#4CAF50',sc)
+      const distMm=offsetDistInput?parseFloat(offsetDistInput)||0:(offsetEntity&&mousePos?pxToMm(distToEntity(mousePos,offsetEntity.kind==='line'?drawLines[offsetEntity.idx]:offsetEntity.kind==='circle'?drawCircles[offsetEntity.idx]:offsetEntity.kind==='arc'?drawArcs[offsetEntity.idx]:drawSplines[offsetEntity.idx],offsetEntity.kind)):0)
+      drawLabel(ctx,(offsetDistInput?'🔒 ':'')+distMm.toFixed(1)+' mm · click to place',mousePos.x,mousePos.y-24/sc,'#4CAF50',sc)
     }
 
     // ── Mirror axis + preview ──
@@ -2342,6 +2529,21 @@ export default function App() {
         mirrorPreview.newCircles.forEach(c=>{ctx.beginPath();ctx.arc(c.cx,c.cy,c.r,0,Math.PI*2);ctx.stroke()})
         mirrorPreview.newArcs.forEach(a=>{ctx.beginPath();ctx.arc(a.cx,a.cy,a.r,a.startAngle,a.endAngle,false);ctx.stroke()})
         ;(mirrorPreview.newSplines||[]).forEach(sp=>{if(sp.points.length<2)return;const s2=sp.polyline?sp.points:sampleSpline(sp.points,sp.closed,16);ctx.beginPath();ctx.moveTo(s2[0].x,s2[0].y);s2.slice(1).forEach(p=>ctx.lineTo(p.x,p.y));ctx.stroke()})
+        ctx.setLineDash([]);ctx.restore()
+      }
+    }
+    if (tool==='rotatecopy'&&rotateCopyAccepted&&startPoint&&mousePos){
+      ctx.save()
+      ctx.strokeStyle='#00BCD4';ctx.lineWidth=1.5/sc;ctx.setLineDash([6/sc,3/sc])
+      ctx.beginPath();ctx.moveTo(startPoint.x,startPoint.y);ctx.lineTo(mousePos.x,mousePos.y);ctx.stroke();ctx.setLineDash([])
+      ctx.save();ctx.translate(startPoint.x,startPoint.y);ctx.scale(1/sc,1/sc);ctx.beginPath();ctx.arc(0,0,4,0,Math.PI*2);ctx.fillStyle='#00BCD4';ctx.fill();ctx.restore()
+      ctx.restore()
+      if (rotateCopyPreview){
+        ctx.save();ctx.strokeStyle='#80DEEA';ctx.lineWidth=1.5/sc;ctx.setLineDash([4/sc,3/sc])
+        rotateCopyPreview.newLines.forEach(l=>{ctx.beginPath();ctx.moveTo(l.x1,l.y1);ctx.lineTo(l.x2,l.y2);ctx.stroke()})
+        rotateCopyPreview.newCircles.forEach(c=>{ctx.beginPath();ctx.arc(c.cx,c.cy,c.r,0,Math.PI*2);ctx.stroke()})
+        rotateCopyPreview.newArcs.forEach(a=>{ctx.beginPath();ctx.arc(a.cx,a.cy,a.r,a.startAngle,a.endAngle,false);ctx.stroke()})
+        ;(rotateCopyPreview.newSplines||[]).forEach(sp=>{if(sp.points.length<2)return;const s2=sp.polyline?sp.points:sampleSpline(sp.points,sp.closed,16);ctx.beginPath();ctx.moveTo(s2[0].x,s2[0].y);s2.slice(1).forEach(p=>ctx.lineTo(p.x,p.y));ctx.stroke()})
         ctx.setLineDash([]);ctx.restore()
       }
     }
@@ -2519,6 +2721,43 @@ export default function App() {
 
     // ── Line tool rubber-band ──
     if (tool==='line'&&startPoint){
+      // PERP mode: completely bypass tangent/snap system — the preview must
+      // show the actual perpendicular-constrained endpoint the click will
+      // commit (see the pKeyDown branch of the line-tool click handler),
+      // not the plain snap-based preview, or the line looks unconstrained
+      // right up until you click.
+      if (pKeyDown){
+        let endPt
+        const fromMode=perpSourceLineIdx!==null && lines[perpSourceLineIdx]
+        if (fromMode){
+          const sl=lines[perpSourceLineIdx]
+          const dx=sl.x2-sl.x1, dy=sl.y2-sl.y1, len=Math.hypot(dx,dy)
+          if (len>1e-10){
+            const px=-dy/len, py=dx/len
+            const t=(mousePos.x-startPoint.x)*px+(mousePos.y-startPoint.y)*py
+            endPt={x:startPoint.x+t*px, y:startPoint.y+t*py}
+          } else endPt=mousePos
+          drawPreviewLine(ctx,startPoint.x,startPoint.y,endPt.x,endPt.y,'#00BCD4',1,sc)
+          ctx.save();ctx.translate(startPoint.x,startPoint.y);ctx.scale(1/sc,1/sc)
+          ctx.beginPath();ctx.arc(0,0,4,0,Math.PI*2);ctx.fillStyle='#00BCD4';ctx.fill()
+          ctx.restore()
+          drawPerpIndicator(ctx,endPt.x,endPt.y,sc)
+        } else {
+          const hit=findNearestLineForPerp(mousePos,lines,perpSourceLineIdx)
+          endPt=hit?hit.foot:mousePos
+          drawPreviewLine(ctx,startPoint.x,startPoint.y,endPt.x,endPt.y,'#00BCD4',1,sc)
+          ctx.save();ctx.translate(startPoint.x,startPoint.y);ctx.scale(1/sc,1/sc)
+          ctx.beginPath();ctx.arc(0,0,4,0,Math.PI*2);ctx.fillStyle='#00BCD4';ctx.fill()
+          ctx.restore()
+          if (hit){
+            if (hit.isSnap) drawLineIndicator(ctx,endPt.x,endPt.y,hit.snapType,sc)
+            drawPerpIndicator(ctx,endPt.x,endPt.y,sc,hit.isSnap?14:0)
+          }
+        }
+        const lenMm=pxToMm(Math.hypot(endPt.x-startPoint.x,endPt.y-startPoint.y))
+        const midX=(startPoint.x+endPt.x)/2,midY=(startPoint.y+endPt.y)/2
+        drawLabel(ctx,(dimLocked?'🔒 ':'')+lenMm.toFixed(1)+' mm',midX,midY-2/sc,'#00BCD4',sc)
+      } else {
       const hSnap=getGeoSnap(mousePos,snapLines,snapCircles,snapArcs,startPoint,tKeyDown,splines,intersectionPts)
       let endPt,isTanEnd=false
       if (hSnap?.type==='tan'){
@@ -2541,6 +2780,7 @@ export default function App() {
       drawLabel(ctx,(dimLocked?'🔒 ':'')+(dimInput||lenMm.toFixed(1))+' mm',midX,midY-2/sc,dimLocked?'#FF9800':focusField==='dim'?'#1565C0':'#2196F3',sc)
       if (!isTanEnd) drawLabel(ctx,(angleLocked?'🔒 ':'')+(angleInput||computeLiveAngle(startPoint,endPt).toFixed(1))+'°',midX,midY+22/sc,angleLocked?'#FF9800':focusField==='angle'?'#6A1B9A':'#9C27B0',sc)
       if (isTanEnd) drawLineIndicator(ctx,endPt.x,endPt.y,'tan',sc)
+      } // end !pKeyDown
 
     // ── Axis tool rubber-band (revolve axis — simple 2-point line, dash-dot) ──
     // Reuses computeEnd (same as the Line tool) for H/V angle snap + alignment
@@ -2608,10 +2848,20 @@ export default function App() {
 
     // ── Idle snap indicator ──
     } else if (tool!=='trim'&&tool!=='delete'&&tool!=='offset'&&tool!=='mirror'&&tool!=='movecopy'&&tool!=='rotatecopy'&&tool!=='resize'&&tool!=='trace'){
+      if (tool==='line'&&pKeyDown){
+        // PERP mode idle — show perp foot on nearest line (plus the
+        // endpoint/midpoint marker too, when snapped onto one of those)
+        const hit=findNearestLineForPerp(mousePos,lines,null)
+        if (hit){
+          if (hit.isSnap) drawLineIndicator(ctx,hit.foot.x,hit.foot.y,hit.snapType,sc)
+          drawPerpIndicator(ctx,hit.foot.x,hit.foot.y,sc,hit.isSnap?14:0)
+        }
+      } else {
       const{tracks}=applyTracking(mousePos,trackedPts)
       if (tracks.length) drawTracks(ctx,tracks,trackedPts,sc)
       const geo=getGeoSnap(mousePos,snapLines,snapCircles,snapArcs,null,tKeyDown,splines,intersectionPts)
       if (geo) drawLineIndicator(ctx,geo.x,geo.y,geo.type,sc)
+      }
     }
 
     // Snap indicator for movecopy/rotatecopy base point
@@ -2620,7 +2870,7 @@ export default function App() {
       if (geo) drawLineIndicator(ctx,geo.x,geo.y,geo.type,sc)
     }
 
-  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetDistLocked,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,intersectionPts,joinHover,joinFirstPt,dims,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm])
+  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm])
 
 
   // ── Phase 2 Step 3: plane tagging ────────────────────────────────────────
@@ -6141,7 +6391,13 @@ export default function App() {
         if (!hit) return
         const already=filletSel.findIndex(s=>s.idx===hit.idx)
         if (already>=0) setFilletSel(p=>p.filter((_,i)=>i!==already))
-        else if (filletSel.length<2) setFilletSel(p=>[...p,hit])
+        else if (filletSel.length<2){
+          setFilletSel(p=>[...p,hit])
+          // No confirm step needed — picking 2 lines is enough (matches the
+          // FilletRadiusPanel showing as soon as filletSel.length===2). Tab
+          // still works too, but is now a no-op once this already ran.
+          if (filletSel.length===1) setFilletAccepted(true)
+        }
       } else {
         // Click applies the fillet (same as Enter)
         if (!filletPreview||filletPreview.tooLarge) return
@@ -6583,103 +6839,7 @@ export default function App() {
           const finalPending = selectDimField
             ? {...selectDimPending,[selectDimField]:selectDimInput}
             : selectDimPending
-          // Apply all pending values in one commit
-          commit(snapshot())
-          if (selection.length===1){
-            const ent=selection[0]
-            if (ent.kind==='line'){
-              const l=lines[ent.idx]
-              const dx=l.x2-l.x1,dy=l.y2-l.y1
-              const oldLen=Math.hypot(dx,dy)
-              let newLen=oldLen,newAngleRad=Math.atan2(dy,dx)
-              if (finalPending.length&&parseFloat(finalPending.length)>0)
-                newLen=mmToPx(parseFloat(finalPending.length))
-              if (finalPending.angle&&parseFloat(finalPending.angle)>=0)
-                newAngleRad=(360-parseFloat(finalPending.angle))*Math.PI/180
-              const nx=Math.cos(newAngleRad),ny=Math.sin(newAngleRad)
-              // Determine fixed point from anchor handle
-              const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
-              const handles2=bbox2?getBBoxHandles(bbox2):null
-              const anchorPt=handles2?handles2[selectDimAnchor]||handles2['mc']:null
-              if (!anchorPt||selectDimAnchor==='mc'){
-                // Anchor = midpoint
-                const mx=(l.x1+l.x2)/2,my=(l.y1+l.y2)/2
-                setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x1:mx-nx*newLen/2,y1:my-ny*newLen/2,x2:mx+nx*newLen/2,y2:my+ny*newLen/2}:ln))
-              } else {
-                // Find which endpoint is closest to anchor handle — that end stays fixed
-                const d1=Math.hypot(l.x1-anchorPt.x,l.y1-anchorPt.y)
-                const d2=Math.hypot(l.x2-anchorPt.x,l.y2-anchorPt.y)
-                if (d1<=d2){
-                  // x1,y1 stays fixed — x2,y2 moves
-                  setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x2:l.x1+nx*newLen,y2:l.y1+ny*newLen}:ln))
-                } else {
-                  // x2,y2 stays fixed — x1,y1 moves
-                  setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x1:l.x2-nx*newLen,y1:l.y2-ny*newLen}:ln))
-                }
-              }
-            } else if (ent.kind==='circle'&&finalPending.radius&&parseFloat(finalPending.radius)>0){
-              const c=circles[ent.idx]
-              const newR=mmToPx(parseFloat(finalPending.radius))
-              const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
-              const handles2=bbox2?getBBoxHandles(bbox2):null
-              const anchorPt=handles2?handles2[selectDimAnchor]||handles2['mc']:null
-              if (!anchorPt||selectDimAnchor==='mc'){
-                // Centre stays fixed
-                setCircles(p=>p.map((ci,i)=>i===ent.idx?{...ci,r:newR}:ci))
-              } else {
-                // Anchor point stays fixed — shift centre
-                // The anchor handle is on the circle's bbox edge
-                // New centre = anchor + offset scaled to new radius
-                const ocx=c.cx,ocy=c.cy,or=c.r
-                const fromAnchorX=ocx-anchorPt.x,fromAnchorY=ocy-anchorPt.y
-                const dist=Math.hypot(fromAnchorX,fromAnchorY)||1
-                const newCx=anchorPt.x+(fromAnchorX/dist)*newR
-                const newCy=anchorPt.y+(fromAnchorY/dist)*newR
-                setCircles(p=>p.map((ci,i)=>i===ent.idx?{...ci,cx:newCx,cy:newCy,r:newR}:ci))
-              }
-            } else if (ent.kind==='arc'&&(finalPending.radius||finalPending.angle)){
-              const a=arcs[ent.idx]
-              let r=a.r,span=norm2pi(a.endAngle-a.startAngle)
-              if (finalPending.radius&&parseFloat(finalPending.radius)>0) r=mmToPx(parseFloat(finalPending.radius))
-              if (finalPending.angle&&parseFloat(finalPending.angle)>0) span=parseFloat(finalPending.angle)*Math.PI/180
-              if (finalPending.radius&&parseFloat(finalPending.radius)>0){
-                const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
-                const handles2=bbox2?getBBoxHandles(bbox2):null
-                const anchorPt=handles2?handles2[selectDimAnchor]||handles2['mc']:null
-                if (anchorPt&&selectDimAnchor!=='mc'){
-                  const fromAnchorX=a.cx-anchorPt.x,fromAnchorY=a.cy-anchorPt.y
-                  const dist=Math.hypot(fromAnchorX,fromAnchorY)||1
-                  const newCx=anchorPt.x+(fromAnchorX/dist)*r
-                  const newCy=anchorPt.y+(fromAnchorY/dist)*r
-                  const mid=(a.startAngle+a.endAngle)/2
-                  setArcs(p=>p.map((ar,i)=>i===ent.idx?{...ar,cx:newCx,cy:newCy,r,startAngle:mid-span/2,endAngle:mid+span/2}:ar))
-                } else {
-                  const mid=(a.startAngle+a.endAngle)/2
-                  setArcs(p=>p.map((ar,i)=>i===ent.idx?{...ar,r,startAngle:mid-span/2,endAngle:mid+span/2}:ar))
-                }
-              } else {
-                const mid=(a.startAngle+a.endAngle)/2
-                setArcs(p=>p.map((ar,i)=>i===ent.idx?{...ar,r,startAngle:mid-span/2,endAngle:mid+span/2}:ar))
-              }
-            }
-          } else {
-            // Multi-select: apply W and/or H independently
-            const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
-            if (bbox2){
-              // Determine anchor world point from anchor handle id
-              const handles=getBBoxHandles(bbox2)
-              const anchorH=handles[selectDimAnchor]||handles['mc']
-              let sx=1,sy=1
-              if (finalPending.width&&parseFloat(finalPending.width)>0)
-                sx=mmToPx(parseFloat(finalPending.width))/bbox2.w
-              if (finalPending.height&&parseFloat(finalPending.height)>0)
-                sy=mmToPx(parseFloat(finalPending.height))/bbox2.h
-              const result=applySelectionTransform(selection,lines,circles,arcs,splines,{x:anchorH.x,y:anchorH.y},sx,sy,0,0)
-              setLines(result.lines);setCircles(result.circles);setArcs(result.arcs);setSplines(result.splines)
-            }
-          }
-          setSelectDimField(null);setSelectDimPending({});setSelectDimAnchor('mc')
-          setSelectDimInput('')
+          applySelectDims(finalPending)
           return
         }
         if (e.key==='Escape'){setSelectDimField(null);setSelectDimPending({});setSelectDimInput('');return}
@@ -6698,9 +6858,11 @@ export default function App() {
     if (tool==='offset'){
       if (e.key==='Escape'){resetOffset();return}
       if (offsetEntity){
-        if (e.key==='Tab'){e.preventDefault();if(offsetDistInput&&parseFloat(offsetDistInput)>0)setOffsetDistLocked(p=>!p);return}
-        if (e.key==='Backspace'){setOffsetDistInput(p=>p.slice(0,-1));setOffsetDistLocked(false);return}
-        if (/^[0-9.]$/.test(e.key)){setOffsetDistLocked(false);setOffsetDistInput(p=>p+e.key);return}
+        // Typing only sets the distance — placing still requires a canvas
+        // click, since the click position is what picks which side to offset
+        // toward (see OffsetDistPanel.jsx).
+        if (e.key==='Backspace'){setOffsetDistInput(p=>p.slice(0,-1));return}
+        if (/^[0-9.]$/.test(e.key)){setOffsetDistInput(p=>p+e.key);return}
       }
       return
     }
@@ -6774,22 +6936,7 @@ export default function App() {
       // Accepted — type radius then Enter/click to apply
       if (e.key==='Enter'){
         e.preventDefault()
-        if (!filletPreview||filletPreview.tooLarge) return
-        const{newL1,newL2,arc}=filletPreview
-        // Carry style from source lines through fillet
-        const s1=lines[filletSel[0].idx]?.style
-        const s2=lines[filletSel[1].idx]?.style
-        commit(snapshot())
-        // Same plane/facePlane tagging every other commit needs — see the
-        // matching comment on the Mirror tool's commit, same bug class.
-        // trimLine()/the new arc in filletMath.js drop it just like style did
-        // (hence the existing manual style patch-back below).
-        const flPt = planeTag()
-        setLines(p=>[...p.filter((_,i)=>!filletSel.some(s=>s.idx===i)),
-          {...newL1,...(s1?{style:s1}:{}),...flPt},
-          {...newL2,...(s2?{style:s2}:{}),...flPt}])
-        setArcs(p=>[...p,{...arc,...flPt}])
-        resetFillet()
+        applyFillet()
         return
       }
       if (e.key==='Backspace'){setFilletRadiusInput(p=>p.slice(0,-1));return}
@@ -6912,7 +7059,7 @@ export default function App() {
       if (!offsetEntity) return { step:1, total:3, color:c,
         action: offsetHover ? `Click to select ${offsetHover.kind}` : 'Hover entity to select',
         hints:[] }
-      const d = offsetDistLocked ? parseFloat(offsetDistInput)||0
+      const d = offsetDistInput ? parseFloat(offsetDistInput)||0
         : (mousePos ? pxToMm(distToEntity(mousePos,
             offsetEntity.kind==='line'?lines[offsetEntity.idx]:
             offsetEntity.kind==='circle'?circles[offsetEntity.idx]:
@@ -6920,9 +7067,7 @@ export default function App() {
             offsetEntity.kind)) : 0)
       return { step:'2+3', total:3, color:c,
         action:`Move to side · ${d.toFixed(1)} mm`,
-        hints: offsetDistLocked
-          ? [K('Tab','unlock dist'), K('click','place'), K('Esc')]
-          : [K('type + Enter','lock dist'), K('click','place'), K('Esc')] }
+        hints: [K('type','set dist'), K('click','place'), K('Esc')] }
     }
 
     if (tool==='dim') {
@@ -7116,6 +7261,82 @@ export default function App() {
   const btnBase={border:'none',borderRadius:5,cursor:'pointer',padding:4,display:'flex',alignItems:'center',justifyContent:'center',width:68,height:68,transition:'background 0.1s'}
   const zoomPct=Math.round(viewTransform.scale*100)
 
+  // Live length/angle for the LineSnapPanel's placeholder text while mid-draw
+  let lineLiveLenMm=null, lineLiveAngleDeg=null
+  if (tool==='line'&&startPoint&&mousePos&&!deferredTangent){
+    const endPt=computeEnd(startPoint,mousePos,trackedPts)
+    lineLiveLenMm=pxToMm(Math.hypot(endPt.x-startPoint.x,endPt.y-startPoint.y))
+    lineLiveAngleDeg=computeLiveAngle(startPoint,endPt)
+  }
+
+  // Live radius for the CircleSnapPanel's placeholder text while mid-draw
+  let circleLiveRadiusMm=null
+  if (tool==='circle'&&mousePos){
+    if (circleTanA&&circleTanB) circleLiveRadiusMm=pxToMm(tanCircleCurrentRadius(mousePos))
+    else if (circleCenter) circleLiveRadiusMm=pxToMm(Math.hypot(mousePos.x-circleCenter.x,mousePos.y-circleCenter.y))
+  }
+
+  // Live angle for the Rotate/Copy panel's placeholder text while picking the angle
+  let rotateCopyLiveAngleDeg=null
+  if (tool==='rotatecopy'&&rotateCopyAccepted&&startPoint&&mousePos){
+    const dx=mousePos.x-startPoint.x,dy=mousePos.y-startPoint.y
+    let d=Math.atan2(dy,dx)*180/Math.PI
+    if (d<0) d+=360
+    rotateCopyLiveAngleDeg=d
+  }
+
+  // Select-tool: real input-box panel, positioned near the current selection.
+  // sketchToScreen already returns viewport-relative pixel coords (same space
+  // as a position:'fixed' element), matching however the active sketch plane
+  // is currently oriented in 3D — unlike the 2D app's flat viewTransform math,
+  // this has to go through the camera projection since the sketch plane can
+  // be tilted (a face plane), not just a screen-aligned work plane.
+  let selectDimPanel=null
+  if (tool==='select'&&selection.length>0&&sketchMode){
+    const vp=viewport3dRef.current
+    const curLines   = selectLiveGeom?.lines   || lines
+    const curCircles = selectLiveGeom?.circles || circles
+    const curArcs    = selectLiveGeom?.arcs    || arcs
+    const curSplines = selectLiveGeom?.splines || splines
+    const bbox=selectionBBox(selection,curLines,curCircles,curArcs,curSplines)
+    if (bbox&&vp){
+      let fields=[],live={}
+      if (selection.length===1){
+        const e0=selection[0]
+        if (e0.kind==='line'){
+          const l=curLines[e0.idx]
+          if (l){
+            const len=pxToMm(Math.hypot(l.x2-l.x1,l.y2-l.y1))
+            let ang=Math.atan2(-(l.y2-l.y1),l.x2-l.x1)*180/Math.PI;if(ang<0)ang+=360
+            fields=[{key:'length',label:'Length',unit:'mm'},{key:'angle',label:'Angle',unit:'°'}]
+            live={length:len,angle:ang}
+          }
+        } else if (e0.kind==='circle'){
+          const c=curCircles[e0.idx]
+          if (c){ fields=[{key:'radius',label:'Radius',unit:'mm'}]; live={radius:pxToMm(c.r)} }
+        } else if (e0.kind==='arc'){
+          const a=curArcs[e0.idx]
+          if (a){
+            const span=norm2pi(a.endAngle-a.startAngle)*180/Math.PI
+            fields=[{key:'radius',label:'Radius',unit:'mm'},{key:'angle',label:'Angle',unit:'°'}]
+            live={radius:pxToMm(a.r),angle:span}
+          }
+        }
+      } else {
+        fields=[{key:'width',label:'Width',unit:'mm'},{key:'height',label:'Height',unit:'mm'}]
+        live={width:pxToMm(bbox.w),height:pxToMm(bbox.h)}
+      }
+      if (fields.length){
+        const planeId = typeof activePlane==='string' ? activePlane : null
+        const facePlane = (activePlane && typeof activePlane==='object') ? activePlane : null
+        const screen=vp.sketchToScreen(bbox.x2,bbox.y1,planeId,facePlane)
+        if (screen){
+          selectDimPanel={left:screen.x+18, top:Math.max(8,screen.y-20), fields, live}
+        }
+      }
+    }
+  }
+
   return (
     <div style={{display:'flex',height:'100vh',outline:'none'}} tabIndex={0}
       onKeyDown={handleKeyDown}
@@ -7137,6 +7358,18 @@ export default function App() {
           boxShadow:'0 4px 12px rgba(0,0,0,0.5)'}}>
           {cadError}
         </div>
+      )}
+
+      {selectDimPanel&&(
+        <SelectDimPanel
+          style={{position:'fixed',left:selectDimPanel.left,top:selectDimPanel.top}}
+          toolColor="#64B5F6"
+          fields={selectDimPanel.fields}
+          liveValues={selectDimPanel.live}
+          pending={selectDimPending}
+          onChangeField={(key,val)=>setSelectDimPending(p=>({...p,[key]:val}))}
+          onApply={()=>applySelectDims(selectDimPending)}
+        />
       )}
 
       {/* ══ LEFT SIDEBAR ══════════════════════════════════════════════════════ */}
@@ -7350,6 +7583,8 @@ export default function App() {
                       onSetMode={setMoveCopyMode}
                       onSetCount={n=>setMoveCopyCountInput(String(Math.max(1,Math.min(100,n))))}
                       locked={!!startPoint}
+                      selCount={moveCopySel.length} accepted={moveCopyAccepted}
+                      onAccept={()=>setMoveCopyAccepted(true)}
                     />
                   )}
                   {t==='rotatecopy'&&tool==='rotatecopy'&&(
@@ -7360,6 +7595,29 @@ export default function App() {
                       onSetMode={setRotateCopyMode}
                       onSetCount={n=>setRotateCopyCountInput(String(Math.max(1,Math.min(100,n))))}
                       locked={!!startPoint}
+                      selCount={rotateCopySel.length} accepted={rotateCopyAccepted}
+                      onAccept={()=>setRotateCopyAccepted(true)}
+                      angleInput={angleInput} angleLocked={angleLocked}
+                      onChangeAngle={val=>{setAngleLocked(false);setAngleInput(val)}}
+                      onApplyAngle={()=>{ if(angleInput) setAngleLocked(true) }}
+                      liveAngleDeg={rotateCopyLiveAngleDeg}
+                    />
+                  )}
+                  {t==='resize'&&tool==='resize'&&(
+                    <ResizeScalePanel
+                      toolColor={activeColor}
+                      selCount={resizeSel.length} accepted={resizeAccepted}
+                      onAccept={()=>setResizeAccepted(true)}
+                      scaleInput={resizeScaleInput}
+                      onChangeScale={setResizeScaleInput}
+                    />
+                  )}
+                  {t==='mirror'&&tool==='mirror'&&(
+                    <MirrorPanel
+                      toolColor={activeColor}
+                      selCount={mirrorSel.length} accepted={mirrorAccepted}
+                      onAccept={()=>setMirrorAccepted(true)}
+                      hasAxisStart={!!mirrorP1}
                     />
                   )}
                 </div>
@@ -7500,7 +7758,7 @@ export default function App() {
             // draw tools
             startPoint, circleCenter, splinePoints,
             // single-action tools
-            offsetEntity, offsetDistLocked, offsetPreview,
+            offsetEntity, offsetDistInput, offsetPreview,
             trimPreview, extendPreview, deletePreview,
             joinFirstPt,
             // dim tool
@@ -7555,8 +7813,9 @@ export default function App() {
             currentStep={1}
             color="#4CAF50"
             hint={exportSTLSel.length>0
-              ? `${exportSTLSel.length} selected · Enter to export`
-              : 'Click bodies to choose (none = export all) · Enter to export'}
+              ? `${exportSTLSel.length} selected`
+              : 'Click bodies to choose (none = export all)'}
+            action={{label:'✓ Export', enabled:true, onClick:commitExportSTL}}
             onStepBack={()=>{}}
           />
 
@@ -7578,8 +7837,9 @@ export default function App() {
             currentStep={1}
             color="#FFEE88"
             hint={joinSel.length>0
-              ? `${joinSel.length} selected · Enter/Tab/right-click to join`
+              ? `${joinSel.length} selected`
               : 'Select 2+ features in the tree'}
+            action={{label:'✓ Join', enabled:joinSel.length>=2, onClick:commitJoin}}
             onStepBack={()=>{}}
           />
 
@@ -8291,9 +8551,18 @@ export default function App() {
           fontFamily: 'monospace',
           fontSize: 11,
           color: '#dce8ff',
-          whiteSpace: 'nowrap',
+          display: 'flex', alignItems: 'center', gap: 10, whiteSpace: 'nowrap',
         }}>
-          {fillet3dSel.length} edge{fillet3dSel.length!==1?'s':''} selected · ↵ to set radius · Esc to clear
+          <span>{fillet3dSel.length} edge{fillet3dSel.length!==1?'s':''} selected</span>
+          <button
+            onClick={()=>setFillet3dAccepted(true)}
+            style={{
+              padding:'3px 10px', background:'#9c6ade', color:'#fff',
+              border:'none', borderRadius:4, cursor:'pointer',
+              fontFamily:'monospace', fontSize:11, fontWeight:'bold',
+            }}
+          >✓ Lock Edges</button>
+          <span style={{color:'#6688aa'}}>Esc to clear</span>
         </div>
       )}
 
@@ -8502,6 +8771,14 @@ export default function App() {
               tKeyDown={tKeyDown} pKeyDown={pKeyDown}
               onToggleT={()=>setTKeyDown(p=>!p)}
               onToggleP={()=>setPKeyDown(p=>!p)}
+              drawing={!!startPoint&&!deferredTangent}
+              dimInput={dimInput} angleInput={angleInput}
+              dimLocked={dimLocked} angleLocked={angleLocked}
+              onChangeDim={v=>{setDimLocked(false);setDimInput(v)}}
+              onChangeAngle={v=>{setAngleLocked(false);setAngleInput(v)}}
+              onApply={applyLineDims}
+              liveLenMm={lineLiveLenMm}
+              liveAngleDeg={lineLiveAngleDeg}
             />
           )}
           {tool==='circle' && (
@@ -8510,6 +8787,11 @@ export default function App() {
               tKeyDown={tKeyDown}
               onToggleT={()=>setTKeyDown(p=>!p)}
               circleTanA={circleTanA} circleTanB={circleTanB}
+              circleCenter={circleCenter}
+              dimInput={dimInput} dimLocked={dimLocked}
+              onChangeDim={v=>{setDimLocked(false);setDimInput(v)}}
+              onApply={applyCircleRadius}
+              liveRadiusMm={circleLiveRadiusMm}
             />
           )}
           {tool==='spline' && (
@@ -8518,6 +8800,28 @@ export default function App() {
               splineClosed={splineClosed}
               onToggleC={()=>setSplineClosed(p=>!p)}
               splinePoints={splinePoints}
+            />
+          )}
+          {tool==='fillet'&&filletSel.length===2&&(
+            <FilletRadiusPanel
+              toolColor={toolConfig.find(([t])=>t==='fillet')[3]}
+              value={filletRadiusInput}
+              onChange={setFilletRadiusInput}
+              onApply={applyFillet}
+              tooLarge={!!filletPreview?.tooLarge}
+            />
+          )}
+          {tool==='offset'&&offsetEntity&&(
+            <OffsetDistPanel
+              toolColor={toolConfig.find(([t])=>t==='offset')[3]}
+              value={offsetDistInput}
+              onChange={setOffsetDistInput}
+              canApply={!!offsetPreview}
+              liveValueMm={mousePos?pxToMm(distToEntity(mousePos,
+                offsetEntity.kind==='line'?lines[offsetEntity.idx]:
+                offsetEntity.kind==='circle'?circles[offsetEntity.idx]:
+                offsetEntity.kind==='arc'?arcs[offsetEntity.idx]:splines[offsetEntity.idx],
+                offsetEntity.kind)):null}
             />
           )}
         </div>

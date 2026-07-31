@@ -663,10 +663,12 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
             // per-triangle screen-space centroid to derive one from anymore)
             const hitScreen = hf.hit.point.clone().project(cam)
             const cx = (hitScreen.x+1)/2*W, cy = (-hitScreen.y+1)/2*H
+            ctx2.save()
             ctx2.fillStyle = '#fff'
             ctx2.font = 'bold 12px monospace'
             ctx2.textAlign = 'center'
             ctx2.fillText(dxfPickModeRef.current ? 'click to export' : 'click to sketch', cx, cy-8)
+            ctx2.restore()
           }
         }
       } else if (oc && sketchArmedRef.current && !hf && !inSketchMode) {
@@ -999,7 +1001,6 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       selectedEdgeHighlightsRef.current = []
     }
   }, [measureActive])
-
   // Clear face hover highlight helper
   function clearFaceHover() {
     if (hoveredFaceRef.current) {

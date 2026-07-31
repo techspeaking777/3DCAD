@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import * as THREE from 'three'
 import viewOpIconSheet from './assets/view-op-icons.png'
 import Viewport3D from './Viewport3D.jsx'
-import { planeColor, planeAxisLabels, sketchToWorld } from './SketchPlane.js'
+import { planeColor, planeAxisLabels, sketchToWorld, worldToSketch } from './SketchPlane.js'
 import { FacePlane } from './FacePlane.js'
 import { pxToMm, mmToPx, ALIGN_SNAP_DIST, ACQUIRE_DIST, SELECT_DIST, LINE_SNAP_DIST, norm2pi, zoomRef } from './constants.js'
 import { angleOnArc, computeAllIntersections, circleCircleIntersect } from './geometry/intersections.js'
@@ -42,7 +42,7 @@ import {
   IconLine, IconCircle, IconTrim, IconDelete, IconExtend, IconOffset,
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
   IconUndo, IconRedo, IconFitView, IconNew, IconSave, IconLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
-  IconIncludeFace,
+  IconIncludeFace, IconIncludeEdge,
   IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D,
 } from './draw/ToolIcons.jsx'
 import { glowStroke, glowFill } from './draw/vectorTheme.js'
@@ -1111,17 +1111,31 @@ export default function App() {
   const toolBtnRefs = useRef({})
   const [flyoutAnchor,setFlyoutAnchor] = useState(null)
   useEffect(() => {
-    if (sketchMode && (tool==='line'||tool==='circle'||tool==='spline'||tool==='fillet'||tool==='offset')) {
+    if (sketchMode && (tool==='line'||tool==='circle'||tool==='spline'||tool==='fillet'||tool==='offset'||tool==='includeedge')) {
       const el = toolBtnRefs.current[tool]
       if (el) {
-        const r = el.getBoundingClientRect()
-        setFlyoutAnchor({top:r.top, right:r.right})
+        // Scroll the button into view first — the sidebar can hold more tools
+        // than fit in a short window, and measuring before the scroll settles
+        // (or without scrolling at all, if the button was activated while
+        // still off-screen) anchors the flyout to a stale/off-canvas rect.
+        el.scrollIntoView({block:'nearest'})
+        requestAnimationFrame(() => {
+          const r = el.getBoundingClientRect()
+          setFlyoutAnchor({top:r.top, right:r.right})
+        })
         return
       }
     }
     setFlyoutAnchor(null)
   }, [tool, sketchMode])
   const [mousePos,setMousePos]=useState(null)
+  // Include Edge (sketch tool): stays active across multiple picks — click any
+  // edge on any solid to project it into the current sketch as a construction
+  // line. Declared early (not near the rest of fillet3d's state) so it's
+  // already initialized before the draw effect's dependency array below
+  // references it.
+  const [includeEdgeHover, setIncludeEdgeHover] = useState(null)   // {solidId, edgeId, point} | null
+  const [includeEdgeSel, setIncludeEdgeSel] = useState([])         // [{solidId, edgeId}] picked so far this session
   const [dimInput,setDimInput]=useState('')
   const [dimLocked,setDimLocked]=useState(false)
   const [angleInput,setAngleInput]=useState('')
@@ -1392,7 +1406,7 @@ export default function App() {
   // fields each one touches.
   function resetAllToolState(){
     resetDrawState(); resetSelection(); resetSpline(); resetOffset(); resetMirror(); resetCenter()
-    resetMoveCopy(); resetRotateCopy(); resetResize(); resetFillet(); resetTrace(); resetDim(); resetJoin(); resetText()
+    resetMoveCopy(); resetRotateCopy(); resetResize(); resetFillet(); resetTrace(); resetDim(); resetJoin(); resetText(); resetIncludeEdge()
     resetMeasure(); resetMirror3D(); resetJoin3D(); resetLoft3D(); resetFillet3D(); resetExportSTL()
     setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
     setTool('select')
@@ -2918,7 +2932,14 @@ export default function App() {
       if (geo) drawLineIndicator(ctx,geo.x,geo.y,geo.type,sc)
     }
 
-  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm])
+    // ── Include Edge: live preview of the hovered edge, projected into this
+    // sketch, before it's actually committed as a construction line ──
+    if (tool==='includeedge'&&includeEdgeHover){
+      const segs=edgeToSketchSegments(includeEdgeHover.solidId,includeEdgeHover.edgeId)
+      if (segs) for (const s of segs) drawPreviewLine(ctx,s.x1,s.y1,s.x2,s.y2,'#FFEB3B',1,sc)
+    }
+
+  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover])
 
 
   // ── Phase 2 Step 3: plane tagging ────────────────────────────────────────
@@ -2961,6 +2982,66 @@ export default function App() {
     setLines(prev => [...prev, ...newLines])
     setCircles(prev => [...prev, ...newCircles])
     setArcs(prev => [...prev, ...newArcs])
+  }
+
+  // ── Include Edge ─────────────────────────────────────────────────────────
+  // Projects one solid edge (by stable solidId+edgeId identity) into the
+  // current sketch plane. Curved edges come back from replicad as several
+  // short tessellated segments rather than one true arc — each becomes its
+  // own straight sketch-space segment, so a curved include renders as a
+  // faceted polyline, not a smooth arc (acceptable for a reference/snap
+  // target; not worth the extra curve-fitting work FacePlane.js's own
+  // boundary classification does, unless that turns out to matter later).
+  // Returns an array of {x1,y1,x2,y2} in sketch space, or null if the edge
+  // can no longer be found (e.g. the solid was rebuilt/deleted since).
+  function edgeToSketchSegments(solidId, edgeId) {
+    const vp = viewport3dRef.current; if (!vp) return null
+    const poly = vp.getEdgePolyline(solidId, edgeId)
+    if (!poly?.points?.length) return null
+    const ap = activePlaneRef.current
+    if (!ap) return null
+    const toSketch = worldVec => (typeof ap === 'object' ? ap.worldToSketch(worldVec) : worldToSketch(worldVec, ap))
+    const segs = []
+    const { points, matrixWorld } = poly
+    for (let i = 0; i + 5 < points.length; i += 6) {
+      const p1 = new THREE.Vector3(points[i], points[i+1], points[i+2]).applyMatrix4(matrixWorld)
+      const p2 = new THREE.Vector3(points[i+3], points[i+4], points[i+5]).applyMatrix4(matrixWorld)
+      const s1 = toSketch(p1), s2 = toSketch(p2)
+      segs.push({ x1: s1.x, y1: s1.y, x2: s2.x, y2: s2.y })
+    }
+    return segs
+  }
+
+  function resetIncludeEdge() {
+    setIncludeEdgeHover(null)
+    setIncludeEdgeSel([])
+  }
+
+  // Mouse move while the tool is armed — raycast against every solid's edges
+  // (any solid, not just the one the current sketch face belongs to) and
+  // update the hover state; the sketch draw effect turns this into a live
+  // preview segment. Mirrors handleFillet3DHover's early-return shape.
+  function handleIncludeEdgeHover(e) {
+    if (tool !== 'includeedge') return
+    const vp = viewport3dRef.current; if (!vp) return
+    setIncludeEdgeHover(vp.raycastSolidEdges(e.clientX, e.clientY))
+  }
+
+  // Click while hovering an edge — commit it as a construction line and stay
+  // armed for the next pick. Re-clicking an already-included edge is a no-op
+  // (each edge only needs to be included once).
+  function handleIncludeEdgeClick(e) {
+    if (tool !== 'includeedge' || !includeEdgeHover) return false
+    const hit = includeEdgeHover
+    const already = includeEdgeSel.some(s => s.solidId===hit.solidId && s.edgeId===hit.edgeId)
+    if (already) return true
+    const segs = edgeToSketchSegments(hit.solidId, hit.edgeId)
+    if (!segs?.length) return true
+    const tag = planeTag()
+    commit(snapshot())
+    setLines(prev => [...prev, ...segs.map(s => ({ ...s, style:'construction', ...tag }))])
+    setIncludeEdgeSel(prev => [...prev, { solidId: hit.solidId, edgeId: hit.edgeId }])
+    return true
   }
 
   // ── Feature tree helpers ─────────────────────────────────────────────────
@@ -6073,6 +6154,11 @@ export default function App() {
       return
     }
 
+    if (tool==='includeedge') {
+      handleIncludeEdgeClick(e)
+      return
+    }
+
     // Face picking is handled entirely via sketchArmed + onFaceClick (see
     // handleFaceClick) — a click here means the ray missed every face, a no-op.
     if (tool==='exportfacedxf') return
@@ -6655,6 +6741,7 @@ export default function App() {
     // Fillet: raycasts solid edges directly (no sketch-plane projection involved)
     if (tool==='fillet3d') { handleFillet3DHover(e); return }
     if (tool==='measure') { handleMeasureHover(e); return }
+    if (tool==='includeedge') { handleIncludeEdgeHover(e); return }
     // exportfacedxf's face hover is handled entirely inside Viewport3D via
     // sketchArmed (the same square face-plane indicator Mirror3D/Loft3D use).
 
@@ -6815,6 +6902,8 @@ export default function App() {
     }
 
     if (tool==='trim'||tool==='delete'||tool==='extend'||tool==='trace'||tool==='text'||tool==='select'||tool==='join'){if(e.key==='Escape'){resetText();resetSelection();resetJoin();resetDim();setTool('line');return}}
+
+    if (tool==='includeedge'){if(e.key==='Escape'){resetIncludeEdge();setTool('line');return}}
 
     if (tool==='select'&&selection.length>0){
       // Delete selected entities
@@ -7291,6 +7380,7 @@ export default function App() {
     ['dim',        IconDim,        'Dimension',      '#E91E63'],
     ['axis',       IconAxis,       'Revolve Axis',   '#E0E0E0'],
     ['trace',      IconTrace,      'Trace Image',    '#607D8B'],
+    ['includeedge', IconIncludeEdge, 'Include Edge — click any edge on any solid to add it as a construction line', '#4FC3F7'],
   ]
 
   const editConfig=[
@@ -7434,7 +7524,7 @@ export default function App() {
               <div key={t} style={{position:'relative'}}>
                 <button
                   ref={el => { toolBtnRefs.current[t] = el }}
-                  onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim()}}
+                  onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim();resetIncludeEdge()}}
                   title={title}
                   style={{...btnBase,background:tool===t?activeColor+'33':'transparent',
                     outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
@@ -7581,7 +7671,7 @@ export default function App() {
                 textTransform:'uppercase',letterSpacing:'0.1em',marginRight:2}}>Edit</span>
               {editConfig.map(([t,Icon,title,activeColor])=>(
                 <button key={t}
-                  onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim()}}
+                  onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim();resetIncludeEdge()}}
                   title={title}
                   style={{...btnBase,background:tool===t?activeColor+'33':'transparent',
                     outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
@@ -7619,7 +7709,7 @@ export default function App() {
               {modifyConfig.map(([t,Icon,title,activeColor])=>(
                 <div key={t} style={{position:'relative'}}>
                   <button
-                    onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim()}}
+                    onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim();resetIncludeEdge()}}
                     title={title}
                     style={{...btnBase,background:tool===t?activeColor+'33':'transparent',
                       outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
@@ -8831,6 +8921,33 @@ export default function App() {
               liveAngleDeg={lineLiveAngleDeg}
             />
           )}
+          {tool==='includeedge' && (() => {
+            const toolColor = toolConfig.find(([t])=>t==='includeedge')[3]
+            return (
+              <div style={{
+                position:'absolute',top:0,left:'100%',marginLeft:10,
+                background:'#14142a',border:`3px solid ${toolColor}`,borderRadius:10,
+                padding:'10px 12px',boxShadow:'0 6px 20px rgba(0,0,0,0.5)',
+                zIndex:50,width:170,fontFamily:'monospace',
+              }}>
+                <div style={{position:'absolute',top:18,left:-9,width:0,height:0,
+                  borderTop:'8px solid transparent',borderBottom:'8px solid transparent',
+                  borderRight:`9px solid ${toolColor}`}}/>
+                <div style={{textAlign:'center',color:'#888',fontSize:9,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:8}}>
+                  Include Edge
+                </div>
+                <div style={{textAlign:'center',fontSize:20,fontWeight:'bold',color:toolColor}}>
+                  {includeEdgeSel.length}
+                </div>
+                <div style={{textAlign:'center',fontSize:9,color:'#666',marginTop:2}}>
+                  edge{includeEdgeSel.length===1?'':'s'} included
+                </div>
+                <div style={{marginTop:8,textAlign:'center',fontSize:9,color:'#666'}}>
+                  Click any edge on any solid. Esc when done.
+                </div>
+              </div>
+            )
+          })()}
           {tool==='circle' && (
             <CircleSnapPanel
               toolColor={toolConfig.find(([t])=>t==='circle')[3]}

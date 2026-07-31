@@ -181,6 +181,24 @@ export function IconIncludeFace({ active }) {
   )
 }
 
+// ── INCLUDE EDGE ────────────────────────────────────────────────────────────
+// A picked 3D edge (solid diagonal line, endpoint dots) pulled by an arrow
+// into a dashed line — the construction-line result. Sticky tool: stays
+// active for repeated picks, unlike Include From Face's one-shot button.
+export function IconIncludeEdge({ active }) {
+  const c = active ? '#FFFF00' : '#4FC3F7'
+  return (
+    <I label="EDGE" active={active}>
+      <path d="M6 8 L20 22" stroke={c} strokeWidth="2.5" strokeLinecap="round"/>
+      <circle cx="6" cy="8" r="2.5" fill={c}/>
+      <circle cx="20" cy="22" r="2.5" fill={c}/>
+      <path d="M24 24 L32 24" stroke={c} strokeWidth="2.5" strokeLinecap="round"/>
+      <path d="M28 19 L34 24 L28 29" fill="none" stroke={c} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M6 40 L20 40" stroke={c} strokeWidth="2" strokeDasharray="3 2" strokeLinecap="round"/>
+    </I>
+  )
+}
+
 // ── 3D-ENVIRONMENT VECTOR ICONS ─────────────────────────────────────────────
 // 80s vector-arcade style (Star Wars/Battlezone) — thin glowing lines, no
 // fills, no pixel blocks. Rendered directly inside the 3D solid-op sidebar

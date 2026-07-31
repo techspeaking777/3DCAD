@@ -655,7 +655,28 @@ function RulerGlyph({ color='#7fa8cc' }) {
   )
 }
 
-function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, mirrorPickActive, onPickMirrorSource, joinPickActive, joinSel, onToggleJoinMember, onEditLoft, hiddenSolidIds, onToggleBodyVisible }) {
+// "Extrude this sketch" row action — a block with an arrow pushing up out of
+// it, echoing the ▶/◀▶ direction icons used in the Set Depth popup.
+function ExtrudeGlyph({ color='#7fa8cc' }) {
+  return (
+    <svg width="11" height="11" viewBox="0 0 11 11" style={{flexShrink:0}}>
+      <rect x="1.5" y="5.5" width="8" height="4" fill="none" stroke={color} strokeWidth="1.1"/>
+      <path d="M5.5 4.5V1M3.5 3l2-2 2 2" fill="none" stroke={color} strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  )
+}
+
+// "Cutout this sketch" row action — a block with a hole punched through it.
+function CutoutGlyph({ color='#7fa8cc' }) {
+  return (
+    <svg width="11" height="11" viewBox="0 0 11 11" style={{flexShrink:0}}>
+      <rect x="1" y="1" width="9" height="9" fill="none" stroke={color} strokeWidth="1.1"/>
+      <rect x="3.5" y="3.5" width="4" height="4" fill="none" stroke={color} strokeWidth="1.1" strokeDasharray="1.2 1"/>
+    </svg>
+  )
+}
+
+function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, mirrorPickActive, onPickMirrorSource, joinPickActive, joinSel, onToggleJoinMember, onEditLoft, hiddenSolidIds, onToggleBodyVisible, onConvertSketch, hasSolids }) {
   const [editingName, setEditingName] = useState(null)
   const [editDepthId, setEditDepthId] = useState(null)
   const [depthVal, setDepthVal]       = useState('')
@@ -854,6 +875,34 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                           <PencilGlyph/>
                         </button>
                       )}
+                      {/* Extrude / Cutout — turn this flat sketch into a solid
+                          in place, without redrawing it. Only shown once the
+                          sketch actually closes into a shape (a bare
+                          reference-line sketch has nothing to build from);
+                          Cutout only makes sense once some solid exists to
+                          cut into. */}
+                      {!sketchMode && detectProfiles(feat.lines||[], feat.arcs||[], feat.planeId, feat.circles||[], feat.splines||[]).length > 0 && (
+                        <>
+                          <button
+                            title="Extrude this sketch into a solid"
+                            onClick={e=>{e.stopPropagation(); onConvertSketch(feat.id, 'extrude')}}
+                            style={{background:'none',border:'none',cursor:'pointer',
+                              padding:'1px 3px', display:'flex', alignItems:'center'}}
+                          >
+                            <ExtrudeGlyph/>
+                          </button>
+                          {hasSolids && (
+                            <button
+                              title="Cut this sketch out of an existing solid"
+                              onClick={e=>{e.stopPropagation(); onConvertSketch(feat.id, 'cutout')}}
+                              style={{background:'none',border:'none',cursor:'pointer',
+                                padding:'1px 3px', display:'flex', alignItems:'center'}}
+                            >
+                              <CutoutGlyph/>
+                            </button>
+                          )}
+                        </>
+                      )}
                       {/* Delete sketch */}
                       <button
                         title="Delete sketch"
@@ -1043,6 +1092,15 @@ export default function App() {
   const sketchBeforePlaneRef=useRef(null)
   const lastClickClientRef=useRef({x:0,y:0})
 
+  // "What do you want to do with this?" prompt shown after Finish on a bare
+  // (not-via-Extrude/Cutout) sketch that closes into a valid profile — see
+  // handleFinishSketch's standalone-sketch branch and chooseSketchIntent.
+  // { planeId, plane, isFace, editingId } | null
+  const [sketchIntentPrompt, setSketchIntentPrompt] = useState(null)
+  // convertingSketchIdRef + its cleanup effect are declared right after
+  // `features` below — they reference it directly, and `features` isn't
+  // initialized yet at this point in the component body.
+
   const [cadError, setCadError] = useState(null)
 
   // ── CAD engine (replicad + OpenCascade) ──
@@ -1062,6 +1120,24 @@ export default function App() {
   // features: ordered list of {type:'sketch'|'extrude', id, name, ...}
   // sketches hold their own geometry; working arrays are the active sketch buffer
   const [features,setFeatures]=useState([])
+  // Set right before arming an extrude/cutout that's converting an EXISTING
+  // standalone Sketch feature (from either the sketchIntentPrompt or a
+  // feature-tree row button) — once the new solid feature actually lands in
+  // `features`, the effect below removes the now-redundant flat sketch.
+  // Cleared defensively on cancel so an abandoned conversion can never
+  // delete an unrelated later sketch just because `features` happened to
+  // grow again.
+  const convertingSketchIdRef = useRef(null)
+  const prevFeaturesLengthRef = useRef(0)
+  useEffect(() => {
+    const grew = features.length > prevFeaturesLengthRef.current
+    prevFeaturesLengthRef.current = features.length
+    if (grew && convertingSketchIdRef.current) {
+      const idToRemove = convertingSketchIdRef.current
+      convertingSketchIdRef.current = null
+      setFeatures(prev => prev.filter(f => f.id !== idToRemove))
+    }
+  }, [features])
   const [activeSketchId,setActiveSketchId]=useState(null)  // which sketch is being edited
   const featureCountRef=useRef({sketch:0,extrude:0,cutout:0,fillet:0,mirror:0,join:0,loft:0})       // for auto-naming
   const [treeCollapsed,setTreeCollapsed]=useState(false)
@@ -1212,8 +1288,8 @@ export default function App() {
   // to dismiss it in the 3D environment.
   useEffect(() => { if (!sketchMode) setGuideOpen(false) }, [sketchMode])
   const [saveAsOpen,setSaveAsOpen]=useState(false)  // false | 'sketch' | 'project' — which save flow the SaveAsPanel fallback modal is for
-  const [gridVisible,setGridVisible]=useState(false)
-  const [gridSnap,setGridSnap]=useState(false)
+  const [gridVisible,setGridVisible]=useState(true)
+  const [gridSnap,setGridSnap]=useState(true)
   const [gridSizeMm,setGridSizeMm]=useState(5)
   const [textInsertPt,setTextInsertPt]=useState(null)
 
@@ -3131,6 +3207,123 @@ export default function App() {
     viewport3dRef.current?.snapToPlane(id)
   }
 
+  // Saves the current sketch buffer as a flat, non-solid Sketch feature —
+  // the pre-prompt behavior, now also the explicit "Keep it Flat"/"Export as
+  // DXF" outcome of the sketchIntentPrompt below. Split out of
+  // handleFinishSketch so both call sites (the no-closed-profile fallthrough
+  // and the prompt's flat/DXF buttons) share one implementation.
+  function saveAsFlatSketch(editingId, planeId, plane, isFace) {
+    const sketchGeom = {
+      lines:   [...lines],
+      circles: [...circles],
+      arcs:    [...arcs],
+      splines: [...splines],
+    }
+    if (editingId) {
+      setFeatures(prev => prev.map(f =>
+        f.id === editingId ? { ...f, ...sketchGeom, planeId } : f
+      ))
+    } else {
+      const id = `sketch-${Date.now()}`
+      setFeatures(prev => [...prev, {
+        id, type: 'sketch', name: nextSketchName(),
+        planeId, facePlane: isFace ? plane : null,
+        visible: true, ...sketchGeom,
+      }])
+    }
+    setLines([]); setCircles([]); setArcs([]); setSplines([])
+    setExtrudeHandlePos(null)
+    viewport3dRef.current?.restoreSavedView()
+  }
+
+  // Arms an extrude/cutout straight from a known set of sketch entities —
+  // re-detects the closed profile itself, so it works both for the sketch
+  // currently being finished (still-live lines/circles/arcs/splines) and for
+  // a previously-saved standalone Sketch feature's stored geometry. Jumps
+  // straight to the Set Depth step (mirrors handleEditExtent's "gear jumps
+  // to step 3" pattern) since there's no reason to re-sketch a profile that's
+  // already known. `sourceSketchId`, when given, marks that Sketch feature
+  // for removal once the new solid actually lands (see the
+  // convertingSketchIdRef effect near the top of the component) — its
+  // geometry now lives inside the new feature, so keeping both would just be
+  // a stale duplicate.
+  function armExtrudeFromEntities({ lines:srcLines, circles:srcCircles, arcs:srcArcs, splines:srcSplines, planeId, facePlane }, opType, sourceSketchId=null) {
+    const plane = facePlane || planeId
+    const profiles = detectProfiles(srcLines, srcArcs, planeId, srcCircles, srcSplines)
+    if (profiles.length === 0) {
+      setCadError('No closed shape found in this sketch — draw a closed loop first.')
+      setTimeout(() => setCadError(null), 5000)
+      return false
+    }
+    const pts = profiles[0]
+    const cx = pts.reduce((s,p)=>s+p.x,0)/pts.length
+    const cy = pts.reduce((s,p)=>s+p.y,0)/pts.length
+    const centroid = { x: cx, y: cy }
+
+    const axisLine = srcLines.find(l => l.style === 'axis' && (l.plane||'XY') === planeId)
+    if (axisLine && profileCrossesAxis(pts, axisLine)) {
+      setCadError('Profile crosses the axis — a revolve needs the whole profile on one side of the axis line.')
+      setTimeout(() => setCadError(null), 6000)
+      return false
+    }
+    const revolveAxis = axisLine ? { x1:axisLine.x1, y1:axisLine.y1, x2:axisLine.x2, y2:axisLine.y2 } : null
+
+    const stateObj = {
+      profiles: [pts],
+      planeId,
+      facePlane: facePlane || null,
+      pickedIdx: 0,
+      revolveAxis,
+      revolveReverse: false,
+      depthInput: revolveAxis ? '360' : '20',
+      direction: 'front',
+      extentMode: 'through',
+      armed: true,
+      centroid,
+      sketchPlane: plane,
+      sketchLines:   [...srcLines],
+      sketchCircles: [...srcCircles],
+      sketchArcs:    [...srcArcs],
+      sketchSplines: [...srcSplines],
+    }
+
+    if (sourceSketchId) convertingSketchIdRef.current = sourceSketchId
+    setCachedProfiles([{ planeId, facePlane: facePlane||null, pts, centroid }])
+    setExtrudeTool(opType)
+    setEditingFeatureId(null)
+    setExtrudeState(stateObj)
+    viewport3dRef.current?.restoreSavedView()
+    return true
+  }
+
+  // Feature tree row buttons on a Sketch feature — Extrude/Cutout it in place.
+  function convertSketchFeature(featureId, opType) {
+    const feat = features.find(f => f.id === featureId)
+    if (!feat || feat.type !== 'sketch') return
+    armExtrudeFromEntities({
+      lines: feat.lines||[], circles: feat.circles||[], arcs: feat.arcs||[], splines: feat.splines||[],
+      planeId: feat.planeId, facePlane: feat.facePlane || null,
+    }, opType, featureId)
+  }
+
+  // Handles the four sketchIntentPrompt buttons — see handleFinishSketch's
+  // standalone-sketch branch for where the prompt gets raised.
+  function chooseSketchIntent(action) {
+    const p = sketchIntentPrompt
+    if (!p) return
+    setSketchIntentPrompt(null)
+    const { planeId, plane, isFace, editingId } = p
+    const facePlane = isFace ? plane : null
+
+    if (action === 'extrude' || action === 'cutout') {
+      armExtrudeFromEntities({ lines, circles, arcs, splines, planeId, facePlane }, action, editingId)
+      return
+    }
+    if (action === 'dxf') exportDXF(lines, circles, arcs, splines)
+    // 'flat' and 'dxf' both end up saved as a flat sketch
+    saveAsFlatSketch(editingId, planeId, plane, isFace)
+  }
+
   function handleFinishSketch() {
     const plane = activePlaneRef.current
     const editingId = activeSketchId
@@ -3244,7 +3437,7 @@ export default function App() {
         depthInput:    revolveAxis
           ? String(editingFeat?.angleDeg ?? 360)
           : editingFeat ? String(editingFeat.depthMm || 20) : '20',
-        direction:     editDirection || (extrudeTool === 'cutout' ? 'front' : 'both'),
+        direction:     editDirection || 'front',
         extentMode:    editExtentMode || 'through',
         armed:         true,
         centroid:      best.centroid,
@@ -3268,30 +3461,15 @@ export default function App() {
     }
 
     // ── Standalone sketch flow ─────────────────────────────────────────────
-    const sketchGeom = {
-      lines:   [...lines],
-      circles: [...circles],
-      arcs:    [...arcs],
-      splines: [...splines],
+    // A closed profile exists but wasn't drawn via Extrude/Cutout (that's the
+    // extrudeTool branch above) — ask what they actually want instead of
+    // silently filing it away as a flat reference sketch. See
+    // chooseSketchIntent for the four outcomes.
+    if (allProfiles.length > 0) {
+      setSketchIntentPrompt({ planeId, plane, isFace, editingId })
+      return
     }
-
-    if (editingId) {
-      setFeatures(prev => prev.map(f =>
-        f.id === editingId ? { ...f, ...sketchGeom, planeId } : f
-      ))
-    } else {
-      const id = `sketch-${Date.now()}`
-      setFeatures(prev => [...prev, {
-        id, type: 'sketch', name: nextSketchName(),
-        planeId, facePlane: isFace ? plane : null,
-        visible: true, ...sketchGeom,
-      }])
-    }
-
-    // Clear working arrays — committed geometry lives in features now
-    setLines([]); setCircles([]); setArcs([]); setSplines([])
-    setExtrudeHandlePos(null)
-    viewport3dRef.current?.restoreSavedView()
+    saveAsFlatSketch(editingId, planeId, plane, isFace)
   }
 
   // Cancel button next to Finish Sketch — abandons the whole in-progress
@@ -3328,6 +3506,10 @@ export default function App() {
     resetRotateCopy();resetResize();resetFillet();resetText();resetSelection()
     resetJoin();resetDim()
     restoreHiddenEditSolid()
+    // Abandoning a sketch->solid conversion mid-flight — don't leave this
+    // armed to delete the source sketch out from under some unrelated later
+    // feature (see the convertingSketchIdRef effect near the top).
+    convertingSketchIdRef.current = null
     setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
     activePlaneRef.current = null
     setLines([]); setCircles([]); setArcs([]); setSplines([])
@@ -3345,6 +3527,7 @@ export default function App() {
   function activateExtrudeTool(op) {
     resetSelection()
     resetDrawState()
+    convertingSketchIdRef.current = null
     // Exit sketch mode if currently in it — step 1 needs the 3D view for plane picking
     if (sketchModeRef.current) {
       setSketchMode(false)
@@ -5070,7 +5253,7 @@ export default function App() {
       pickedIdx: 0,
       depthInput: '20',
       armed: true,
-      direction: extrudeTool === 'cutout' ? 'front' : 'both',
+      direction: 'front',
       extentMode: 'through',   // cutout: 'through' | 'value'; ignored for extrude
       centroid: best.centroid,
     })
@@ -7477,6 +7660,12 @@ export default function App() {
     }
   }
 
+  const sketchIntentBtnStyle = (color) => ({
+    background:color+'22', border:`2px solid ${color}`, borderRadius:8,
+    color:'#fff', fontFamily:'monospace', fontWeight:'bold', fontSize:12,
+    padding:'10px 12px', cursor:'pointer',
+  })
+
   return (
     <div style={{display:'flex',height:'100vh',outline:'none'}} tabIndex={0}
       onKeyDown={handleKeyDown}
@@ -7497,6 +7686,26 @@ export default function App() {
           zIndex:9999,fontFamily:'monospace',fontSize:13,maxWidth:'80vw',
           boxShadow:'0 4px 12px rgba(0,0,0,0.5)'}}>
           {cadError}
+        </div>
+      )}
+
+      {sketchIntentPrompt && (
+        <div style={{position:'fixed', inset:0, background:'rgba(0,0,0,0.55)', zIndex:9998,
+          display:'flex', alignItems:'center', justifyContent:'center'}}>
+          <div style={{background:'#14142a', border:'3px solid #4FC3F7', borderRadius:14,
+            padding:'20px 24px', width:260, textAlign:'center', fontFamily:'monospace',
+            boxShadow:'0 8px 30px rgba(0,0,0,0.6)'}}>
+            <div style={{fontSize:14, color:'#fff', fontWeight:'bold', marginBottom:4}}>Nice shape!</div>
+            <div style={{fontSize:11, color:'#8fa0b8', marginBottom:16}}>What do you want to do with it?</div>
+            <div style={{display:'flex', flexDirection:'column', gap:8}}>
+              <button onClick={()=>chooseSketchIntent('extrude')} style={sketchIntentBtnStyle('#3a7bd5')}>Make it Solid</button>
+              {solids.length>0 && (
+                <button onClick={()=>chooseSketchIntent('cutout')} style={sketchIntentBtnStyle('#e05a4e')}>Cut Into Something</button>
+              )}
+              <button onClick={()=>chooseSketchIntent('flat')} style={sketchIntentBtnStyle('#607D8B')}>Keep it Flat</button>
+              <button onClick={()=>chooseSketchIntent('dxf')} style={sketchIntentBtnStyle('#4CAF50')}>Export as DXF</button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -8852,6 +9061,8 @@ export default function App() {
         onEditLoft={handleEditLoft}
         hiddenSolidIds={hiddenSolidIds}
         onToggleBodyVisible={handleToggleBodyVisible}
+        onConvertSketch={convertSketchFeature}
+        hasSolids={solids.length > 0}
       />
 
       {/* Hidden file input */}

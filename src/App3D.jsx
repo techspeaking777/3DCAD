@@ -1423,11 +1423,13 @@ export default function App() {
     setDimInput('');setDimLocked(false);setAngleInput('');setAngleLocked(false);setFocusField('dim')
     setTrackedPts([]);trackedPtsRef.current=[];setDeferredTangent(null);setTKeyDown(false);setPKeyDown(false);setPerpSourceLineIdx(null)
   }
-  // Line tool: typing a length and/or angle only locks that value in — placing
-  // the actual line still requires a canvas click (see LineSnapPanel.jsx). The
-  // existing Tab-key single-field lock (below, in handleKeyDown) keeps working
-  // as a fallback; this is the visible Lock-It-In button's handler.
-  function applyLineDims(){
+  // Typing a length/distance and/or angle only locks that value in — placing
+  // the actual line or move/copy still requires a canvas click (see
+  // LineSnapPanel.jsx and CopyModePanel.jsx's Move distance+direction box,
+  // which share this same dimInput/angleInput state). The existing Tab-key
+  // single-field lock (below, in handleKeyDown) keeps working as a fallback;
+  // this is the visible Lock-It-In button's handler.
+  function applyDimAngleLock(){
     if (dimInput&&parseFloat(dimInput)>0) setDimLocked(true)
     if (angleInput&&parseFloat(angleInput)>=0) setAngleLocked(true)
   }
@@ -1705,6 +1707,27 @@ export default function App() {
     setRotateCopySel([]);setRotateCopyAccepted(false)
     setRotateCopyMode('rotate');setRotateCopyCountInput('1')
     setRotateCopyHover(null);setRotateCopyPreview(null)
+  }
+  // Shared by the canvas "click to place" gesture (unlocked: click position
+  // sets the angle via atan2) and locking the angle from CopyModePanel/Tab.
+  // Once the angle is locked, the click's position carries no information
+  // the commit needs (pivot + angle are already both known), so locking now
+  // commits immediately instead of requiring a redundant second canvas
+  // click — that click used to silently do nothing whenever it landed on
+  // the still-open CopyModePanel overlay instead of the bare canvas under it.
+  function commitRotateCopyPlacement(angleDeg){
+    if (!startPoint) return
+    const count=Math.max(1,parseInt(rotateCopyCountInput)||1)
+    commit(snapshot())
+    const copies=buildRotatedCopies(rotateCopySel,lines,circles,arcs,splines,startPoint.x,startPoint.y,angleDeg,count)
+    const rcPt = planeTag()
+    const rcLines=copies.newLines.map(l=>({...l,...rcPt}))
+    const rcCircles=copies.newCircles.map(c=>({...c,...rcPt}))
+    const rcArcs=copies.newArcs.map(a=>({...a,...rcPt}))
+    const rcSplines=copies.newSplines.map(sp=>({...sp,...rcPt}))
+    if (rotateCopyMode==='rotate'){const pruned=removeSelected(rotateCopySel,lines,circles,arcs,splines);setLines([...pruned.lines,...rcLines]);setCircles([...pruned.circles,...rcCircles]);setArcs([...pruned.arcs,...rcArcs]);setSplines([...pruned.splines,...rcSplines])}
+    else{setLines(p=>[...p,...rcLines]);setCircles(p=>[...p,...rcCircles]);setArcs(p=>[...p,...rcArcs]);setSplines(p=>[...p,...rcSplines])}
+    resetRotateCopy();resetDrawState()
   }
   function resetResize(){
     setResizeSel([]);setResizeAccepted(false)
@@ -6662,19 +6685,7 @@ export default function App() {
         const dx=raw.x-startPoint.x,dy=raw.y-startPoint.y
         let angleDeg=angleLocked?(parseFloat(angleInput)||0):(Math.atan2(dy,dx)*180/Math.PI)
         if (!angleLocked&&angleDeg<0) angleDeg+=360
-        const count=Math.max(1,parseInt(rotateCopyCountInput)||1)
-        commit(snapshot())
-        const copies=buildRotatedCopies(rotateCopySel,lines,circles,arcs,splines,startPoint.x,startPoint.y,angleDeg,count)
-        // Same plane/facePlane tagging every other commit needs — see the
-        // matching comment on the Mirror tool's commit, same bug class.
-        const rcPt = planeTag()
-        const rcLines=copies.newLines.map(l=>({...l,...rcPt}))
-        const rcCircles=copies.newCircles.map(c=>({...c,...rcPt}))
-        const rcArcs=copies.newArcs.map(a=>({...a,...rcPt}))
-        const rcSplines=copies.newSplines.map(sp=>({...sp,...rcPt}))
-        if (rotateCopyMode==='rotate'){const pruned=removeSelected(rotateCopySel,lines,circles,arcs,splines);setLines([...pruned.lines,...rcLines]);setCircles([...pruned.circles,...rcCircles]);setArcs([...pruned.arcs,...rcArcs]);setSplines([...pruned.splines,...rcSplines])}
-        else{setLines(p=>[...p,...rcLines]);setCircles(p=>[...p,...rcCircles]);setArcs(p=>[...p,...rcArcs]);setSplines(p=>[...p,...rcSplines])}
-        resetRotateCopy();resetDrawState()
+        commitRotateCopyPlacement(angleDeg)
       }
       return
     }
@@ -7608,6 +7619,17 @@ export default function App() {
     rotateCopyLiveAngleDeg=d
   }
 
+  // Live distance/direction for the Move/Copy panel's placeholder text while
+  // dragging out the destination point.
+  let moveCopyLiveDistMm=null, moveCopyLiveAngleDeg=null
+  if (tool==='movecopy'&&moveCopyAccepted&&startPoint&&mousePos){
+    const dx=mousePos.x-startPoint.x,dy=mousePos.y-startPoint.y
+    moveCopyLiveDistMm=pxToMm(Math.hypot(dx,dy))
+    let d=Math.atan2(dy,dx)*180/Math.PI
+    if (d<0) d+=360
+    moveCopyLiveAngleDeg=d
+  }
+
   // Select-tool: real input-box panel, positioned near the current selection.
   // sketchToScreen already returns viewport-relative pixel coords (same space
   // as a position:'fixed' element), matching however the active sketch plane
@@ -7934,6 +7956,13 @@ export default function App() {
                       locked={!!startPoint}
                       selCount={moveCopySel.length} accepted={moveCopyAccepted}
                       onAccept={()=>setMoveCopyAccepted(true)}
+                      dimInput={dimInput} dimLocked={dimLocked}
+                      onChangeDim={val=>{setDimLocked(false);setDimInput(val)}}
+                      angleInput={angleInput} angleLocked={angleLocked}
+                      onChangeAngle={val=>{setAngleLocked(false);setAngleInput(val)}}
+                      onApplyLock={applyDimAngleLock}
+                      liveDistMm={moveCopyLiveDistMm}
+                      liveAngleDeg={moveCopyLiveAngleDeg}
                     />
                   )}
                   {t==='rotatecopy'&&tool==='rotatecopy'&&(
@@ -7948,7 +7977,7 @@ export default function App() {
                       onAccept={()=>setRotateCopyAccepted(true)}
                       angleInput={angleInput} angleLocked={angleLocked}
                       onChangeAngle={val=>{setAngleLocked(false);setAngleInput(val)}}
-                      onApplyAngle={()=>{ if(angleInput) setAngleLocked(true) }}
+                      onApplyLock={()=>{ if(angleInput) setAngleLocked(true) }}
                       liveAngleDeg={rotateCopyLiveAngleDeg}
                     />
                   )}
@@ -9127,7 +9156,7 @@ export default function App() {
               dimLocked={dimLocked} angleLocked={angleLocked}
               onChangeDim={v=>{setDimLocked(false);setDimInput(v)}}
               onChangeAngle={v=>{setAngleLocked(false);setAngleInput(v)}}
-              onApply={applyLineDims}
+              onApply={applyDimAngleLock}
               liveLenMm={lineLiveLenMm}
               liveAngleDeg={lineLiveAngleDeg}
             />

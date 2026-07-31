@@ -5,18 +5,44 @@
 // to move from "still picking entities" into the placement phase — selection
 // count is open-ended here (unlike Fillet's fixed 2), so some explicit
 // confirm step is unavoidable; this just makes it visible and clickable.
-import React from 'react'
+import React, { useEffect, useRef } from 'react'
 
 const stepBtnStyle={
   width:28,height:28,borderRadius:6,border:'2px solid #3a3a5a',background:'#2a2a4a',
   color:'#ccc',fontSize:16,fontWeight:'bold',cursor:'pointer',
-  display:'flex',alignItems:'center',justifyContent:'center',
+  display:'flex',alignItems:'center',justifyContent:'center',pointerEvents:'auto',
 }
 
-export default function CopyModePanel({toolColor, primaryKey, primaryLabel, primaryMode, mode, count, onSetMode, onSetCount, locked, selCount, accepted, onAccept, angleInput, angleLocked, onChangeAngle, onApplyAngle, liveAngleDeg}){
+export default function CopyModePanel({toolColor, primaryKey, primaryLabel, primaryMode, mode, count, onSetMode, onSetCount, locked, selCount, accepted, onAccept, dimInput, dimLocked, onChangeDim, angleInput, angleLocked, onChangeAngle, onApplyLock, liveDistMm, liveAngleDeg}){
   const isCopy=mode==='copy'
   const n=Math.max(1,parseInt(count)||1)
+  const showDistBox = locked && dimInput!==undefined
   const showAngleBox = locked && angleInput!==undefined
+  const canApply = (showDistBox&&dimInput&&parseFloat(dimInput)>0) || (showAngleBox&&angleInput&&parseFloat(angleInput)>=0)
+
+  const distRef = useRef(null)
+  const angleRef = useRef(null)
+
+  // Focus the first available box the moment the pivot/start point lands.
+  useEffect(()=>{ if (showDistBox) distRef.current?.focus(); else if (showAngleBox) angleRef.current?.focus() }, [locked])
+
+  // Tab cycles focus between whichever of Distance/Direction boxes are
+  // shown. The actual locking happens in the app's global keydown handler
+  // (same one the Line tool uses) — the inputs below deliberately don't
+  // stopPropagation on Tab/Escape so that handler still sees the keystroke.
+  // This capture-phase handler only moves the visible focus, same split
+  // as LineSnapPanel.jsx.
+  function handleTabCapture(e){
+    if (e.key!=='Tab') return
+    const order=[showDistBox?distRef.current:null, showAngleBox?angleRef.current:null].filter(Boolean)
+    if (order.length<2) return
+    const idx=order.indexOf(document.activeElement)
+    if (idx===-1) return
+    e.preventDefault()
+    const dir=e.shiftKey?-1:1
+    const next=(idx+dir+order.length)%order.length
+    order[next]?.focus()
+  }
 
   const dec=()=>{ if(locked||!isCopy) return; onSetCount(Math.max(1,n-1)) }
   const inc=()=>{ if(locked) return; if(!isCopy) onSetMode('copy'); else onSetCount(Math.min(100,n+1)) }
@@ -32,14 +58,20 @@ export default function CopyModePanel({toolColor, primaryKey, primaryLabel, prim
     transform:active?'scale(1.08)':'scale(1)',
     transition:'all 0.15s',
     cursor:locked?'default':'pointer',
+    pointerEvents:'auto',
   })
 
+  // pointerEvents:'none' on the outer shell lets clicks on its background/
+  // padding/labels fall through to the canvas underneath — important once
+  // angle is locked, since "click the canvas to place it" can land anywhere,
+  // including the area this panel visually covers. Each actual control
+  // below re-enables pointerEvents:'auto' so it still works normally.
   return (
-    <div style={{
+    <div onKeyDownCapture={handleTabCapture} style={{
       position:'absolute',top:'100%',left:0,marginTop:10,
       background:'#14142a',border:`3px solid ${toolColor}`,borderRadius:10,
       padding:'10px 12px',boxShadow:'0 6px 20px rgba(0,0,0,0.5)',
-      zIndex:50,width:210,fontFamily:'monospace',
+      zIndex:50,width:210,fontFamily:'monospace',pointerEvents:'none',
     }}>
       {/* pointer arrow back to the toolbar button */}
       <div style={{position:'absolute',top:-9,left:24,width:0,height:0,
@@ -57,6 +89,7 @@ export default function CopyModePanel({toolColor, primaryKey, primaryLabel, prim
               width:'100%',padding:'6px 0',borderRadius:6,border:'none',marginBottom:10,
               background:selCount>0?toolColor:'#2a2a4a',color:selCount>0?'#0d0d1a':'#666',
               fontFamily:'monospace',fontWeight:'bold',fontSize:12,cursor:selCount>0?'pointer':'default',
+              pointerEvents:'auto',
             }}>
             ✓ Done Selecting
           </button>
@@ -102,33 +135,61 @@ export default function CopyModePanel({toolColor, primaryKey, primaryLabel, prim
         )}
       </div>
 
-      {showAngleBox && (
+      {(showDistBox||showAngleBox) && (
         <>
           <div style={{height:1,background:'#2a2a4a',margin:'10px 0'}}/>
-          <div style={{textAlign:'center',color:angleLocked?'#FF9800':'#888',fontSize:9,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:6}}>
-            {angleLocked?'🔒 ':''}Angle
-          </div>
-          <div style={{display:'flex',alignItems:'center',gap:6,justifyContent:'center'}}>
-            <input
-              value={angleInput}
-              onChange={e=>{ if(/^-?[0-9.]*$/.test(e.target.value)) onChangeAngle(e.target.value) }}
-              onKeyDown={e=>{ e.stopPropagation(); if(e.key==='Enter') onApplyAngle() }}
-              placeholder={liveAngleDeg!=null?liveAngleDeg.toFixed(1):'0'}
-              style={{
-                width:70,textAlign:'center',fontFamily:'monospace',fontSize:16,fontWeight:'bold',
-                background:'#0d0d1a',color: angleLocked?'#FF9800':angleInput?'#fff':'#888',
-                border:`2px solid ${angleLocked?'#FF9800':toolColor}`,borderRadius:6,
-                padding:'6px 4px',
-              }}
-            />
-            <span style={{color:'#888',fontSize:11}}>°</span>
-          </div>
+
+          {showDistBox && (
+            <label style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:6,marginBottom:showAngleBox?8:0}}>
+              <span style={{fontSize:9,color:dimLocked?'#FF9800':'#888',fontWeight:'bold'}}>{dimLocked?'🔒 ':''}Distance</span>
+              <span style={{display:'flex',alignItems:'center',gap:4}}>
+                <input
+                  ref={distRef}
+                  value={dimInput}
+                  onChange={e=>{ if(/^[0-9.]*$/.test(e.target.value)) onChangeDim(e.target.value) }}
+                  onKeyDown={e=>{ if(e.key!=='Tab'&&e.key!=='Escape')e.stopPropagation(); if(e.key==='Enter') onApplyLock() }}
+                  placeholder={liveDistMm!=null?liveDistMm.toFixed(1):'0'}
+                  style={{
+                    width:64,textAlign:'center',fontFamily:'monospace',fontSize:14,fontWeight:'bold',
+                    background:'#0d0d1a',color: dimLocked?'#FF9800':dimInput?'#fff':'#888',
+                    border:`2px solid ${dimLocked?'#FF9800':toolColor}`,borderRadius:6,
+                    padding:'5px 4px',pointerEvents:'auto',
+                  }}
+                />
+                <span style={{color:'#888',fontSize:10}}>mm</span>
+              </span>
+            </label>
+          )}
+
+          {showAngleBox && (
+            <label style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:6}}>
+              <span style={{fontSize:9,color:angleLocked?'#FF9800':'#888',fontWeight:'bold'}}>{angleLocked?'🔒 ':''}{primaryMode==='rotate'?'Angle':'Direction'}</span>
+              <span style={{display:'flex',alignItems:'center',gap:4}}>
+                <input
+                  ref={angleRef}
+                  value={angleInput}
+                  onChange={e=>{ if(/^-?[0-9.]*$/.test(e.target.value)) onChangeAngle(e.target.value) }}
+                  onKeyDown={e=>{ if(e.key!=='Tab'&&e.key!=='Escape')e.stopPropagation(); if(e.key==='Enter') onApplyLock() }}
+                  placeholder={liveAngleDeg!=null?liveAngleDeg.toFixed(1):'0'}
+                  style={{
+                    width:64,textAlign:'center',fontFamily:'monospace',fontSize:14,fontWeight:'bold',
+                    background:'#0d0d1a',color: angleLocked?'#FF9800':angleInput?'#fff':'#888',
+                    border:`2px solid ${angleLocked?'#FF9800':toolColor}`,borderRadius:6,
+                    padding:'5px 4px',pointerEvents:'auto',
+                  }}
+                />
+                <span style={{color:'#888',fontSize:10}}>°</span>
+              </span>
+            </label>
+          )}
+
           <button
-            onClick={onApplyAngle}
+            onClick={()=>{ if(canApply) onApplyLock() }}
             style={{
               marginTop:8,width:'100%',padding:'6px 0',borderRadius:6,border:'none',
-              background:angleInput?toolColor:'#2a2a4a',color:angleInput?'#0d0d1a':'#666',
-              fontFamily:'monospace',fontWeight:'bold',fontSize:12,cursor:'pointer',
+              background:canApply?toolColor:'#2a2a4a',color:canApply?'#0d0d1a':'#666',
+              fontFamily:'monospace',fontWeight:'bold',fontSize:12,cursor:canApply?'pointer':'default',
+              pointerEvents:'auto',
             }}>
             ✓ Lock It In
           </button>

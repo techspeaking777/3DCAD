@@ -2,8 +2,10 @@
 // Lets a child see and click the Open/Closed (C) toggle, while staying in sync
 // with the same keyboard shortcut.
 import React from 'react'
+import { useDraggablePanel, DragHandle } from './useDraggablePanel.jsx'
 
 export default function SplineSnapPanel({toolColor, splineClosed, onToggleC, splinePoints}){
+  const { panelRef, panelStyle, handleProps } = useDraggablePanel()
   const keycapStyle=(active)=>({
     width:44,height:44,borderRadius:8,
     display:'flex',alignItems:'center',justifyContent:'center',
@@ -26,20 +28,18 @@ export default function SplineSnapPanel({toolColor, splineClosed, onToggleC, spl
       : '👉 Dbl-click to finish'
 
   return (
-    <div style={{
+    <div ref={panelRef} style={{
       position:'absolute',top:0,left:'100%',marginLeft:10,
       background:'#14142a',border:`3px solid ${toolColor}`,borderRadius:10,
       padding:'10px 12px',boxShadow:'0 6px 20px rgba(0,0,0,0.5)',
-      zIndex:50,width:150,fontFamily:'monospace',
+      zIndex:50,width:150,fontFamily:'monospace',...panelStyle,
     }}>
       {/* pointer arrow back to the toolbar button */}
       <div style={{position:'absolute',top:18,left:-9,width:0,height:0,
         borderTop:'8px solid transparent',borderBottom:'8px solid transparent',
         borderRight:`9px solid ${toolColor}`}}/>
 
-      <div style={{textAlign:'center',color:'#888',fontSize:9,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:8}}>
-        {label}
-      </div>
+      <DragHandle {...handleProps}>{label}</DragHandle>
 
       <div style={{display:'flex',justifyContent:'center'}}>
         <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:4}}>

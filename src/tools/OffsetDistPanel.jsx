@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { useDraggablePanel, DragHandle } from './useDraggablePanel.jsx'
 
 // Kid-friendly popover shown next to the Offset toolbar button once an entity
 // is picked. A real, visible input box for the distance — typing overrides the
@@ -7,6 +8,7 @@ import { useEffect, useRef } from 'react'
 // click on the canvas, since that click is what picks which side to offset
 // toward (the button/keyboard have no canvas position to work with).
 export default function OffsetDistPanel({ toolColor, value, onChange, liveValueMm, canApply }){
+  const { panelRef, panelStyle, handleProps } = useDraggablePanel()
   const inputRef = useRef(null)
   useEffect(()=>{ inputRef.current?.focus() }, [])
 
@@ -14,20 +16,18 @@ export default function OffsetDistPanel({ toolColor, value, onChange, liveValueM
   const displayMm = value || (liveValueMm!=null ? liveValueMm.toFixed(1) : '0.0')
 
   return (
-    <div style={{
+    <div ref={panelRef} style={{
       position:'absolute',top:0,left:'100%',marginLeft:10,
       background:'#14142a',border:`3px solid ${toolColor}`,borderRadius:10,
       padding:'10px 12px',boxShadow:'0 6px 20px rgba(0,0,0,0.5)',
-      zIndex:50,width:170,fontFamily:'monospace',
+      zIndex:50,width:170,fontFamily:'monospace',...panelStyle,
     }}>
       {/* pointer arrow back to the toolbar button */}
       <div style={{position:'absolute',top:18,left:-9,width:0,height:0,
         borderTop:'8px solid transparent',borderBottom:'8px solid transparent',
         borderRight:`9px solid ${toolColor}`}}/>
 
-      <div style={{textAlign:'center',color:'#888',fontSize:9,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:8}}>
-        Offset Distance
-      </div>
+      <DragHandle {...handleProps}>Offset Distance</DragHandle>
 
       <div style={{display:'flex',alignItems:'center',gap:6,justifyContent:'center'}}>
         <input

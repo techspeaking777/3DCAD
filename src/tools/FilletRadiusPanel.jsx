@@ -1,29 +1,29 @@
 import { useEffect, useRef } from 'react'
+import { useDraggablePanel, DragHandle } from './useDraggablePanel.jsx'
 
 // Kid-friendly popover shown next to the Fillet toolbar button once both lines
 // are picked. A real, visible input box for the radius — no blind keystrokes —
 // Enter or the Apply button rounds the corner.
 export default function FilletRadiusPanel({ toolColor, value, onChange, onApply, tooLarge }){
+  const { panelRef, panelStyle, handleProps } = useDraggablePanel()
   const inputRef = useRef(null)
   useEffect(()=>{ inputRef.current?.focus() }, [])
 
   const canApply = parseFloat(value)>0 && !tooLarge
 
   return (
-    <div style={{
+    <div ref={panelRef} style={{
       position:'absolute',top:0,left:'100%',marginLeft:10,
       background:'#14142a',border:`3px solid ${toolColor}`,borderRadius:10,
       padding:'10px 12px',boxShadow:'0 6px 20px rgba(0,0,0,0.5)',
-      zIndex:50,width:170,fontFamily:'monospace',
+      zIndex:50,width:170,fontFamily:'monospace',...panelStyle,
     }}>
       {/* pointer arrow back to the toolbar button */}
       <div style={{position:'absolute',top:18,left:-9,width:0,height:0,
         borderTop:'8px solid transparent',borderBottom:'8px solid transparent',
         borderRight:`9px solid ${toolColor}`}}/>
 
-      <div style={{textAlign:'center',color:'#888',fontSize:9,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:8}}>
-        Fillet Radius
-      </div>
+      <DragHandle {...handleProps}>Fillet Radius</DragHandle>
 
       <div style={{display:'flex',alignItems:'center',gap:6,justifyContent:'center'}}>
         <input

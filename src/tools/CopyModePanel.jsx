@@ -6,6 +6,7 @@
 // count is open-ended here (unlike Fillet's fixed 2), so some explicit
 // confirm step is unavoidable; this just makes it visible and clickable.
 import React, { useEffect, useRef } from 'react'
+import { useDraggablePanel, DragHandle } from './useDraggablePanel.jsx'
 
 const stepBtnStyle={
   width:28,height:28,borderRadius:6,border:'2px solid #3a3a5a',background:'#2a2a4a',
@@ -20,6 +21,7 @@ export default function CopyModePanel({toolColor, primaryKey, primaryLabel, prim
   const showAngleBox = locked && angleInput!==undefined
   const canApply = (showDistBox&&dimInput&&parseFloat(dimInput)>0) || (showAngleBox&&angleInput&&parseFloat(angleInput)>=0)
 
+  const { panelRef, panelStyle, handleProps } = useDraggablePanel()
   const distRef = useRef(null)
   const angleRef = useRef(null)
 
@@ -67,11 +69,11 @@ export default function CopyModePanel({toolColor, primaryKey, primaryLabel, prim
   // including the area this panel visually covers. Each actual control
   // below re-enables pointerEvents:'auto' so it still works normally.
   return (
-    <div onKeyDownCapture={handleTabCapture} style={{
+    <div ref={panelRef} onKeyDownCapture={handleTabCapture} style={{
       position:'absolute',top:'100%',left:0,marginTop:10,
       background:'#14142a',border:`3px solid ${toolColor}`,borderRadius:10,
       padding:'10px 12px',boxShadow:'0 6px 20px rgba(0,0,0,0.5)',
-      zIndex:50,width:210,fontFamily:'monospace',pointerEvents:'none',
+      zIndex:50,width:210,fontFamily:'monospace',pointerEvents:'none',...panelStyle,
     }}>
       {/* pointer arrow back to the toolbar button */}
       <div style={{position:'absolute',top:-9,left:24,width:0,height:0,
@@ -80,9 +82,7 @@ export default function CopyModePanel({toolColor, primaryKey, primaryLabel, prim
 
       {!accepted && (
         <>
-          <div style={{textAlign:'center',color:'#888',fontSize:9,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:6}}>
-            {selCount>0 ? `${selCount} Selected` : 'Click or Drag to Select'}
-          </div>
+          <DragHandle {...handleProps}>{selCount>0 ? `${selCount} Selected` : 'Click or Drag to Select'}</DragHandle>
           <button
             onClick={()=>{ if(selCount>0) onAccept() }}
             style={{
@@ -98,9 +98,7 @@ export default function CopyModePanel({toolColor, primaryKey, primaryLabel, prim
       )}
 
       <div style={{opacity:locked?0.55:1, transition:'opacity 0.15s'}}>
-        <div style={{textAlign:'center',color:'#888',fontSize:9,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:8}}>
-          {isCopy?`Making ${n} ${n===1?'Copy':'Copies'}`:`${primaryLabel} Mode`}
-        </div>
+        <DragHandle {...handleProps}>{isCopy?`Making ${n} ${n===1?'Copy':'Copies'}`:`${primaryLabel} Mode`}</DragHandle>
 
         <div style={{display:'flex',gap:10,justifyContent:'center'}}>
           <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:4}}>

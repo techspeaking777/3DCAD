@@ -5,8 +5,10 @@
 // "lock" step — clicking the canvas already both picks the anchor point and
 // applies the scale in one action, so typing + click is all that's needed.
 import { useEffect, useRef } from 'react'
+import { useDraggablePanel, DragHandle } from './useDraggablePanel.jsx'
 
 export default function ResizeScalePanel({toolColor, selCount, accepted, onAccept, scaleInput, onChangeScale}){
+  const { panelRef, panelStyle, handleProps } = useDraggablePanel()
   const inputRef = useRef(null)
   useEffect(()=>{ if (accepted) inputRef.current?.focus() }, [accepted])
 
@@ -14,11 +16,11 @@ export default function ResizeScalePanel({toolColor, selCount, accepted, onAccep
   const validScale = s>0
 
   return (
-    <div style={{
+    <div ref={panelRef} style={{
       position:'absolute',top:'100%',left:0,marginTop:10,
       background:'#14142a',border:`3px solid ${toolColor}`,borderRadius:10,
       padding:'10px 12px',boxShadow:'0 6px 20px rgba(0,0,0,0.5)',
-      zIndex:50,width:200,fontFamily:'monospace',
+      zIndex:50,width:200,fontFamily:'monospace',...panelStyle,
     }}>
       {/* pointer arrow back to the toolbar button */}
       <div style={{position:'absolute',top:-9,left:24,width:0,height:0,
@@ -27,9 +29,7 @@ export default function ResizeScalePanel({toolColor, selCount, accepted, onAccep
 
       {!accepted && (
         <>
-          <div style={{textAlign:'center',color:'#888',fontSize:9,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:6}}>
-            {selCount>0 ? `${selCount} Selected` : 'Click or Drag to Select'}
-          </div>
+          <DragHandle {...handleProps}>{selCount>0 ? `${selCount} Selected` : 'Click or Drag to Select'}</DragHandle>
           <button
             onClick={()=>{ if(selCount>0) onAccept() }}
             style={{
@@ -47,9 +47,7 @@ export default function ResizeScalePanel({toolColor, selCount, accepted, onAccep
 
       {accepted && (
         <>
-          <div style={{textAlign:'center',color:'#888',fontSize:9,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:6}}>
-            Scale Factor
-          </div>
+          <DragHandle {...handleProps}>Scale Factor</DragHandle>
           <div style={{display:'flex',alignItems:'center',gap:6,justifyContent:'center'}}>
             <input
               ref={inputRef}

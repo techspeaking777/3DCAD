@@ -4,13 +4,16 @@
 // reasoning as Move/Copy and Scale — selection count is open-ended). Unlike
 // those two, there's nothing to type here: once accepted, you just click two
 // points to draw the mirror axis, so no input box is needed.
+import { useDraggablePanel, DragHandle } from './useDraggablePanel.jsx'
+
 export default function MirrorPanel({toolColor, selCount, accepted, onAccept, hasAxisStart}){
+  const { panelRef, panelStyle, handleProps } = useDraggablePanel()
   return (
-    <div style={{
+    <div ref={panelRef} style={{
       position:'absolute',top:'100%',left:0,marginTop:10,
       background:'#14142a',border:`3px solid ${toolColor}`,borderRadius:10,
       padding:'10px 12px',boxShadow:'0 6px 20px rgba(0,0,0,0.5)',
-      zIndex:50,width:200,fontFamily:'monospace',
+      zIndex:50,width:200,fontFamily:'monospace',...panelStyle,
     }}>
       {/* pointer arrow back to the toolbar button */}
       <div style={{position:'absolute',top:-9,left:24,width:0,height:0,
@@ -19,9 +22,7 @@ export default function MirrorPanel({toolColor, selCount, accepted, onAccept, ha
 
       {!accepted && (
         <>
-          <div style={{textAlign:'center',color:'#888',fontSize:9,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:6}}>
-            {selCount>0 ? `${selCount} Selected` : 'Click or Drag to Select'}
-          </div>
+          <DragHandle {...handleProps}>{selCount>0 ? `${selCount} Selected` : 'Click or Drag to Select'}</DragHandle>
           <button
             onClick={()=>{ if(selCount>0) onAccept() }}
             style={{
@@ -39,9 +40,7 @@ export default function MirrorPanel({toolColor, selCount, accepted, onAccept, ha
 
       {accepted && (
         <>
-          <div style={{textAlign:'center',color:'#888',fontSize:9,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:6}}>
-            Mirror Line
-          </div>
+          <DragHandle {...handleProps}>Mirror Line</DragHandle>
           <div style={{textAlign:'center',fontSize:11,color:toolColor,fontWeight:'bold'}}>
             {hasAxisStart ? 'Click the 2nd point' : 'Click the 1st point'}
           </div>

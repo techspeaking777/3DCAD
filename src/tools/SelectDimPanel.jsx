@@ -5,17 +5,19 @@
 // Tab-cycle-then-type flow. The 3x3 anchor-dot grid (which corner/edge/centre
 // stays put while resizing) is still drawn on the canvas itself and is
 // unchanged by this panel — click a dot there, then type/Apply here.
+import { useDraggablePanel, DragHandle } from './useDraggablePanel.jsx'
+
 export default function SelectDimPanel({style, toolColor, fields, pending, liveValues, onChangeField, onApply}){
+  const { panelRef, panelStyle, handleProps } = useDraggablePanel()
   return (
-    <div style={{
+    <div ref={panelRef} style={{
       ...style,
       background:'#14142a',border:`3px solid ${toolColor}`,borderRadius:10,
       padding:'10px 12px',boxShadow:'0 6px 20px rgba(0,0,0,0.5)',
       zIndex:60,width:170,fontFamily:'monospace',
+      transform:`${style?.transform||''} ${panelStyle.transform}`,
     }}>
-      <div style={{textAlign:'center',color:'#888',fontSize:9,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:8}}>
-        Edit
-      </div>
+      <DragHandle {...handleProps}>Edit</DragHandle>
       <div style={{display:'flex',flexDirection:'column',gap:6}}>
         {fields.map(f=>(
           <label key={f.key} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:6}}>

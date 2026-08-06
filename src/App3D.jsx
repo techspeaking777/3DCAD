@@ -2422,8 +2422,8 @@ export default function App() {
         const y0=Math.floor(yMin/gridPx)*gridPx
         {
           ctx.save()
-          ctx.fillStyle = '#c4c4cc'
-          const r = 1.4/sc
+          ctx.fillStyle = 'rgba(196,196,204,0.35)'
+          const r = 0.9/sc
           for (let x=x0; x<=xMax; x+=gridPx) {
             for (let y=y0; y<=yMax; y+=gridPx) {
               ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill()

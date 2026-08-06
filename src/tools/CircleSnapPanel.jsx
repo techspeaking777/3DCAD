@@ -4,11 +4,13 @@
 // a real Radius input box appears. Typing + Lock It In only sets that value —
 // placing the actual circle still requires a click on the canvas.
 import { useEffect, useRef } from 'react'
+import { useDraggablePanel, DragHandle } from './useDraggablePanel.jsx'
 
 export default function CircleSnapPanel({
   toolColor, tKeyDown, onToggleT, circleTanA, circleTanB,
   circleCenter, dimInput, dimLocked, onChangeDim, onApply, liveRadiusMm,
 }){
+  const { panelRef, panelStyle, handleProps } = useDraggablePanel()
   const dimRef = useRef(null)
   const drawing = !!circleCenter || (!!circleTanA && !!circleTanB)
 
@@ -39,20 +41,18 @@ export default function CircleSnapPanel({
   const canApply = dimInput&&parseFloat(dimInput)>0
 
   return (
-    <div style={{
+    <div ref={panelRef} style={{
       position:'absolute',top:0,left:'100%',marginLeft:10,
       background:'#14142a',border:`3px solid ${toolColor}`,borderRadius:10,
       padding:'10px 12px',boxShadow:'0 6px 20px rgba(0,0,0,0.5)',
-      zIndex:50,width:150,fontFamily:'monospace',
+      zIndex:50,width:150,fontFamily:'monospace',...panelStyle,
     }}>
       {/* pointer arrow back to the toolbar button */}
       <div style={{position:'absolute',top:18,left:-9,width:0,height:0,
         borderTop:'8px solid transparent',borderBottom:'8px solid transparent',
         borderRight:`9px solid ${toolColor}`}}/>
 
-      <div style={{textAlign:'center',color:'#888',fontSize:9,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:8}}>
-        {label}
-      </div>
+      <DragHandle {...handleProps}>{label}</DragHandle>
 
       <div style={{display:'flex',justifyContent:'center'}}>
         <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:4}}>

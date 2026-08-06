@@ -81,21 +81,27 @@ export function computeOffsetPreview(entity, kind, distPx, mouse) {
     const nx = -dy / len * side, ny = dx / len * side
     return { kind: 'line', x1: x1 + nx * distPx, y1: y1 + ny * distPx,
                            x2: x2 + nx * distPx, y2: y2 + ny * distPx,
-                           ...(entity.style?{style:entity.style}:{}) }
+                           // Construction geometry (e.g. an Include Edge reference line)
+                           // deliberately does NOT carry over — offsetting it is exactly
+                           // how you turn reference geometry into a real, extrudable
+                           // profile line, and detectProfiles ignores construction-style
+                           // entities entirely (see extrudeMath.js), so inheriting it here
+                           // would silently make the offset result un-extrudable.
+                           ...(entity.style&&entity.style!=='construction'?{style:entity.style}:{}) }
   }
 
   if (kind === 'circle') {
     const { cx, cy, r } = entity
     const side = Math.hypot(mouse.x - cx, mouse.y - cy) > r ? 1 : -1
     const newR = Math.max(1, r + side * distPx)
-    return { kind: 'circle', cx, cy, r: newR, ...(entity.style?{style:entity.style}:{}) }
+    return { kind: 'circle', cx, cy, r: newR, ...(entity.style&&entity.style!=='construction'?{style:entity.style}:{}) }
   }
 
   if (kind === 'arc') {
     const { cx, cy, r, startAngle, endAngle } = entity
     const side = Math.hypot(mouse.x - cx, mouse.y - cy) > r ? 1 : -1
     const newR = Math.max(1, r + side * distPx)
-    return { kind: 'arc', cx, cy, r: newR, startAngle, endAngle, ...(entity.style?{style:entity.style}:{}) }
+    return { kind: 'arc', cx, cy, r: newR, startAngle, endAngle, ...(entity.style&&entity.style!=='construction'?{style:entity.style}:{}) }
   }
 
   if (kind === 'spline') {

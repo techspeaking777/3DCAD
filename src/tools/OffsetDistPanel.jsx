@@ -35,7 +35,7 @@ export default function OffsetDistPanel({ toolColor, value, onChange, liveValueM
           value={value}
           onChange={e=>{ if(/^[0-9.]*$/.test(e.target.value)) onChange(e.target.value) }}
           onKeyDown={e=>{
-            if (e.key!=='Escape') e.stopPropagation()
+            if (e.key!=='Escape'&&!e.ctrlKey&&!e.metaKey) e.stopPropagation()
             if (e.key==='Enter') e.target.blur()
           }}
           placeholder={showingLive?displayMm:'0'}

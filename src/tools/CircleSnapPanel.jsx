@@ -72,7 +72,7 @@ export default function CircleSnapPanel({
               ref={dimRef}
               value={dimInput}
               onChange={e=>{ if(/^[0-9.]*$/.test(e.target.value)) onChangeDim(e.target.value) }}
-              onKeyDown={e=>{ if(e.key!=='Tab'&&e.key!=='Escape')e.stopPropagation(); if(e.key==='Enter') e.target.blur() }}
+              onKeyDown={e=>{ if(e.key!=='Tab'&&e.key!=='Escape'&&!e.ctrlKey&&!e.metaKey)e.stopPropagation(); if(e.key==='Enter') e.target.blur() }}
               placeholder={liveRadiusMm!=null?liveRadiusMm.toFixed(1):'0'}
               style={{
                 width:70,textAlign:'center',fontFamily:'monospace',fontSize:16,fontWeight:'bold',

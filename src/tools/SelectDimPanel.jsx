@@ -26,7 +26,7 @@ export default function SelectDimPanel({style, toolColor, fields, pending, liveV
               <input
                 value={pending[f.key]||''}
                 onChange={e=>{ if(/^[0-9.]*$/.test(e.target.value)) onChangeField(f.key,e.target.value) }}
-                onKeyDown={e=>{ if(e.key!=='Escape')e.stopPropagation(); if(e.key==='Enter') onApply() }}
+                onKeyDown={e=>{ if(e.key!=='Escape'&&!e.ctrlKey&&!e.metaKey)e.stopPropagation(); if(e.key==='Enter') onApply() }}
                 placeholder={liveValues&&liveValues[f.key]!=null?liveValues[f.key].toFixed(2):'0'}
                 style={{
                   width:60,textAlign:'center',fontFamily:'monospace',fontSize:14,fontWeight:'bold',

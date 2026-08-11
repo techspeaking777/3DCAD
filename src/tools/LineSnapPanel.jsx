@@ -114,7 +114,7 @@ export default function LineSnapPanel({
                   ref={dimRef}
                   value={dimInput}
                   onChange={e=>{ if(/^[0-9.]*$/.test(e.target.value)) onChangeDim(e.target.value) }}
-                  onKeyDown={e=>{ if(e.key!=='Tab'&&e.key!=='Escape')e.stopPropagation(); if(e.key==='Enter') e.target.blur() }}
+                  onKeyDown={e=>{ if(e.key!=='Tab'&&e.key!=='Escape'&&!e.ctrlKey&&!e.metaKey)e.stopPropagation(); if(e.key==='Enter') e.target.blur() }}
                   placeholder={liveLenMm!=null?liveLenMm.toFixed(1):'0'}
                   style={fieldStyle(dimLocked)}
                 />
@@ -129,7 +129,7 @@ export default function LineSnapPanel({
                     ref={angleRef}
                     value={angleInput}
                     onChange={e=>{ if(/^[0-9.]*$/.test(e.target.value)) onChangeAngle(e.target.value) }}
-                    onKeyDown={e=>{ if(e.key!=='Tab'&&e.key!=='Escape')e.stopPropagation(); if(e.key==='Enter') e.target.blur() }}
+                    onKeyDown={e=>{ if(e.key!=='Tab'&&e.key!=='Escape'&&!e.ctrlKey&&!e.metaKey)e.stopPropagation(); if(e.key==='Enter') e.target.blur() }}
                     placeholder={liveAngleDeg!=null?liveAngleDeg.toFixed(1):'0'}
                     style={fieldStyle(angleLocked)}
                   />

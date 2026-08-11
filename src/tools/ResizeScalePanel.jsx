@@ -53,7 +53,7 @@ export default function ResizeScalePanel({toolColor, selCount, accepted, onAccep
               ref={inputRef}
               value={scaleInput}
               onChange={e=>{ if(/^[0-9.]*$/.test(e.target.value)) onChangeScale(e.target.value) }}
-              onKeyDown={e=>{ if(e.key!=='Escape')e.stopPropagation(); if(e.key==='Enter') e.target.blur() }}
+              onKeyDown={e=>{ if(e.key!=='Escape'&&!e.ctrlKey&&!e.metaKey)e.stopPropagation(); if(e.key==='Enter') e.target.blur() }}
               placeholder="1"
               style={{
                 width:70,textAlign:'center',fontFamily:'monospace',fontSize:16,fontWeight:'bold',

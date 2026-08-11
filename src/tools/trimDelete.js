@@ -39,7 +39,11 @@ export function computeTrimPreview(mouse,lines,circles,arcs,splines=[]) {
   if (target.kind==='line') {
     const l=lines[target.idx]
     const pts=lineIntersections(target.idx,lines,circles,arcs,splines)
-    if (!pts.length) return null
+    // No crossings anywhere on this line (common once a segment has already
+    // been trimmed down to a piece bounded tightly by its neighbors, with
+    // nothing left crossing through it) — trim removes the whole piece,
+    // same as Delete, instead of silently doing nothing.
+    if (!pts.length) return {kind:'line',idx:target.idx,hx1:l.x1,hy1:l.y1,hx2:l.x2,hy2:l.y2,tStart:0,tEnd:1}
     const t=tOnSeg(mouse.x,mouse.y,l.x1,l.y1,l.x2,l.y2),tv=[0,...pts.map(p=>p.t),1]
     let tS=0,tE=1
     for (let i=0;i<tv.length-1;i++){if(t>=tv[i]-1e-8&&t<=tv[i+1]+1e-8){tS=tv[i];tE=tv[i+1];break}}
@@ -56,7 +60,11 @@ export function computeTrimPreview(mouse,lines,circles,arcs,splines=[]) {
   }
   if (target.kind==='arc') {
     const arc=arcs[target.idx],intAngles=arcIntersectionAngles(target.idx,lines,circles,arcs,splines)
-    if (!intAngles.length) return null
+    // No crossings within this arc's current span (the common case once a
+    // circle has already been trimmed into several small pieces — each
+    // remaining piece is already bounded tightly by its neighbors) — trim
+    // removes the whole piece, same as Delete, instead of doing nothing.
+    if (!intAngles.length) return {kind:'arc',idx:target.idx,cx:arc.cx,cy:arc.cy,r:arc.r,arcStart:norm2pi(arc.startAngle),arcEnd:norm2pi(arc.endAngle)}
     const splitAngles=[norm2pi(arc.startAngle),...intAngles,norm2pi(arc.endAngle)].sort((a,b)=>a-b)
     const θ=norm2pi(Math.atan2(mouse.y-arc.cy,mouse.x-arc.cx))
     let arcS=splitAngles[0],arcE=splitAngles[1]

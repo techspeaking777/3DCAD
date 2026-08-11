@@ -145,7 +145,7 @@ export default function CopyModePanel({toolColor, primaryKey, primaryLabel, prim
                   ref={distRef}
                   value={dimInput}
                   onChange={e=>{ if(/^[0-9.]*$/.test(e.target.value)) onChangeDim(e.target.value) }}
-                  onKeyDown={e=>{ if(e.key!=='Tab'&&e.key!=='Escape')e.stopPropagation(); if(e.key==='Enter') onApplyLock() }}
+                  onKeyDown={e=>{ if(e.key!=='Tab'&&e.key!=='Escape'&&!e.ctrlKey&&!e.metaKey)e.stopPropagation(); if(e.key==='Enter') onApplyLock() }}
                   placeholder={liveDistMm!=null?liveDistMm.toFixed(1):'0'}
                   style={{
                     width:64,textAlign:'center',fontFamily:'monospace',fontSize:14,fontWeight:'bold',
@@ -167,7 +167,7 @@ export default function CopyModePanel({toolColor, primaryKey, primaryLabel, prim
                   ref={angleRef}
                   value={angleInput}
                   onChange={e=>{ if(/^-?[0-9.]*$/.test(e.target.value)) onChangeAngle(e.target.value) }}
-                  onKeyDown={e=>{ if(e.key!=='Tab'&&e.key!=='Escape')e.stopPropagation(); if(e.key==='Enter') onApplyLock() }}
+                  onKeyDown={e=>{ if(e.key!=='Tab'&&e.key!=='Escape'&&!e.ctrlKey&&!e.metaKey)e.stopPropagation(); if(e.key==='Enter') onApplyLock() }}
                   placeholder={liveAngleDeg!=null?liveAngleDeg.toFixed(1):'0'}
                   style={{
                     width:64,textAlign:'center',fontFamily:'monospace',fontSize:14,fontWeight:'bold',

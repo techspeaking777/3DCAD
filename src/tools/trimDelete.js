@@ -65,7 +65,19 @@ export function computeTrimPreview(mouse,lines,circles,arcs,splines=[]) {
     // remaining piece is already bounded tightly by its neighbors) — trim
     // removes the whole piece, same as Delete, instead of doing nothing.
     if (!intAngles.length) return {kind:'arc',idx:target.idx,cx:arc.cx,cy:arc.cy,r:arc.r,arcStart:norm2pi(arc.startAngle),arcEnd:norm2pi(arc.endAngle)}
-    const splitAngles=[norm2pi(arc.startAngle),...intAngles,norm2pi(arc.endAngle)].sort((a,b)=>a-b)
+    // Order split points by how far they are along the arc's own direction of
+    // travel (measured from its start angle), not by raw angle — a plain
+    // numeric sort has no notion of which way the arc runs, so it silently
+    // breaks for any remaining piece whose span straddles the 0°/2π wrap
+    // boundary (very common right around the "3 o'clock" point): the true
+    // wrap-around sub-piece never gets tested as a candidate pair, so the
+    // split falls back to the wrong (often much larger) default piece.
+    const start=norm2pi(arc.startAngle)
+    const travelOf=a=>norm2pi(a-start)
+    const totalTravel=travelOf(arc.endAngle)||2*Math.PI
+    const splitAngles=[0,...intAngles.map(travelOf),totalTravel]
+      .sort((a,b)=>a-b)
+      .map(t=>norm2pi(start+t))
     const θ=norm2pi(Math.atan2(mouse.y-arc.cy,mouse.x-arc.cx))
     let arcS=splitAngles[0],arcE=splitAngles[1]
     for (let i=0;i<splitAngles.length-1;i++){if(angleOnArc(θ,splitAngles[i],splitAngles[i+1])){arcS=splitAngles[i];arcE=splitAngles[i+1];break}}

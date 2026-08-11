@@ -243,6 +243,63 @@ export function faceBoundarySegments(hit, normal) {
   return segments
 }
 
+/**
+ * Boundary segments for just the ONE face at `hit.point` — its outer loop
+ * plus any of its own holes — not every coplanar loop on the mesh the way
+ * faceBoundarySegments deliberately does (that one's built for the sketch
+ * bottom-edge preview, where merging every coplanar loop together doesn't
+ * matter). Used for the Export Face DXF hover/selection highlight, where
+ * distinguishing "this one letter" from "every letter on this plane"
+ * is the whole point. Point-in-polygon in the face's own (u,v) plane:
+ * whichever loop contains the hit point is the outer boundary; any other
+ * loop whose centroid falls inside that outer loop is one of its holes.
+ */
+export function facePickBoundaryLoops(hit, normal) {
+  const loops = extractFaceBoundaryLoops3D(hit, normal)
+  if (!loops.length) return []
+
+  const refAxis = Math.abs(normal.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1)
+  const uAxis = refAxis.clone().addScaledVector(normal, -refAxis.dot(normal)).normalize()
+  const vAxis = new THREE.Vector3().crossVectors(normal, uAxis).normalize()
+  const to2D = p => {
+    const rel = p.clone().sub(hit.point)
+    return { x: rel.dot(uAxis), y: rel.dot(vAxis) }
+  }
+  const polys = loops.map(loop => loop.map(to2D))
+  const centroidOf = poly => ({
+    x: poly.reduce((s, p) => s + p.x, 0) / poly.length,
+    y: poly.reduce((s, p) => s + p.y, 0) / poly.length,
+  })
+
+  function pointInPoly(pt, poly) {
+    let inside = false
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y
+      const crosses = (yi > pt.y) !== (yj > pt.y)
+      if (crosses && pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi) inside = !inside
+    }
+    return inside
+  }
+
+  let outerIdx = polys.findIndex(poly => pointInPoly({ x: 0, y: 0 }, poly))
+  if (outerIdx === -1) {
+    // Fallback for a degenerate/edge-case click — nearest loop by centroid.
+    let best = 0, bestD = Infinity
+    polys.forEach((poly, i) => {
+      const c = centroidOf(poly), d = Math.hypot(c.x, c.y)
+      if (d < bestD) { bestD = d; best = i }
+    })
+    outerIdx = best
+  }
+  const outerPoly = polys[outerIdx]
+  const result = [loops[outerIdx]]
+  polys.forEach((poly, i) => {
+    if (i === outerIdx) return
+    if (pointInPoly(centroidOf(poly), outerPoly)) result.push(loops[i])
+  })
+  return result
+}
+
 /** Closest point on segment a→b to point p, in 3D. Returns {point, distSq}. */
 function closestPointOnSegment3D(p, a, b) {
   const ab = b.clone().sub(a)

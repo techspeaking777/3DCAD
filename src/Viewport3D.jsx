@@ -35,7 +35,7 @@ import { LineGeometry } from 'three/addons/lines/LineGeometry.js'
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
 import { createWorkPlanes, hitTestPlanes, setPlaneHover, setPlaneActive, setWorkPlanesVisible } from './WorkPlanes.js'
 import { SKETCH_PLANES } from './SketchPlane.js'
-import { faceHitToPlane, previewBottomEdge, faceBoundarySegments } from './FacePlane.js'
+import { faceHitToPlane, previewBottomEdge, faceBoundarySegments, facePickBoundaryLoops } from './FacePlane.js'
 import { mmToPx } from './constants.js'
 
 // Averages the 3 vertex normals of a hovered face's hit triangle, world-space —
@@ -364,6 +364,9 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     // starting a sketch — swaps the hover label and skips the bottom-edge
     // preview line, which previews sketch orientation and has no meaning here.
     dxfPickMode = false,
+    // [{solidId, point:{x,y,z}, normal:{x,y,z}}] — faces already picked for
+    // Export Face DXF's multi-select, drawn as a persistent yellow outline.
+    dxfSelectedFaces = [],
     extrudeArmed   = false,  // true once a profile is picked (Phase 2/3) — see extrudeArmedRef
     showWorkPlanes = true,
     activePlane    = null,
@@ -385,6 +388,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   const hoveredFaceRef   = useRef(null)  // { mesh, origMat }
   const sketchArmedRef   = useRef(false)
   const dxfPickModeRef   = useRef(false)
+  const dxfSelectedFacesRef = useRef([])
   // Extrude/cutout Phase 2/3 (a profile is picked, awaiting the commit
   // click) — see the work-plane hover/click gates below for why this is
   // tracked separately from sketchArmedRef (that one also covers the
@@ -589,19 +593,53 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       // below turns it back on — guarantees it never lingers from a stale
       // frame no matter which branch below runs (or doesn't).
       facePlaneIndicator.visible = false
-      if (oc && hf?.hit && !inSketchMode) {
+      if (oc && sketchArmedRef.current && !inSketchMode) {
         const ctx2 = oc.getContext('2d')
         ctx2.setTransform(1,0,0,1,0,0)
-        if (sketchArmedRef.current) {
-          ctx2.clearRect(0,0,oc.width,oc.height)
+        ctx2.clearRect(0,0,oc.width,oc.height)
+        const rect2 = mountRef.current?.getBoundingClientRect()
+        const W = rect2?.width || oc.width
+        const H = rect2?.height || oc.height
+        const cam = stateRef.current.camera
+        const toScreenWorld = v => {
+          const p = v.clone().project(cam)
+          return { x:(p.x+1)/2*W, y:(-p.y+1)/2*H }
+        }
+        const strokeLoops = (loops, color, width) => {
+          ctx2.save(); ctx2.strokeStyle = color; ctx2.lineWidth = width; ctx2.lineCap = 'round'
+          for (const loop of loops) {
+            for (let i=0; i<loop.length-1; i++) {
+              const p1 = toScreenWorld(loop[i]), p2 = toScreenWorld(loop[i+1])
+              ctx2.beginPath(); ctx2.moveTo(p1.x, p1.y); ctx2.lineTo(p2.x, p2.y); ctx2.stroke()
+            }
+          }
+          ctx2.restore()
+        }
+
+        // Persistent yellow outline for every already-picked Export Face DXF
+        // face — drawn every frame regardless of hover, so it doesn't vanish
+        // the moment the cursor moves off it. facePickBoundaryLoops scopes to
+        // just this one face's own outer loop + holes, not every coplanar
+        // loop on the mesh (that's faceBoundarySegments below, deliberately
+        // broader for the sketch bottom-edge preview) — otherwise selecting
+        // one letter would highlight every letter on the same flat surface.
+        if (dxfPickModeRef.current && dxfSelectedFacesRef.current.length) {
+          const s = stateRef.current
+          for (const sel of dxfSelectedFacesRef.current) {
+            const group = s.solidsGroup?.children.find(g => g.userData?.solidId === sel.solidId)
+            const mesh = group?.children.find(c => c.isMesh && !c.userData?.isSolidEdge)
+            if (!mesh) continue
+            const pt = new THREE.Vector3(sel.point.x, sel.point.y, sel.point.z)
+            const nrm = new THREE.Vector3(sel.normal.x, sel.normal.y, sel.normal.z)
+            strokeLoops(facePickBoundaryLoops({ object: mesh, point: pt }, nrm), '#FFD54F', 3)
+          }
+        }
+
+        if (hf?.hit) {
           const geo = hf.mesh.geometry
           const face = hf.hit.face
           if (face && geo.attributes.position) {
             const faceNormal = getHoveredFaceNormal(hf)
-            const rect2 = mountRef.current?.getBoundingClientRect()
-            const W = rect2?.width || oc.width
-            const H = rect2?.height || oc.height
-            const cam = stateRef.current.camera
 
             // Position/orient the generic square indicator on the hovered
             // face — a cheap local basis from the normal alone (not the real
@@ -613,10 +651,6 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
               ? new THREE.Vector3(1,0,0) : new THREE.Vector3(0,0,1)
             const uAxis = refAxis.clone().addScaledVector(faceNormal, -refAxis.dot(faceNormal)).normalize()
             const vAxis = new THREE.Vector3().crossVectors(faceNormal, uAxis).normalize()
-            facePlaneIndicator.position.copy(hf.hit.point).addScaledVector(faceNormal, 0.5)
-            facePlaneIndicator.quaternion.setFromRotationMatrix(
-              new THREE.Matrix4().makeBasis(uAxis, vAxis, faceNormal))
-            facePlaneIndicator.visible = true
 
             // If Tab-cycling (cycleFaceBottomEdge) picked an edge, that overrides
             // the cursor-nearest one — but only while still on the same face; a
@@ -627,14 +661,21 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
               tabEdgeIndexRef.current = null
             }
 
-            // Preview which boundary edge is nearest the cursor right now (or,
-            // if Tab-cycled, whichever edge that selected) — this is the edge
-            // that will become the sketch's bottom/horizontal reference if the
-            // face is clicked now (see FacePlane.js's faceHitToPlane, which
-            // picks the same edge — or honors the same override — at click time).
-            // Meaningless for a flat DXF export (no sketch orientation involved),
-            // so skip it in dxfPickMode.
-            if (!dxfPickModeRef.current) {
+            if (dxfPickModeRef.current) {
+              // Trace just this one face's own boundary in blue — "this is
+              // what clicking adds" — instead of the generic square.
+              strokeLoops(facePickBoundaryLoops({ object: hf.mesh, point: hf.hit.point }, faceNormal), '#4FC3F7', 3)
+            } else {
+              facePlaneIndicator.position.copy(hf.hit.point).addScaledVector(faceNormal, 0.5)
+              facePlaneIndicator.quaternion.setFromRotationMatrix(
+                new THREE.Matrix4().makeBasis(uAxis, vAxis, faceNormal))
+              facePlaneIndicator.visible = true
+
+              // Preview which boundary edge is nearest the cursor right now (or,
+              // if Tab-cycled, whichever edge that selected) — this is the edge
+              // that will become the sketch's bottom/horizontal reference if the
+              // face is clicked now (see FacePlane.js's faceHitToPlane, which
+              // picks the same edge — or honors the same override — at click time).
               let bottomEdge
               if (tabEdgeIndexRef.current !== null) {
                 const segs = faceBoundarySegments({ object: hf.mesh, point: hf.hit.point }, faceNormal)
@@ -643,10 +684,6 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
                 bottomEdge = previewBottomEdge({ object: hf.mesh, point: hf.hit.point }, faceNormal)
               }
               if (bottomEdge) {
-                const toScreenWorld = v => {
-                  const p = v.clone().project(cam)
-                  return { x:(p.x+1)/2*W, y:(-p.y+1)/2*H }
-                }
                 const bp1 = toScreenWorld(bottomEdge.a)
                 const bp2 = toScreenWorld(bottomEdge.b)
                 ctx2.beginPath()
@@ -671,11 +708,6 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
             ctx2.restore()
           }
         }
-      } else if (oc && sketchArmedRef.current && !hf && !inSketchMode) {
-        // Clear face highlight when not hovering
-        const ctx2 = oc.getContext('2d')
-        ctx2.setTransform(1,0,0,1,0,0)
-        ctx2.clearRect(0,0,oc.width,oc.height)
       }
 
       // ── Fillet tool: highlight selected edges (orange) + hovered edge (yellow) ──
@@ -986,6 +1018,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     if (!sketchArmed) tabEdgeIndexRef.current = null
   }, [sketchArmed])
   useEffect(() => { dxfPickModeRef.current = dxfPickMode }, [dxfPickMode])
+  useEffect(() => { dxfSelectedFacesRef.current = dxfSelectedFaces }, [dxfSelectedFaces])
   useEffect(() => { extrudeArmedRef.current = extrudeArmed }, [extrudeArmed])
   useEffect(() => {
     filletActiveRef.current = filletActive

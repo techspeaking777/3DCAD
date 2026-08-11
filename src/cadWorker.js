@@ -120,64 +120,85 @@ self.onmessage = async function(e) {
     }
 
     if (type==='exportFaceDXF') {
-      // Reads the picked face's REAL OCC topology (outerWire + every
+      // Reads each picked face's REAL OCC topology (outerWire + every
       // innerWire/hole) instead of reconstructing geometry from the
       // tessellated render mesh — exact curves, and holes come along for
       // free since OCC already separates them from the outer boundary
       // (unlike the render-mesh-based "Include From Face" tool, which has to
       // reverse-engineer circles/arcs from boundary-edge chains and can miss
       // internal loops).
-      let base = shapeStore.get(params.solidId)
-      if (!base) {
-        if (!params.base) throw new Error('exportFaceDXF-MISS: base not in store and no fallback params')
-        base = buildBase(params.base)
+      //
+      // App3D.jsx lets the student click multiple faces before exporting
+      // (e.g. every letter of a sign) rather than this worker guessing which
+      // OTHER faces "belong together" — an earlier auto-coplanar-detection
+      // pass here kept missing real letters because no fixed tolerance
+      // reliably separated "same surface, floating-point noise" from "a
+      // genuinely different, nearby surface" once text was built from
+      // separate features/boolean joins. Manual pick has no tolerance to get
+      // wrong. Each pick carries its OWN solidId rather than assuming one
+      // shared solid — a base plate and its lettering are very often
+      // separate, never-joined solids, not one fused body.
+      const picks = params.picks || [{ solidId: params.solidId, point: params.point }]
+      const baseCache = new Map()
+      const getBase = solidId => {
+        if (baseCache.has(solidId)) return baseCache.get(solidId)
+        const base = shapeStore.get(solidId)
+        if (!base) throw new Error(`exportFaceDXF-MISS: solid ${solidId} not in store`)
+        baseCache.set(solidId, base)
+        return base
       }
-      const face = new FaceFinder().withinDistance(EDGE_PICK_TOL, params.point).find(base, { unique: true })
-      const normal = face.normalAt()
-      // Stable local (u,v) frame for a flat projection — Gram-Schmidt a world
-      // axis against the normal. No "which edge is bottom" concern the way
-      // FacePlane.js's sketch-orientation logic has (see faceHitToPlane's own
-      // fallback branch, same technique) — a flat DXF export just needs ANY
-      // consistent frame, not a user-meaningful orientation.
+      const faces = picks.map(({ solidId, point }) =>
+        new FaceFinder().withinDistance(EDGE_PICK_TOL, point).find(getBase(solidId), { unique: true }))
+      const normal = faces[0].normalAt()
+      // Stable local (u,v) frame for a flat projection, anchored on the
+      // FIRST picked face — Gram-Schmidt a world axis against the normal. No
+      // "which edge is bottom" concern the way FacePlane.js's sketch-
+      // orientation logic has (see faceHitToPlane's own fallback branch,
+      // same technique) — a flat DXF export just needs ANY consistent
+      // frame, not a user-meaningful orientation. Every other picked face
+      // projects into this SAME frame so multiple letters land correctly
+      // positioned relative to each other in the one output drawing.
       const refAxis = Math.abs(normal.x) < 0.9 ? new Vector([1, 0, 0]) : new Vector([0, 0, 1])
       const uAxis = refAxis.sub(normal.multiply(refAxis.dot(normal))).normalize()
       const vAxis = normal.cross(uAxis).normalize()
-      const origin = face.center
+      const origin = faces[0].center
       const project = v => { const rel = v.sub(origin); return { x: rel.dot(uAxis), y: rel.dot(vAxis) } }
 
       const lines = [], circles = [], arcs = []
-      // face.outerWire()/innerWires() each DELETE their receiver as a side
-      // effect (replicad's "consuming" idiom — see Face.outerWire()/
-      // innerWires() in replicad.js), so calling both directly on the same
-      // `face` would use-after-delete on the second call. Clone for the
-      // outer-wire call so the original `face` survives for innerWires().
-      const wires = [face.clone().outerWire(), ...face.innerWires()]
-      for (const wire of wires) {
-        for (const edge of wire.edges) {
-          if (edge.geomType === 'CIRCLE') {
-            // No convenience center/radius getter on Edge/Curve — drop to the
-            // raw OCC circle adaptor, same "replicad doesn't cover this, use
-            // .wrapped directly" pattern already used throughout this file.
-            const circ = edge.curve.wrapped.Circle()
-            const loc = circ.Location()
-            const center = project(new Vector([loc.X(), loc.Y(), loc.Z()]))
-            const r = circ.Radius()
-            if (edge.isClosed) {
-              circles.push({ cx: center.x, cy: center.y, r })
+      for (const f of faces) {
+        // face.outerWire()/innerWires() each DELETE their receiver as a side
+        // effect (replicad's "consuming" idiom — see Face.outerWire()/
+        // innerWires() in replicad.js), so calling both directly on the same
+        // face would use-after-delete on the second call. Clone for the
+        // outer-wire call so the original survives for innerWires().
+        const wires = [f.clone().outerWire(), ...f.innerWires()]
+        for (const wire of wires) {
+          for (const edge of wire.edges) {
+            if (edge.geomType === 'CIRCLE') {
+              // No convenience center/radius getter on Edge/Curve — drop to the
+              // raw OCC circle adaptor, same "replicad doesn't cover this, use
+              // .wrapped directly" pattern already used throughout this file.
+              const circ = edge.curve.wrapped.Circle()
+              const loc = circ.Location()
+              const center = project(new Vector([loc.X(), loc.Y(), loc.Z()]))
+              const r = circ.Radius()
+              if (edge.isClosed) {
+                circles.push({ cx: center.x, cy: center.y, r })
+              } else {
+                const sp = project(edge.startPoint), ep = project(edge.endPoint)
+                arcs.push({
+                  cx: center.x, cy: center.y, r,
+                  startAngle: Math.atan2(sp.y - center.y, sp.x - center.x),
+                  endAngle:   Math.atan2(ep.y - center.y, ep.x - center.x),
+                })
+              }
             } else {
+              // Any other curve type (LINE, or an unexpected BEZIER/BSPLINE
+              // edge) — a straight chord between endpoints is a reasonable
+              // fallback for DXF export.
               const sp = project(edge.startPoint), ep = project(edge.endPoint)
-              arcs.push({
-                cx: center.x, cy: center.y, r,
-                startAngle: Math.atan2(sp.y - center.y, sp.x - center.x),
-                endAngle:   Math.atan2(ep.y - center.y, ep.x - center.x),
-              })
+              lines.push({ x1: sp.x, y1: sp.y, x2: ep.x, y2: ep.y })
             }
-          } else {
-            // Any other curve type (LINE, or an unexpected BEZIER/BSPLINE
-            // edge) — a straight chord between endpoints is a reasonable
-            // fallback for DXF export.
-            const sp = project(edge.startPoint), ep = project(edge.endPoint)
-            lines.push({ x1: sp.x, y1: sp.y, x2: ep.x, y2: ep.y })
           }
         }
       }

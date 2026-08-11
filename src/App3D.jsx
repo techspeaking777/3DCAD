@@ -3820,12 +3820,22 @@ export default function App() {
   // No-sketch-mode tool that reuses the same sketchArmed/onFaceClick pipeline
   // Mirror3D/Loft3D use for face-picking — hovering a face shows the same
   // square face-plane indicator those tools get for free (Viewport3D.jsx's
-  // animate() loop), and clicking commits immediately via handleFaceClick
-  // below, instead of a separate raw-raycast hover/click pair. Pulls the
-  // face's real OCC boundary (outer loop + every hole, via cadWorker.js's
-  // exportFaceDXF) and writes it to a .dxf file — unlike "Include From Face"
-  // this never goes through the tessellated render mesh, so cutout holes
-  // come through intact.
+  // animate() loop). Pulls each face's real OCC boundary (outer loop + every
+  // hole, via cadWorker.js's exportFaceDXF) and writes it to a .dxf file —
+  // unlike "Include From Face" this never goes through the tessellated
+  // render mesh, so cutout holes come through intact.
+  //
+  // Multiple faces accumulate before exporting (same click-to-toggle,
+  // Enter-to-commit shape as Export STL's exportSTLSel) rather than
+  // exporting on the first click. This used to auto-detect every OTHER face
+  // coplanar with the one clicked (so clicking one letter of an extruded
+  // word would grab the whole word) — dropped in favor of manual multi-pick
+  // after real-world text (built from separate features/boolean joins)
+  // turned out to land at the "same" height with enough floating-point
+  // drift that no fixed tolerance reliably caught every letter without also
+  // risking false positives elsewhere. Manual pick has no tolerance to get
+  // wrong: the student clicks exactly the faces they want.
+  const [exportFaceDXFSel, setExportFaceDXFSel] = useState([])   // [{solidId, point, key}]
   const [exportFaceDXFBusy, setExportFaceDXFBusy] = useState(false)
 
   function activateExportFaceDXFTool() {
@@ -3846,6 +3856,11 @@ export default function App() {
     setExtrudeTool(null)
     setExtrudeState(null)
     setEditingFeatureId(null)
+    setExportFaceDXFSel([])
+  }
+
+  function resetExportFaceDXFSel() {
+    setExportFaceDXFSel([])
   }
 
   // facePlane.solidId/.point are stamped on by Viewport3D's handleClickInternal
@@ -3855,14 +3870,44 @@ export default function App() {
   // whole face's coplanar-vertex centroid, meant for sketch placement — on a
   // face with a hole that centroid can land inside the cut-out and miss the
   // solid's material entirely, which fails the worker's FaceFinder pick).
-  async function handleExportFaceDXFFaceClick(facePlane) {
+  // Toggles: clicking an already-picked face again removes it, same as
+  // Export STL's body picker — "key" is a rounded-coordinate string since
+  // points can't be compared with ===. Kept in world (Three.js, mm*SCALE)
+  // units, not the worker's mm — Viewport3D's persistent highlight needs
+  // world units to draw with, and commitExportFaceDXF converts once at
+  // export time instead.
+  function handleExportFaceDXFFaceClick(facePlane) {
     if (exportFaceDXFBusy || facePlane.solidId == null) return
-    const SCALE = 2
-    const point = [facePlane.point.x/SCALE, facePlane.point.y/SCALE, facePlane.point.z/SCALE]
+    const point = { x: facePlane.point.x, y: facePlane.point.y, z: facePlane.point.z }
+    const normal = { x: facePlane.normal.x, y: facePlane.normal.y, z: facePlane.normal.z }
+    const key = `${facePlane.solidId}_${[point.x,point.y,point.z].map(v=>v.toFixed(1)).join('_')}`
+    setExportFaceDXFSel(prev => {
+      if (prev.some(s => s.key === key)) return prev.filter(s => s.key !== key)
+      // Letters of a sign are very often SEPARATE, never-joined solids (base
+      // plate extruded on its own, each letter its own Extrude feature) —
+      // no restriction to one solid here, unlike an earlier version of this
+      // that silently dropped every pick after the first one landed on a
+      // different body.
+      return [...prev, { solidId: facePlane.solidId, point, normal, key }]
+    })
+  }
+
+  // Projects every selected face into the SAME (u,v) frame — anchored on the
+  // first pick — so letters line up correctly relative to each other in one
+  // flat drawing, then writes one .dxf with all of them merged in. Each pick
+  // carries its own solidId since they may belong to different solids.
+  async function commitExportFaceDXF() {
+    if (exportFaceDXFBusy || exportFaceDXFSel.length===0) return
     setExportFaceDXFBusy(true)
     try {
-      const { dxfData } = await cadEngine.exportFaceDXF({ solidId: facePlane.solidId, point })
+      const SCALE = 2
+      const picks = exportFaceDXFSel.map(s => ({
+        solidId: s.solidId,
+        point: [s.point.x/SCALE, s.point.y/SCALE, s.point.z/SCALE],
+      }))
+      const { dxfData } = await cadEngine.exportFaceDXF({ picks })
       await writeFaceDXF(dxfData.lines, dxfData.circles, dxfData.arcs, 'face.dxf')
+      resetExportFaceDXFSel()
     } catch (err) {
       console.error('Export Face DXF failed:', err)
     } finally {
@@ -7061,7 +7106,13 @@ export default function App() {
       if (measureP1 || measureResult) { resetMeasure(); return }
       resetMeasure(); setTool('select'); return
     }
+    if (e.key==='Enter'&&tool==='exportfacedxf'){
+      e.preventDefault()
+      commitExportFaceDXF()
+      return
+    }
     if (e.key==='Escape'&&tool==='exportfacedxf'){
+      if (exportFaceDXFSel.length>0) { resetExportFaceDXFSel(); return }
       setTool('select'); return
     }
     if (e.key==='Enter'&&tool==='exportstl'){
@@ -8109,6 +8160,7 @@ export default function App() {
             onFaceClick={handleFaceClick}
             sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode) || (tool==='mirror3d' && !!mirror3dSourceFeatureId) || (tool==='loft3d' && !loftState) || tool==='exportfacedxf'}
             dxfPickMode={tool==='exportfacedxf'}
+            dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : []}
             extrudeArmed={!!extrudeState}
             showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl'}
             activePlane={activePlane}
@@ -8194,6 +8246,19 @@ export default function App() {
               ? `${exportSTLSel.length} selected`
               : 'Click bodies to choose (none = export all)'}
             action={{label:'✓ Export', enabled:true, onClick:commitExportSTL}}
+            onStepBack={()=>{}}
+          />
+
+          {/* ── SmartStep bar: overlays bottom of viewport during Export Face DXF ── */}
+          <SmartStepBar
+            op={tool==='exportfacedxf' ? 'DXF' : null}
+            steps={[{ id:1, label:'Select Faces' }]}
+            currentStep={1}
+            color="#B47EFF"
+            hint={exportFaceDXFSel.length>0
+              ? `${exportFaceDXFSel.length} selected — click more, or Export`
+              : 'Click a face to select it (click again to remove)'}
+            action={{label:'✓ Export', enabled: exportFaceDXFSel.length>0, onClick:commitExportFaceDXF}}
             onStepBack={()=>{}}
           />
 

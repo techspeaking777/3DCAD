@@ -35,9 +35,11 @@ import SplineSnapPanel from './tools/SplineSnapPanel.jsx'
 import CopyModePanel from './tools/CopyModePanel.jsx'
 import ResizeScalePanel from './tools/ResizeScalePanel.jsx'
 import MirrorPanel from './tools/MirrorPanel.jsx'
+import CenterPanel from './tools/CenterPanel.jsx'
 import FilletRadiusPanel from './tools/FilletRadiusPanel.jsx'
 import OffsetDistPanel from './tools/OffsetDistPanel.jsx'
 import SelectDimPanel from './tools/SelectDimPanel.jsx'
+import { useDraggablePanel, DragHandle } from './tools/useDraggablePanel.jsx'
 import {
   IconLine, IconCircle, IconTrim, IconDelete, IconExtend, IconOffset,
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
@@ -746,12 +748,18 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           // wherever the tree assumed every cutout has the plain shape.
           const isLoftCutout = isExtrude && feat.operation === 'cutout' && !!feat.profiles
           const isLocked = !!feat.joinedInto
-          const hasDependentMirror = features.some(f => f.operation === 'mirror' && f.sourceSolidId === feat.solidId)
           // Mirroring-a-cutout (commitMirrorCutout) reflects profilePts/
           // planeId/facePlane — fields a loft-cutout doesn't have — so it's
           // excluded from mirror-source eligibility rather than crashing.
           const isMirrorEligible = isExtrude && !isMirror && !isLocked && !isLoftCutout
-          const isJoinEligible = isExtrude && feat.operation !== 'cutout' && !isJoin && !isLocked && !hasDependentMirror
+          // A source with a dependent mirror used to be excluded here too —
+          // but rebuildJoinBaseMesh already knows how to rebuild a mirror
+          // member from its source (see its mf.operation==='mirror' branch),
+          // and a locked/joined feature can't be edited, so nothing can ever
+          // trigger rebuildDependentMirrors against a joined-away source.
+          // Blocking it just made "join a mirrored part to its original" —
+          // an ordinary CAD operation — impossible.
+          const isJoinEligible = isExtrude && feat.operation !== 'cutout' && !isJoin && !isLocked
           // Only rows that own an independent solid can be hidden — a cutout/
           // fillet (or a mirrored cutout, which shows up as operation:'cutout'
           // too, see commitMirrorCutout) modifies an EXISTING body in place
@@ -1086,6 +1094,10 @@ export default function App() {
   const [extrudeTool,setExtrudeTool]=useState(null)
   const [extrudeState,setExtrudeState]=useState(null)
   const [editingFeatureId,setEditingFeatureId]=useState(null)
+  const extrudePanelDrag = useDraggablePanel()
+  const cutoutPanelDrag = useDraggablePanel()
+  const includeEdgePanelDrag = useDraggablePanel()
+
   const hiddenEditSolidRef=useRef(null)   // solid parked here while its sketch is being edited
   const [extrudeColor,setExtrudeColor]=useState('#3a7bd5')
   const [cachedProfiles,setCachedProfiles]=useState([])
@@ -1290,7 +1302,7 @@ export default function App() {
   const [saveAsOpen,setSaveAsOpen]=useState(false)  // false | 'sketch' | 'project' — which save flow the SaveAsPanel fallback modal is for
   const [gridVisible,setGridVisible]=useState(true)
   const [gridSnap,setGridSnap]=useState(true)
-  const [gridSizeMm,setGridSizeMm]=useState(5)
+  const [gridSizeMm,setGridSizeMm]=useState(10)
   const [textInsertPt,setTextInsertPt]=useState(null)
 
   const [intersectionPts,setIntersectionPts]=useState([])
@@ -2374,15 +2386,23 @@ export default function App() {
               ctx.textAlign = 'center'
               ctx.fillText('click to ' + extrudeTool, cScreen.x, cScreen.y - 10)
 
-              // ── Position popup near centroid (arrows are drawn by drawExtrudePreview) ──
+              // ── Dock popup at the bottom of the viewport, above the
+              // SmartStepBar — anchoring it to the centroid used to put it
+              // right on top of the shape being extruded for small/nearby
+              // profiles. A fixed, geometry-independent dock never overlaps
+              // the canvas regardless of profile size or position.
               if (isSelected && cScreen) {
-                // Position popup near centroid
                 const vpEl = vp.getDomElement?.()
                 const vpRect = vpEl?.parentElement?.getBoundingClientRect?.()
                 if (vpRect) {
+                  // 200 clears the SmartStepBar (52px) plus the popup's own
+                  // tallest variant (cutout, ~130px). Clamped against both
+                  // vpRect and window.innerHeight — on layouts where the two
+                  // disagree (e.g. viewport scaling), take whichever keeps
+                  // the popup higher up, so it can never render past either.
                   setExtrudeHandlePos({
-                    x: vpRect.left + cScreen.x,
-                    y: vpRect.top  + cScreen.y,
+                    x: vpRect.left + vpRect.width / 2,
+                    top: Math.min(vpRect.bottom - 200, window.innerHeight - 220),
                   })
                 }
               }
@@ -4609,11 +4629,20 @@ export default function App() {
   async function rebuildJoinBaseMesh(joinSolid, feats = features, solidsLookup = solids) {
     const joinFeat = feats.find(f => f.solidId === joinSolid.id && f.operation === 'join')
     if (!joinFeat) throw new Error('Join feature not found for solid')
+    // Non-mirror members first: a mirror member's source can be ANOTHER
+    // member of this same join (e.g. an extrusion joined to its own mirror)
+    // — it won't be in `solidsLookup` (locked/removed from `solids` the
+    // whole time this join has existed), only reconstructable from its own
+    // sibling member's feature entry, which the sort + rebuiltSolids below
+    // make available before the mirror branch needs it.
     const memberFeats = (joinFeat.memberFeatureIds || []).map(id => feats.find(f => f.id === id)).filter(Boolean)
+      .sort((a, b) => (a.operation === 'mirror') - (b.operation === 'mirror'))
     const members = []
+    const rebuiltSolids = []
     for (const mf of memberFeats) {
       if (mf.operation === 'mirror') {
         const sourceSolid = solidsLookup.find(s => s.id === mf.sourceSolidId)
+          || rebuiltSolids.find(s => s.id === mf.sourceSolidId)
         if (!sourceSolid) throw new Error('Mirror source solid not found (join member)')
         const base = buildBaseWorkerParams(sourceSolid)
         const ops = buildSolidOpsForWorker(sourceSolid, feats)
@@ -4621,6 +4650,7 @@ export default function App() {
         members.push({ solidId: mf.solidId, base: null, ops: [] })
       } else {
         const tempSolid = featureToTempSolid(mf)
+        rebuiltSolids.push(tempSolid)
         members.push({ solidId: mf.solidId, base: buildBaseWorkerParams(tempSolid), ops: buildSolidOpsForWorker(tempSolid, feats) })
       }
     }
@@ -6092,12 +6122,20 @@ export default function App() {
       // body doesn't have a well-defined meaning once it's un-merged. One
       // level deep only, same pragmatic depth limit as Mirror3D's own cascade.
       const dependentIds = features.filter(f => f.solidId === feat.solidId && f.id !== feat.id).map(f => f.id)
+      // Non-mirror members first: a mirror member's source can be ANOTHER
+      // member of this same join (e.g. joining an extrusion to its own
+      // mirror) — that source won't be back in `solids` until its own turn
+      // in this loop restores it, so mirrors must always go last.
       const memberFeats = (feat.memberFeatureIds || []).map(id => features.find(f => f.id === id)).filter(Boolean)
+        .sort((a, b) => (a.operation === 'mirror') - (b.operation === 'mirror'))
 
       const restored = []
       for (const mf of memberFeats) {
         try {
-          const meshData = await rebuildFeatureSolid(mf)
+          // solidsLookup includes whatever this loop has already restored,
+          // not just the pre-un-join `solids` snapshot — needed for exactly
+          // the same reason as the sort above.
+          const meshData = await rebuildFeatureSolid(mf, features, [...solids, ...restored])
           const group = replicadMeshToThree(meshData, mf.color, mf.solidId)
           restored.push({ id: mf.solidId, group, operation: mf.operation, color: mf.color,
             planeId: mf.planeId, facePlane: mf.facePlane, profilePts: mf.profilePts,
@@ -8056,6 +8094,13 @@ export default function App() {
                       hasAxisStart={!!mirrorP1}
                     />
                   )}
+                  {t==='center'&&tool==='center'&&(
+                    <CenterPanel
+                      toolColor={activeColor}
+                      selCount={centerSel.length}
+                      onApply={commitCenter}
+                    />
+                  )}
                 </div>
               ))}
 
@@ -8589,9 +8634,12 @@ export default function App() {
       {extrudeState?.armed && extrudeHandlePos && (extrudeTool !== 'cutout' || extrudeState.revolveAxis) && (
         <div style={{
           position: 'fixed',
-          left: extrudeHandlePos.x + 20,
-          top:  extrudeHandlePos.y - 20,
+          left: extrudeHandlePos.x,
+          top: extrudeHandlePos.top,
+          transform: 'translateX(-50%)',
           zIndex: 1000,
+        }}>
+        <div ref={extrudePanelDrag.panelRef} style={{
           background: '#000',
           border: `1.5px solid ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'}`,
           borderRadius: 2,
@@ -8599,7 +8647,9 @@ export default function App() {
           minWidth: 180,
           boxShadow: `0 0 14px ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'}77, 0 0 3px ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'} inset`,
           fontFamily: 'monospace',
+          ...extrudePanelDrag.panelStyle,
         }}>
+          <DragHandle {...extrudePanelDrag.handleProps}>{extrudeTool==='cutout' ? 'Cutout' : 'Extrude'}</DragHandle>
           {extrudeState.revolveAxis ? (
             <>
               {/* Revolve (extrude or cutout): sweep-angle input + a CW/CCW
@@ -8746,22 +8796,28 @@ export default function App() {
             </>
           )}
         </div>
+        </div>
       )}
 
       {/* ── Cutout popup (extent mode + direction + optional depth) ──────── */}
       {extrudeState?.armed && extrudeHandlePos && extrudeTool === 'cutout' && !extrudeState.revolveAxis && (
         <div style={{
           position: 'fixed',
-          left: extrudeHandlePos.x + 20,
-          top:  extrudeHandlePos.y - 20,
+          left: extrudeHandlePos.x,
+          top: extrudeHandlePos.top,
+          transform: 'translateX(-50%)',
           zIndex: 1000,
+        }}>
+        <div ref={cutoutPanelDrag.panelRef} style={{
           background: '#000',
           border: '1.5px solid #FF3B5C',
           borderRadius: 2,
           padding: '10px 14px',
           boxShadow: '0 0 14px #FF3B5C77, 0 0 3px #FF3B5C inset',
           fontFamily: 'monospace',
+          ...cutoutPanelDrag.panelStyle,
         }}>
+          <DragHandle {...cutoutPanelDrag.handleProps}>Cutout</DragHandle>
           <div style={{display:'grid', gridTemplateColumns:'auto 1fr', gap:8}}>
 
             {/* Left column: extent mode buttons */}
@@ -8876,6 +8932,7 @@ export default function App() {
               ? 'Cuts through entire solid'
               : `Move mouse to set depth${gridSnap ? ` (snap ${gridSizeMm}mm)` : ''} · type or ↵ to accept`} · Esc to cancel
           </div>
+        </div>
         </div>
       )}
 
@@ -9236,18 +9293,16 @@ export default function App() {
           {tool==='includeedge' && (() => {
             const toolColor = toolConfig.find(([t])=>t==='includeedge')[3]
             return (
-              <div style={{
+              <div ref={includeEdgePanelDrag.panelRef} style={{
                 position:'absolute',top:0,left:'100%',marginLeft:10,
                 background:'#14142a',border:`3px solid ${toolColor}`,borderRadius:10,
                 padding:'10px 12px',boxShadow:'0 6px 20px rgba(0,0,0,0.5)',
-                zIndex:50,width:170,fontFamily:'monospace',
+                zIndex:50,width:170,fontFamily:'monospace',...includeEdgePanelDrag.panelStyle,
               }}>
                 <div style={{position:'absolute',top:18,left:-9,width:0,height:0,
                   borderTop:'8px solid transparent',borderBottom:'8px solid transparent',
                   borderRight:`9px solid ${toolColor}`}}/>
-                <div style={{textAlign:'center',color:'#888',fontSize:9,textTransform:'uppercase',letterSpacing:'0.1em',marginBottom:8}}>
-                  Include Edge
-                </div>
+                <DragHandle {...includeEdgePanelDrag.handleProps}>Include Edge</DragHandle>
                 <div style={{textAlign:'center',fontSize:20,fontWeight:'bold',color:toolColor}}>
                   {includeEdgeSel.length}
                 </div>

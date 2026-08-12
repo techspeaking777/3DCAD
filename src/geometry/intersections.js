@@ -159,8 +159,16 @@ export function circleIntersectionAngles(idx,lines,circles,arcs,splines=[]) {
 
 export function arcIntersectionAngles(arcIdx,lines,circles,arcs,splines=[]) {
   const arc=arcs[arcIdx];const angles=[]
-  lines.forEach(l=>segCircleIntersect(l.x1,l.y1,l.x2,l.y2,arc.cx,arc.cy,arc.r)
-    .filter(p=>angleOnArc(p.angle,arc.startAngle,arc.endAngle)).forEach(p=>angles.push(p.angle)))
+  lines.forEach(l=>{
+    segCircleIntersect(l.x1,l.y1,l.x2,l.y2,arc.cx,arc.cy,arc.r)
+      .filter(p=>angleOnArc(p.angle,arc.startAngle,arc.endAngle)).forEach(p=>angles.push(p.angle))
+    ;[[l.x1,l.y1],[l.x2,l.y2]].forEach(([px,py])=>{
+      if (Math.abs(Math.hypot(px-arc.cx,py-arc.cy)-arc.r)<1) {
+        const a=norm2pi(Math.atan2(py-arc.cy,px-arc.cx))
+        if (angleOnArc(a,arc.startAngle,arc.endAngle)) angles.push(a)
+      }
+    })
+  })
   circles.forEach(c=>circleCircleIntersect(arc.cx,arc.cy,arc.r,c.cx,c.cy,c.r)
     .filter(p=>angleOnArc(p.angle1,arc.startAngle,arc.endAngle)).forEach(p=>angles.push(p.angle1)))
   arcs.forEach((other,i)=>{

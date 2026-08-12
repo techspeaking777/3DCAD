@@ -1,5 +1,5 @@
 import { TRIM_DIST, zoomRef } from '../constants.js'
-import { distToSeg } from './trimDelete.js'
+import { distToSeg, tOnSeg } from './trimDelete.js'
 import { segSegIntersect } from '../geometry/intersections.js'
 
 // ── Catmull-Rom interpolation ─────────────────────────────────────────────────
@@ -72,7 +72,17 @@ function findSplineIntersectionUs(sampled, lines, circles, arcs, otherSplines=[]
     // vs lines
     lines.forEach(l => {
       const h = segSegIntersect(a.x, a.y, b.x, b.y, l.x1, l.y1, l.x2, l.y2)
-      if (h) us.push(segU + h.t / total)
+      if (h) { us.push(segU + h.t / total); return }
+      // segSegIntersect only finds crossings — a line whose endpoint just
+      // touches the spline (a T-junction, not a crossing) falls outside its
+      // strict interior bounds. Check the line's own endpoints directly.
+      const tol = TRIM_DIST / zoomRef.scale
+      ;[[l.x1, l.y1], [l.x2, l.y2]].forEach(([px, py]) => {
+        const t = tOnSeg(px, py, a.x, a.y, b.x, b.y)
+        if (t <= 1e-6 || t >= 1 - 1e-6) return
+        const ex = a.x + t * (b.x - a.x), ey = a.y + t * (b.y - a.y)
+        if (Math.hypot(px - ex, py - ey) < tol) us.push(segU + t / total)
+      })
     })
 
     // vs circles

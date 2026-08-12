@@ -1369,8 +1369,8 @@ export default function App() {
   }
 
   const { commit, undo, redo, canUndo, canRedo } = useHistory()
-  const snapshot = () => ({ lines, circles, arcs, splines })
-  const restore = (snap) => { setLines(snap.lines); setCircles(snap.circles); setArcs(snap.arcs); setSplines(snap.splines||[]) }
+  const snapshot = () => ({ lines, circles, arcs, splines, dims })
+  const restore = (snap) => { setLines(snap.lines); setCircles(snap.circles); setArcs(snap.arcs); setSplines(snap.splines||[]); setDims(snap.dims||[]) }
 
   const trackedPtsRef=useRef([])
   const splinePointsRef=useRef([])
@@ -2851,8 +2851,10 @@ export default function App() {
     }
 
     // ── Committed dimension annotations ──
-    dims.forEach((dim)=>{
-      ctx.save();ctx.strokeStyle='#ccc';ctx.fillStyle='#ccc'
+    dims.forEach((dim,di)=>{
+      const isDelTarget=tool==='delete'&&deletePreview?.kind==='dim'&&deletePreview.idx===di
+      const dimColor=isDelTarget?'#F44336':'#ccc'
+      ctx.save();ctx.strokeStyle=dimColor;ctx.fillStyle=dimColor
       const LW=0.8/sc,ARR=6/sc,FS=11/sc;ctx.lineWidth=LW
       if (dim.kind==='linear'){
         const dx=dim.x2-dim.x1,dy=dim.y2-dim.y1,len=Math.hypot(dx,dy);if(len<1){ctx.restore();return}
@@ -2863,7 +2865,7 @@ export default function App() {
         ;[[d1x,d1y,ux,uy],[d2x,d2y,-ux,-uy]].forEach(([ax,ay,ax2,ay2])=>{ctx.beginPath();ctx.moveTo(ax,ay);ctx.lineTo(ax+ax2*ARR-ay2*ARR*0.35,ay+ay2*ARR+ax2*ARR*0.35);ctx.lineTo(ax+ax2*ARR+ay2*ARR*0.35,ay+ay2*ARR-ax2*ARR*0.35);ctx.closePath();ctx.fill()})
         const txt=dim.text||pxToMm(len).toFixed(2)+' mm'
         const mx=(d1x+d2x)/2,my=(d1y+d2y)/2
-        ctx.save();ctx.translate(mx,my);ctx.scale(1/sc,1/sc);let ang=Math.atan2(uy,ux);if(ang>Math.PI/2||ang<-Math.PI/2)ang+=Math.PI;ctx.rotate(ang);ctx.font=`${FS*sc}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='bottom';ctx.fillStyle='#ccc';ctx.fillText(txt,0,-3);ctx.restore()
+        ctx.save();ctx.translate(mx,my);ctx.scale(1/sc,1/sc);let ang=Math.atan2(uy,ux);if(ang>Math.PI/2||ang<-Math.PI/2)ang+=Math.PI;ctx.rotate(ang);ctx.font=`${FS*sc}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='bottom';ctx.fillStyle=dimColor;ctx.fillText(txt,0,-3);ctx.restore()
       } else if (dim.kind==='diameter'){
         const {cx,cy,r,angle}=dim,cos=Math.cos(angle),sin=Math.sin(angle)
         ctx.beginPath();ctx.moveTo(cx-r*cos,cy-r*sin);ctx.lineTo(cx+r*cos,cy+r*sin);ctx.stroke()
@@ -7228,6 +7230,11 @@ export default function App() {
         }
         if (e.key==='Escape'){setSelectDimField(null);setSelectDimPending({});setSelectDimInput('');return}
       }
+    }
+
+    if (tool==='dim'){
+      if (e.key==='Escape'){resetDim();return}
+      return
     }
 
     if (tool==='spline'){

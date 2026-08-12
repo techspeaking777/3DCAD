@@ -43,7 +43,7 @@ import { useDraggablePanel, DragHandle } from './tools/useDraggablePanel.jsx'
 import {
   IconLine, IconCircle, IconTrim, IconDelete, IconExtend, IconOffset,
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
-  IconUndo, IconRedo, IconFitView, IconNew, IconSave, IconLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
+  IconUndo, IconRedo, IconFitView, IconReframe, IconNew, IconSave, IconLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
   IconIncludeFace, IconIncludeEdge,
   IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D,
 } from './draw/ToolIcons.jsx'
@@ -7990,6 +7990,25 @@ export default function App() {
                   </span>
                 </div>
               </div>
+
+              {/* Reframe — snaps the camera back to a straight-on view of the
+                  active sketch plane, without touching zoom/pan. A recovery
+                  button for accidental orbiting (e.g. a scroll-wheel-button
+                  drag) while sketching, since there's no other way back to
+                  flat short of leaving the sketch and re-entering it. */}
+              <button
+                title="Reframe — snap the camera back to a flat view of this sketch plane"
+                onClick={()=>{
+                  if (typeof activePlane === 'string') viewport3dRef.current?.snapToPlane(activePlane, {resetZoom:false})
+                  else if (activePlane) viewport3dRef.current?.snapToFace(activePlane, {resetZoom:false})
+                }}
+                style={{...btnBase,background:'transparent',
+                  outline:'1px solid #2a2a4a',outlineOffset:'-2px',
+                  flexDirection:'column',gap:2,width:'auto',padding:'0 10px',height:70}}>
+                <IconReframe/>
+                <span style={{fontSize:9,fontFamily:'monospace',color:'#6688aa',
+                  letterSpacing:'0.06em'}}>REFRAME</span>
+              </button>
 
               <div style={{width:1,height:48,background:'#2a2a4a',margin:'0 4px'}}/>
 

@@ -740,6 +740,21 @@ export function IconFitView() {
   )
 }
 
+export function IconReframe() {
+  return (
+    <V>
+      {/* Reset arc — same three-quarter-circle-plus-arrowhead language as
+          Undo/Redo, reused here for "snap the camera back", wrapping around
+          a plane viewed edge-on (flat, no tilt) to read as "back to flat"
+          rather than a generic undo. */}
+      <path d="M22.5 8.3A9.3 9.3 0 1 0 24.4 15" stroke="#4fc3f7" strokeWidth="2.3" fill="none" strokeLinecap="round"/>
+      <polygon points="25.3,3.6 25.5,10.2 19.6,7.5" fill="#4fc3f7"/>
+      <ellipse cx="13" cy="20" rx="9" ry="3" fill="#0d2635" stroke="#7dd8ff" strokeWidth="1.5"/>
+      <line x1="5.5" y1="20" x2="20.5" y2="20" stroke="#7dd8ff" strokeWidth="1" opacity="0.5"/>
+    </V>
+  )
+}
+
 export function IconSave() {
   return (
     <V>

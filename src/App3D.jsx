@@ -6426,7 +6426,16 @@ export default function App() {
     lastClickClientRef.current = {x: e.clientX, y: e.clientY}
 
     const rawWorld=screenToWorld(e.clientX,e.clientY)
-    const raw=gridSnap?snapToGrid(rawWorld):rawWorld
+    // Geometric snap (endpoint/tangent/on-circle/intersection/etc.) takes
+    // priority over grid snap — grid-snapping unconditionally here rounded
+    // the click position away from tangent points, which essentially never
+    // land exactly on a grid intersection, silently defeating Tangent
+    // whenever grid snap was on (the default). excludePt is intentionally
+    // generic (null, not the per-tool exclude point) — this is just a "is
+    // there something to snap to nearby" pre-check; each tool's own handler
+    // below re-derives the precise point with its correct excludePt.
+    const nearbyGeo=getGeoSnap(rawWorld,snapLines,snapCircles,snapArcs,null,tKeyDown,splines,intersectionPts)
+    const raw=(!nearbyGeo&&gridSnap)?snapToGrid(rawWorld):rawWorld
 
     // ── Extrude / Cutout tool: only intercept outside sketch mode ──
     // Step 2 (sketch mode): clicks belong to sketch tools, not extrude handler
@@ -7066,10 +7075,18 @@ export default function App() {
       }
     }
 
-    // Apply grid snap to mouse position during drawing
-    const snappedWorld=(gridSnap&&(tool==='line'||tool==='circle'||tool==='spline'||tool==='dim'||tool==='axis'))
-      ? snapToGrid(worldPos)
-      : worldPos
+    // Apply grid snap to mouse position during drawing — but geometric snap
+    // (endpoint/tangent/on-circle/intersection/etc.) takes priority, same
+    // reasoning as handleClick's raw computation: mousePos feeds the preview
+    // code's own getGeoSnap check, so grid-snapping it first just rounds
+    // tangent points out of reach before that check ever runs.
+    let snappedWorld=worldPos
+    if (tool==='line'||tool==='circle'||tool==='spline'||tool==='dim'||tool==='axis'){
+      const excludePt=startPoint||circleCenter||null
+      const geo=getGeoSnap(worldPos,snapLines,snapCircles,snapArcs,excludePt,tKeyDown,splines,intersectionPts)
+      if (geo) snappedWorld={x:geo.x,y:geo.y}
+      else if (gridSnap) snappedWorld=snapToGrid(worldPos)
+    }
     setMousePos(snappedWorld);updateTracking(snappedWorld)
   }
 

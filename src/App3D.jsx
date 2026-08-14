@@ -1096,6 +1096,7 @@ export default function App() {
   const [editingFeatureId,setEditingFeatureId]=useState(null)
   const extrudePanelDrag = useDraggablePanel()
   const cutoutPanelDrag = useDraggablePanel()
+  const loftPanelDrag = useDraggablePanel()
   const includeEdgePanelDrag = useDraggablePanel()
 
   const hiddenEditSolidRef=useRef(null)   // solid parked here while its sketch is being edited
@@ -3417,6 +3418,7 @@ export default function App() {
         sketchLines: ownLines, sketchCircles: ownCircles, sketchArcs: ownArcs, sketchSplines: ownSplines,
         pts: best.pts, circle: best.pts.circleMeta || null,
         offsetMm: loftState.currentOffsetMm,
+        centroid: best.centroid,
       }
       setLoftState(prev => {
         const nextProfiles = [...prev.profiles]
@@ -3580,6 +3582,11 @@ export default function App() {
       setActiveSketchId(null)
       activePlaneRef.current = null
     }
+    // A mid-drag (or otherwise still-open) loft session left armed here would
+    // fight this tool for the same preview canvas and swallow clicks meant
+    // for extrude (see isLoftDragArmed's handleClick branch) — same pattern
+    // cancelFeature already follows for this exact scenario.
+    if (loftState) resetLoft3D()
     restoreHiddenEditSolid()
     setTool(op)
     setExtrudeTool(op)
@@ -4117,8 +4124,34 @@ export default function App() {
   }
 
   function resetLoft3D() {
+    cancelLoftAnim()
+    clearLoftPreviewCanvas()
     setLoftState(null)
     setLoftEditingFeatureId(null)
+  }
+
+  // True while the user is between "Finish Sketch" on one profile and
+  // starting the next one's sketch — the window where the drag-to-position
+  // ghost preview is shown. Excludes re-visiting an already-sketched later
+  // profile (editing an existing loft feature via handleEditLoft) — that
+  // case has a fixed, already-stored offsetMm loftNextProfile jumps straight
+  // to, so showing a draggable ghost there would visually lie about where
+  // accepting will actually land.
+  function isLoftDragArmed() {
+    return !!loftState && !sketchMode
+      && !!loftState.profiles[loftState.currentIdx]
+      && !loftState.profiles[loftState.currentIdx + 1]
+  }
+
+  // Loft's live drag preview shares the same overlay canvas Extrude's does
+  // (getExtrudePreviewCanvas, zIndex above the sketch canvas) — must be
+  // cleared explicitly on every transition out of the armed window, same as
+  // every extrude transition point already does, or the last-drawn frame
+  // freezes on screen covering the next sketch.
+  function clearLoftPreviewCanvas() {
+    const vp = viewport3dRef.current
+    const oc = vp?.getExtrudePreviewCanvas()
+    if (oc) { const ctx = oc.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,oc.width,oc.height) }
   }
 
   // Step 1 commit — picking the plane/face fixes the shared basis and goes
@@ -4181,6 +4214,7 @@ export default function App() {
   async function loftNextProfile() {
     const st = loftState
     if (!st) return
+    clearLoftPreviewCanvas()
     const nextIdx = st.currentIdx + 1
     const existingNext = st.profiles[nextIdx]   // re-visiting an already-sketched profile (edit flow)
     const nextOffsetMm = existingNext ? existingNext.offsetMm : st.currentOffsetMm + (parseFloat(st.distanceInput) || 20)
@@ -4199,6 +4233,7 @@ export default function App() {
   async function loftPreviousProfile() {
     const st = loftState
     if (!st || st.currentIdx === 0) return
+    clearLoftPreviewCanvas()
     const prevIdx = st.currentIdx - 1
     const prevProfile = st.profiles[prevIdx]
     if (!prevProfile) return
@@ -4916,6 +4951,50 @@ export default function App() {
     })
   }
 
+  // Loft's drag-to-position-next-profile preview: mirrors handleExtrudeDragMove
+  // above but forward-only (v1 never needs to place an earlier profile
+  // "behind" the first one) and — important — reads the SWEEP normal
+  // (loftAnimParamsRef's sweepNormal, i.e. basis.normal, negated for a loft
+  // cutout started from a face, see startLoftProfile1) rather than the
+  // picked FacePlane's own .normal (always the true OUTWARD normal,
+  // basis.viewNormal, used only for camera/sketch orientation — see
+  // buildLoftFacePlane). Using the FacePlane's normal here would point the
+  // drag direction backwards specifically for a loft cutout. dir is
+  // recomputed fresh here (not cached in the ref) for the same reason
+  // computeExtrudeDirScreen's own comment gives: it's a live-camera screen
+  // projection, and caching it goes stale the moment the camera moves
+  // independently of a mouse move (orbiting, or a still-settling tween).
+  function handleLoftDragMove(e) {
+    if (!isLoftDragArmed()) return
+    const p = loftAnimParamsRef.current
+    const vp = viewport3dRef.current
+    if (!p || !vp) return
+    const dir = vp.planeExtrudeDirection('face', { normal: p.sweepNormal })
+    const centScreen = vp.sketchToScreen(p.centroid.x, p.centroid.y, 'face', p.facePlane)
+    if (!centScreen) return
+    const vpRect = vp.getDomElement?.()?.parentElement?.getBoundingClientRect?.()
+    if (!vpRect) return
+    const mx = e.clientX - vpRect.left, my = e.clientY - vpRect.top
+    const proj = (mx - centScreen.x) * dir.dx + (my - centScreen.y) * dir.dy
+    const screenPxPerMm = getScreenPxPerMm(vp, 'face', p.facePlane)
+    // Loft (unlike a plain work-plane sketch/extrude, which uses snapToPlane's
+    // hand-tuned, deliberately-non-perpendicular camera table) always enters
+    // every profile's sketch via snapToFace — including a plain work-plane
+    // start (see startLoftProfile1) — which CAN leave the camera looking
+    // almost exactly down the sweep normal. Screen-space measurement along
+    // that axis degenerates toward zero there (an orthographic camera shows
+    // zero screen displacement for pure depth movement), and dividing by a
+    // near-zero screenPxPerMm blows depthMm up to a nonsensical value —
+    // reject anything too small to be a real on-screen measurement rather
+    // than propagate it.
+    if (!screenPxPerMm || screenPxPerMm < 0.05) return
+    let mm = Math.max(0, proj) / screenPxPerMm   // forward-only — no front/back branch
+    if (gridSnap) mm = Math.round(mm / gridSizeMm) * gridSizeMm
+    mm = Math.max(gridSnap ? gridSizeMm : 0.1, mm)
+    const mmStr = String(Math.round(mm * 100) / 100)
+    setLoftState(prev => (!prev || prev.distanceInput === mmStr) ? prev : { ...prev, distanceInput: mmStr })
+  }
+
   // Revolve preview: a cheap 2D animation, not a real OCC recompute (that would
   // need a full worker round-trip on every keystroke). Profile points and axis
   // are converted to true 3D world points (via vp.sketchToWorld), rotated
@@ -5123,6 +5202,74 @@ export default function App() {
   }, [extrudeState?.armed, extrudeState?.revolveAxis, extrudeState?.planeId, extrudeState?.facePlane,
       extrudeState?.profiles, extrudeState?.pickedIdx, extrudeState?.centroid,
       extrudeState?.extentMode, extrudeState?.depthInput, extrudeState?.direction, extrudeTool, extrudeColor])
+
+  // Loft's own parallel version of the extrude anim-loop pair above — kept
+  // fully separate rather than folded into extrudeState's machinery, since
+  // that loop already carries several hard-won staleness-bug fixes (see the
+  // comments through this section) that a shared/coupled version would risk
+  // reintroducing. Loft has no "through-all" analog needing an idle breathing
+  // pulse, so this loop is simpler: always eased=1, always direction='front'.
+  const loftAnimRef = useRef(null)
+  const loftAnimParamsRef = useRef(null)
+  function cancelLoftAnim() {
+    if (loftAnimRef.current) { cancelAnimationFrame(loftAnimRef.current); loftAnimRef.current = null }
+    loftAnimParamsRef.current = null
+  }
+  function startLoftAnimLoop() {
+    cancelLoftAnim()
+    function frame() {
+      const p = loftAnimParamsRef.current
+      if (p) {
+        // dir/centScreen recomputed fresh every frame from the current camera,
+        // same reasoning as computeExtrudeDirScreen's own comment below.
+        const dir = p.vp.planeExtrudeDirection('face', { normal: p.sweepNormal })
+        const centScreen = p.vp.sketchToScreen(p.centroid.x, p.centroid.y, 'face', p.facePlane)
+        if (centScreen) {
+          drawExtrudePreview(p.vp, p.profilePts, 'face', dir, centScreen, p.depthMm, 'front', 'loft', p.color, p.facePlane, 1)
+        }
+      }
+      loftAnimRef.current = requestAnimationFrame(frame)
+    }
+    loftAnimRef.current = requestAnimationFrame(frame)
+  }
+
+  // Effect A — clock lifecycle only, mirrors extrude's Effect A above.
+  useEffect(() => {
+    if (!isLoftDragArmed()) { cancelLoftAnim(); return }
+    // Loft always enters/re-enters a sketch via snapToFace, which looks
+    // exactly perpendicular at the plane by design — great for sketching,
+    // but it also leaves the screen-space direction/scale math the drag
+    // preview relies on degenerate (see handleLoftDragMove's guard comment).
+    // Rotating to the isometric angle the moment this step arms both fixes
+    // that in the common case and matches Extrude's own preview, which is
+    // never viewed perfectly straight-on either. Not awaited — the already-
+    // running anim loop recomputes dir/centScreen fresh every frame from
+    // whatever the camera is doing, so the ghost just follows the tween.
+    viewport3dRef.current?.snapToIsometric()
+    startLoftAnimLoop()
+    return () => cancelLoftAnim()
+  }, [!!loftState, sketchMode, loftState?.currentIdx, loftState?.profiles?.length])
+
+  // Effect B — recompute draw params whenever the relevant inputs change
+  // (mouse-driven distance, direct distance-box typing), mirrors extrude's
+  // Effect B above. sweepNormal (basis.normal, not the FacePlane's own
+  // .normal/viewNormal — see handleLoftDragMove's comment) is stashed as a
+  // plain THREE.Vector3, not a screen-space direction — that part is still
+  // recomputed fresh every frame/mousemove for the same camera-staleness
+  // reason extrude's dir/centScreen are.
+  useEffect(() => {
+    const vp = viewport3dRef.current
+    if (!isLoftDragArmed() || !vp) return
+    const st = loftState
+    const prof = st.profiles[st.currentIdx]
+    const facePlane = buildLoftFacePlane(st.basis, st.currentOffsetMm)
+    const depthMm = parseFloat(st.distanceInput) || 20
+    loftAnimParamsRef.current = {
+      vp, profilePts: prof.pts, facePlane, sweepNormal: st.basis.normal,
+      centroid: prof.centroid, depthMm,
+      color: loftTool === 'loftcutout' ? '#53D3E4' : '#FBDA2D',
+    }
+  }, [loftState, sketchMode, loftTool])
 
   // Recomputes the screen-space extrude-normal direction + the profile
   // centroid's screen position FRESH from the current camera. These are
@@ -6436,6 +6583,15 @@ export default function App() {
     // below re-derives the precise point with its correct excludePt.
     const nearbyGeo=getGeoSnap(rawWorld,snapLines,snapCircles,snapArcs,null,tKeyDown,splines,intersectionPts)
     const raw=(!nearbyGeo&&gridSnap)?snapToGrid(rawWorld):rawWorld
+
+    // ── Loft: a click anywhere in the viewport while the drag-to-position
+    // ghost is armed accepts the currently-shown distance, same as pressing
+    // Enter in the banner's distance field. Checked before the extrude
+    // branch below since both can never be armed at the same time. ──
+    if (isLoftDragArmed()) {
+      loftNextProfile()
+      return
+    }
 
     // ── Extrude / Cutout tool: only intercept outside sketch mode ──
     // Step 2 (sketch mode): clicks belong to sketch tools, not extrude handler
@@ -7822,7 +7978,7 @@ export default function App() {
   return (
     <div style={{display:'flex',height:'100vh',outline:'none'}} tabIndex={0}
       onKeyDown={handleKeyDown}
-      onMouseMove={e=>{ handleExtrudeDragMove(e) }}
+      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e) }}
       onMouseUp={e=>{ }}
     >
 
@@ -8267,7 +8423,7 @@ export default function App() {
             sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode) || (tool==='mirror3d' && !!mirror3dSourceFeatureId) || (tool==='loft3d' && !loftState) || tool==='exportfacedxf'}
             dxfPickMode={tool==='exportfacedxf'}
             dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : []}
-            extrudeArmed={!!extrudeState}
+            extrudeArmed={!!extrudeState || isLoftDragArmed()}
             showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl'}
             activePlane={activePlane}
             sketchMode={sketchMode}
@@ -9021,29 +9177,6 @@ export default function App() {
             </div>
           ) : (
             <>
-              <div style={{display:'flex', gap:6, alignItems:'center'}}>
-                <span style={{color:'#6688aa', fontSize:11}}>Distance to next</span>
-                <div style={{
-                  background:'#0a0e1a', border:'1px solid #2a3a5a', borderRadius:4,
-                  padding:'2px 8px', display:'flex', alignItems:'center', gap:4,
-                }}>
-                  <input
-                    autoFocus
-                    value={loftState.distanceInput}
-                    onChange={e=>setLoftState(prev=>({...prev, distanceInput:e.target.value}))}
-                    onKeyDown={e=>{
-                      e.stopPropagation()
-                      if (e.key==='Enter') loftNextProfile()
-                      else if (e.key==='Escape') resetLoft3D()
-                    }}
-                    style={{
-                      background:'none', border:'none', outline:'none',
-                      color:'#dce8ff', fontFamily:'monospace', fontSize:13, fontWeight:'bold', width:46,
-                    }}
-                  />
-                  <span style={{color:'#6688aa', fontSize:11}}>mm</span>
-                </div>
-              </div>
               <label
                 title="Off: smooth blended surface between profiles. On: straight faceted panels instead."
                 style={{display:'flex', gap:6, alignItems:'center', cursor:'pointer', color:'#6688aa', fontSize:11}}
@@ -9069,14 +9202,6 @@ export default function App() {
                   }}
                 >◀ Prev</button>
                 <button
-                  onClick={loftNextProfile}
-                  title="Next profile"
-                  style={{
-                    padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold',
-                    background: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D', color:'#0a0e1a', border:'none', borderRadius:4, cursor:'pointer',
-                  }}
-                >Next ▶</button>
-                <button
                   onClick={commitLoft}
                   disabled={loftState.profiles.filter(Boolean).length < 2}
                   title="Finish loft"
@@ -9094,6 +9219,69 @@ export default function App() {
               </div>
             </>
           )}
+        </div>
+      )}
+
+      {/* ── Loft: distance-to-next popup, shown only during the drag-to-
+          position step (isLoftDragArmed). Mirrors Extrude's own popup —
+          movable, mm input, ↵ accept — but with just the one value and no
+          direction toggle, since loft's v1 is always forward along the
+          shared normal. Fixed-position dock (not tied to the profile's
+          screen position) since it's draggable anyway if it's ever in the way. */}
+      {isLoftDragArmed() && (
+        <div style={{
+          position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
+          zIndex: 1000,
+        }}>
+        <div ref={loftPanelDrag.panelRef} style={{
+          background: '#000',
+          border: `1.5px solid ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}`,
+          borderRadius: 2,
+          padding: '10px 14px',
+          minWidth: 180,
+          boxShadow: `0 0 14px ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}77, 0 0 3px ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'} inset`,
+          fontFamily: 'monospace',
+          ...loftPanelDrag.panelStyle,
+        }}>
+          <DragHandle {...loftPanelDrag.handleProps}>{loftTool==='loftcutout' ? 'Loft Cutout' : 'Loft'}</DragHandle>
+          <div style={{display:'flex', alignItems:'center', gap:8}}>
+            <div style={{
+              flex:1, background:'#000', border:`1px solid ${loftTool==='loftcutout' ? '#53D3E455' : '#FBDA2D55'}`,
+              borderRadius:2, padding:'4px 8px',
+              display:'flex', alignItems:'center', justifyContent:'space-between',
+            }}>
+              <input
+                autoFocus
+                value={loftState.distanceInput}
+                onChange={e=>setLoftState(prev=>({...prev, distanceInput:e.target.value}))}
+                onKeyDown={e=>{
+                  e.stopPropagation()
+                  if (e.key==='Enter') loftNextProfile()
+                  else if (e.key==='Escape') resetLoft3D()
+                }}
+                style={{
+                  background:'none', border:'none', outline:'none',
+                  color: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D',
+                  textShadow: `0 0 5px ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}`,
+                  fontFamily:'monospace', fontSize:16, fontWeight:'bold', width:70,
+                }}
+              />
+              <span style={{color:'#556', fontSize:12}}>mm</span>
+            </div>
+            <button
+              onClick={loftNextProfile}
+              style={{
+                padding:'4px 10px', background: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D', color:'#000',
+                border:'none', borderRadius:2, cursor:'pointer',
+                fontFamily:'monospace', fontSize:12, fontWeight:'bold',
+                boxShadow: `0 0 6px ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}`,
+              }}
+            >↵</button>
+          </div>
+          <div style={{color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em'}}>
+            Drag or type distance to next{gridSnap ? ` (snap ${gridSizeMm}mm)` : ''} · Esc to cancel
+          </div>
+        </div>
         </div>
       )}
 

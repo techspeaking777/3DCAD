@@ -1101,6 +1101,8 @@ export default function App() {
 
   const hiddenEditSolidRef=useRef(null)   // solid parked here while its sketch is being edited
   const [extrudeColor,setExtrudeColor]=useState('#3a7bd5')
+  const [colorSel, setColorSel] = useState([])   // [solidId, ...] accumulated picks, "color" tool
+  const colorPanelDrag = useDraggablePanel()
   const [cachedProfiles,setCachedProfiles]=useState([])
   const sketchBeforePlaneRef=useRef(null)
   const lastClickClientRef=useRef({x:0,y:0})
@@ -6470,6 +6472,70 @@ export default function App() {
     }
   }
 
+  // ── Body color (selectable bodies) ────────────────────────────────────────
+  // Click bodies directly in the 3D view to multi-select (toggle) which
+  // solids get recolored — same click/highlight plumbing as Export STL
+  // above (raycastSolidFace + highlightJoinMembers/clearJoinHighlight, both
+  // solid-agnostic). Picking a swatch applies immediately to every selected
+  // body: a live material update (no rebuild) plus writing the new color
+  // onto both `solids` state (so a later rebuild — an edit, a fillet, a
+  // mirror-dependent rebuild — keeps it) and onto the OWNING feature (the
+  // extrude/revolve/mirror/join/loft that actually created the solid —
+  // cutout and fillet features modify an existing solid rather than owning
+  // one, so they're excluded) so a save+reload preserves it too, since
+  // reload only ever reads color off the feature, never off `solids`.
+  const [colorApplyColor, setColorApplyColor] = useState('#3a7bd5')
+
+  function activateColorTool() {
+    resetSelection()
+    resetDrawState()
+    restoreHiddenEditSolid()
+    if (sketchModeRef.current) {
+      setSketchMode(false)
+      setActivePlane(null)
+      setActiveSketchId(null)
+      activePlaneRef.current = null
+      viewport3dRef.current?.restoreSavedView()
+    }
+    setTool('color')
+    setExtrudeTool(null)
+    setExtrudeState(null)
+    setEditingFeatureId(null)
+    setColorSel([])
+  }
+
+  function resetColorTool() {
+    setColorSel([])
+  }
+
+  function handleColorClick(e) {
+    if (tool !== 'color') return
+    const vp = viewport3dRef.current; if (!vp) return
+    const hit = vp.raycastSolidFace(e.clientX, e.clientY)
+    if (!hit || hit.solidId == null) return
+    setColorSel(prev =>
+      prev.includes(hit.solidId) ? prev.filter(id => id !== hit.solidId) : [...prev, hit.solidId])
+  }
+
+  // Keeps every currently-selected body glowing in the 3D view, live as the
+  // selection changes — same effect shape as Export STL/Join3D's own sync.
+  useEffect(() => {
+    if (tool !== 'color') { viewport3dRef.current?.clearJoinHighlight(); return }
+    viewport3dRef.current?.highlightJoinMembers(colorSel)
+  }, [colorSel, tool])
+
+  function applyColorToSelection(hexColor) {
+    if (colorSel.length === 0) return
+    const vp = viewport3dRef.current
+    for (const solidId of colorSel) vp?.setSolidColor(solidId, hexColor)
+    setSolids(prev => prev.map(s => colorSel.includes(s.id) ? { ...s, color: hexColor } : s))
+    setFeatures(prev => prev.map(f =>
+      colorSel.includes(f.solidId) && f.operation !== 'cutout' && f.type !== 'fillet'
+        ? { ...f, color: hexColor } : f
+    ))
+    setColorSel([])
+  }
+
   function handleMouseDown(e){
     if (e.button===1){e.preventDefault();isPanningRef.current=true;lastPanPosRef.current={x:e.clientX,y:e.clientY}}
     if (e.button===0){
@@ -6621,6 +6687,11 @@ export default function App() {
 
     if (tool==='exportstl') {
       handleExportSTLClick(e)
+      return
+    }
+
+    if (tool==='color') {
+      handleColorClick(e)
       return
     }
 
@@ -7354,6 +7425,10 @@ export default function App() {
     if (e.key==='Escape'&&tool==='exportstl'){
       if (exportSTLSel.length>0) { resetExportSTL(); return }
       resetExportSTL(); setTool('select'); return
+    }
+    if (e.key==='Escape'&&tool==='color'){
+      if (colorSel.length>0) { resetColorTool(); return }
+      resetColorTool(); setTool('select'); return
     }
     if ((e.key==='Enter'||e.key==='Tab')&&tool==='join3d'&&joinSel.length>=2){
       e.preventDefault()
@@ -8632,6 +8707,17 @@ export default function App() {
             </svg>
             <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>STL</span>
           </button>
+          <button onClick={activateColorTool}
+            title="Body Color — click bodies in the 3D view, then pick a color to apply"
+            style={{...btnBase, flexDirection:'column', gap:2, background: tool==='color' ? '#FF704333' : 'transparent',
+              border: tool==='color' ? '1px solid #FF7043' : 'none'}}>
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+              <path d="M11 2C8 6.5 6 9.5 6 12.5C6 15.5 8.2 17.5 11 17.5C13.8 17.5 16 15.5 16 12.5C16 9.5 14 6.5 11 2Z"
+                fill="#FF7043" stroke="#FF7043" strokeWidth="1"/>
+              <circle cx="9" cy="11.5" r="1.1" fill="#fff" fillOpacity="0.6"/>
+            </svg>
+            <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>COLOR</span>
+          </button>
           <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
           {/* Whole-PROJECT new/save/open (.trc) — always visible (not gated
               behind sketchMode like the sketch-buffer Save/Load above),
@@ -9280,6 +9366,60 @@ export default function App() {
           </div>
           <div style={{color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em'}}>
             Drag or type distance to next{gridSnap ? ` (snap ${gridSizeMm}mm)` : ''} · Esc to cancel
+          </div>
+        </div>
+        </div>
+      )}
+
+      {/* ── Body Color: pick a swatch to apply to every currently-selected
+          body — same floating draggable-panel convention as the Loft popup
+          above. Swatches apply immediately on click (no separate "Apply"
+          step) since there's nothing to preview/adjust first, unlike a
+          typed distance value. ── */}
+      {tool==='color' && (
+        <div style={{
+          position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
+          zIndex: 1000,
+        }}>
+        <div ref={colorPanelDrag.panelRef} style={{
+          background: '#000',
+          border: '1.5px solid #FF7043',
+          borderRadius: 2,
+          padding: '10px 14px',
+          minWidth: 220,
+          boxShadow: '0 0 14px #FF704377, 0 0 3px #FF7043 inset',
+          fontFamily: 'monospace',
+          ...colorPanelDrag.panelStyle,
+        }}>
+          <DragHandle {...colorPanelDrag.handleProps}>Body Color</DragHandle>
+          <div style={{display:'flex', flexWrap:'wrap', gap:6, justifyContent:'center', opacity: colorSel.length>0 ? 1 : 0.4}}>
+            {['#3a7bd5','#e05a4e','#4caf50','#fbda2d','#9c6ade','#ff7043','#53d3e4','#888888','#e8e8e8','#2a2a2a'].map(hex => (
+              <button key={hex}
+                onClick={()=>applyColorToSelection(hex)}
+                disabled={colorSel.length===0}
+                title={hex}
+                style={{
+                  width:24, height:24, borderRadius:4, background:hex,
+                  border: '1px solid #444', cursor: colorSel.length>0 ? 'pointer' : 'default',
+                }}
+              />
+            ))}
+            <input
+              type="color"
+              value={colorApplyColor}
+              onChange={e=>{ setColorApplyColor(e.target.value); applyColorToSelection(e.target.value) }}
+              disabled={colorSel.length===0}
+              title="Custom color"
+              style={{
+                width:24, height:24, padding:0, border:'1px solid #444', borderRadius:4,
+                background:'none', cursor: colorSel.length>0 ? 'pointer' : 'default',
+              }}
+            />
+          </div>
+          <div style={{color:'#997', fontSize:10, marginTop:8, textAlign:'center', letterSpacing:'0.04em'}}>
+            {colorSel.length>0
+              ? `${colorSel.length} bod${colorSel.length===1?'y':'ies'} selected · click a swatch to apply`
+              : 'Click bodies in the 3D view to select'} · Esc to cancel
           </div>
         </div>
         </div>

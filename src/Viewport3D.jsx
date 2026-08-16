@@ -337,9 +337,18 @@ function buildGrid(step=10, half=5000) {
     new THREE.BufferGeometry().setFromPoints(majorPts),
     new THREE.LineBasicMaterial({color:0xa0a0b8,transparent:true,opacity:0.6,depthTest:false})
   ))
+  // Origin axis indicators — deliberately subtler than the grid lines
+  // themselves (opacity 0.35 vs the major grid's 0.6): these render with
+  // depthTest:false so they're always on top regardless of what's sketched
+  // over them, which made them read as a genuine (uneditable, "stuck")
+  // extra line whenever a user's own geometry happened to be centered
+  // exactly on the sketch origin — most confusingly for a circle/arc whose
+  // own center lands there, where this axis crosshair can look like a
+  // spurious diameter line through it. Still visible as an origin
+  // reference, just no longer competing with real sketch geometry for attention.
   const ax=200
-  const xa=new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-ax,0,0),new THREE.Vector3(ax,0,0)]),new THREE.LineBasicMaterial({color:0x662222,depthTest:false})); xa.renderOrder=1; group.add(xa)
-  const ya=new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,-ax,0),new THREE.Vector3(0,ax,0)]),new THREE.LineBasicMaterial({color:0x226622,depthTest:false})); ya.renderOrder=1; group.add(ya)
+  const xa=new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-ax,0,0),new THREE.Vector3(ax,0,0)]),new THREE.LineBasicMaterial({color:0x662222,transparent:true,opacity:0.35,depthTest:false})); xa.renderOrder=1; group.add(xa)
+  const ya=new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,-ax,0),new THREE.Vector3(0,ax,0)]),new THREE.LineBasicMaterial({color:0x226622,transparent:true,opacity:0.35,depthTest:false})); ya.renderOrder=1; group.add(ya)
   return group
 }
 
@@ -1575,6 +1584,23 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     clearJoinHighlight() {
       for (const mesh of highlightedJoinMeshesRef.current) mesh.material.emissive.set(0x000000)
       highlightedJoinMeshesRef.current = []
+    },
+
+    /**
+     * Recolors a solid's face material live, in place — no mesh/geometry
+     * rebuild. The `solids` sync effect above only diffs group membership
+     * (add/remove), it never re-reads `solid.color`, so this is the only
+     * way an existing body's rendered color actually changes; App3D.jsx's
+     * color tool also has to update `solids`/`features` state itself so a
+     * later rebuild (edit, fillet, mirror-dependent rebuild) or a
+     * save+reload keeps the new color instead of reverting to the
+     * originally-built one.
+     */
+    setSolidColor(solidId, hexColor) {
+      const s = stateRef.current; if (!s?.solidsGroup) return
+      const group = s.solidsGroup.children.find(g => g.userData?.solidId === solidId)
+      const faceMesh = group?.children.find(c => c.isMesh && !c.userData?.isSolidEdge)
+      if (faceMesh) faceMesh.material.color.set(hexColor)
     },
 
     /**

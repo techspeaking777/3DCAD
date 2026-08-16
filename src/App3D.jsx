@@ -8499,7 +8499,7 @@ export default function App() {
             dxfPickMode={tool==='exportfacedxf'}
             dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : []}
             extrudeArmed={!!extrudeState || isLoftDragArmed()}
-            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl'}
+            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='color'}
             activePlane={activePlane}
             sketchMode={sketchMode}
             gridVisible={gridVisible}

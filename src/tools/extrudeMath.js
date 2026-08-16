@@ -188,7 +188,25 @@ export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
       prevNode = forward ? nb : na
     })
 
-    if (pts.length >= 3) profiles.push(pts)
+    if (pts.length >= 3) {
+      let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity
+      for (const p of pts) {
+        if (p.x < minX) minX = p.x
+        if (p.x > maxX) maxX = p.x
+        if (p.y < minY) minY = p.y
+        if (p.y > maxY) maxY = p.y
+      }
+      // A loop smaller than the same tolerance (CLOSE_TOL) used to merge its
+      // own endpoints together is, by construction, indistinguishable from
+      // debris — a stray near-duplicate trim split landing within CLOSE_TOL
+      // of an existing point can make the walk close a "loop" out of just a
+      // couple of segments clustered at one spot instead of the real profile
+      // boundary. Offering that as a clickable cutout region produces a
+      // shape too small for OCC to build a valid face from — this surfaces
+      // as a cryptic "wire might be non planar" error deep in the CAD
+      // kernel instead of just never being offered as a cuttable region.
+      if (maxX - minX > CLOSE_TOL || maxY - minY > CLOSE_TOL) profiles.push(pts)
+    }
   }
 
   // Circles are already closed — sample each one directly into a polygon for

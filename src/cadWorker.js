@@ -32,6 +32,97 @@ function fuseTolerant(a, b) {
   return result
 }
 
+// Cut with the same fuzzy tolerance as fuseTolerant above — a cut tool
+// ending exactly flush with an existing boundary (e.g. one band of a
+// multi-band grille pattern sitting right at the edge of an earlier cut)
+// hits the same coincident-face ambiguity plain BRepAlgoAPI_Cut has trouble
+// with on fuse. Used everywhere a cut op is replayed (subtract, exportSTL,
+// mirrorShape, joinShapes) so all four stay in sync.
+//
+// Deliberately skips SimplifyResult (unlike fuseTolerant, which keeps it) —
+// verified live that calling it here can silently corrupt an arc-bearing
+// cut result in a way invisible to its own face/vertex counts, but that
+// then makes the VERY NEXT boolean op against that shape fail (a plain
+// rectangle cut immediately after an arc-shaped cut went from a correct
+// result to a total no-op, purely from this one call). No case was found
+// where keeping it helped; dropping it just leaves a few more
+// coplanar/redundant faces in the mesh, which costs nothing functionally.
+function cutTolerant(a, b) {
+  const [r, gc] = localGC()
+  const oc = getOC()
+  const progress = r(new oc.Message_ProgressRange_1())
+  const op = r(new oc.BRepAlgoAPI_Cut_3(a.wrapped, b.wrapped, progress))
+  op.SetFuzzyValue(FUSE_FUZZY_TOL)
+  op.Build(progress)
+  const result = cast(op.Shape())
+  gc()
+  return result
+}
+
+// Pure-JS estimate of how big baseParams's own solid is, in mm — deliberately
+// avoids calling live OCC's .boundingBox() on the actual built shape: a
+// solid that already has one or more cuts baked in can fail BRepBndLib's
+// bounding-box traversal outright (a native WASM exception, no catchable
+// message), which is itself just another symptom of the same boolean-
+// robustness degradation this whole clamp exists to work around — the box
+// computed here would be needed on exactly the shapes it can't be trusted
+// on. Reading straight off baseParams's own 2D profile points (always the
+// solid's ORIGINAL, never-cut params — see the 4 call sites below) sidesteps
+// that entirely, so every cut in a chain gets clamped, not just the first.
+//
+// Deliberately the MAX of the part's three dimensions, not the full 3D
+// diagonal — verified live (a real multi-hole grille chain, varying this
+// value from 100mm to 10000mm) that bigger is not safer here: the diagonal
+// of a wide, thin plate is dominated by its footprint and ends up several
+// times the actual material thickness, and that extra, unnecessary tool
+// length measurably HURT chained-cut reliability rather than helping —
+// e.g. one specific part broke on the 2nd chained cut at depth 870mm but
+// was reliable up to the 5th at every depth from 100-850mm. A single-axis
+// cut only ever needs to clear the part along that one axis; max(w,h,depth)
+// covers that for the axis-aligned/face-normal cuts this app actually
+// produces, without padding in directions the cut was never going anyway.
+function estimateBaseMaxDimMm(baseParams) {
+  if (!baseParams) return null
+  const ptsLists = baseParams.pts ? [baseParams.pts]
+    : baseParams.profiles ? baseParams.profiles.map(p => p.pts)
+    : null
+  if (!ptsLists) return null
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+  for (const pts of ptsLists) for (const p of pts) {
+    const x = Array.isArray(p) ? p[0] : p.x, y = Array.isArray(p) ? p[1] : p.y
+    if (x < minX) minX = x
+    if (x > maxX) maxX = x
+    if (y < minY) minY = y
+    if (y > maxY) maxY = y
+  }
+  const w = (maxX - minX) / SCALE, h = (maxY - minY) / SCALE // px -> mm
+  // Revolve bases have no depthMm — fall back to the planar extent itself as
+  // a generous stand-in for the swept-solid's third dimension.
+  const depth = baseParams.depthMm || Math.max(w, h)
+  return Math.max(w, h, depth)
+}
+
+// App3D sends depthMm=10000 as a "definitely bigger than any part" sentinel
+// for through-all cuts, so it never needs to know the target's real
+// thickness. But a 10000mm-long cutting prism swept through a ~50mm profile
+// is a numerically hostile shape for OCC's boolean cut (extreme aspect
+// ratio) — chaining several such cuts onto the same solid (e.g. a multi-hole
+// grille pattern) degrades rapidly and can empty the solid out entirely, or
+// silently no-op a later cut, after only 2-4 chained cuts, even though each
+// individual cut is fine in isolation. Clamping depthMm to comfortably
+// larger than the target solid's own largest dimension keeps the tool "big
+// enough to always fully cut" without the pathological aspect ratio. Only
+// ever shrinks depths that are already far bigger than the part itself — a
+// legitimate smaller blind-cut depth the user actually typed passes through
+// unchanged.
+function clampCutDepth(cut, baseParams) {
+  if (!cut.depthMm) return cut
+  const maxDim = estimateBaseMaxDimMm(baseParams)
+  if (!maxDim) return cut
+  const maxSensible = maxDim * 1.5 + 20
+  return cut.depthMm > maxSensible ? { ...cut, depthMm: maxSensible } : cut
+}
+
 // Builds the shape to subtract for one cut op — linear extrude (plain),
 // revolve (`axis` present), or loft (`profiles` present, e.g. a tapered
 // pocket cut via App3D.jsx's Loft Cutout tool). Same discriminator
@@ -103,7 +194,7 @@ self.onmessage = async function(e) {
                 op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
               ))
             } else {
-              shape = shape.cut(buildCutShape(op.params))
+              shape = cutTolerant(shape, buildCutShape(clampCutDepth(op.params, base)))
             }
           }
         }
@@ -254,12 +345,12 @@ self.onmessage = async function(e) {
         // sets depthMm=10000+direction='both' for through-all, or user
         // values for blind cut; isCut=true adds 1mm protrusion on the entry
         // side to avoid coincident-face OCC failures (see buildCutShape).
-        cutShape = buildCutShape(params.cut)
+        cutShape = buildCutShape(clampCutDepth(params.cut, params.base))
       } catch(e) {
         throw new Error(`Step2-CUT: ${e.message} | planeId=${params.cut.planeId} facePlane=${!!params.cut.normal} store=${fromStore}`)
       }
       try {
-        shape = base.cut(cutShape)
+        shape = cutTolerant(base, cutShape)
       } catch(e) {
         throw new Error(`Step3-BOOL: ${e.message} | store=${fromStore}`)
       }
@@ -281,7 +372,7 @@ self.onmessage = async function(e) {
             op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
           ))
         } else {
-          base = base.cut(buildCutShape(op.params))
+          base = cutTolerant(base, buildCutShape(clampCutDepth(op.params, params.base)))
         }
       }
       // Work-plane mirror: pass the PlaneName string directly — replicad's
@@ -312,7 +403,7 @@ self.onmessage = async function(e) {
                 op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
               ))
             } else {
-              s = s.cut(buildCutShape(op.params))
+              s = cutTolerant(s, buildCutShape(clampCutDepth(op.params, m.base)))
             }
           }
         }
@@ -455,11 +546,38 @@ function emitBezierChain(sketcher, controlPoints) {
 // wherever the sketcher's pointer already is — end + a point on the arc
 // unambiguously define the same sweep direction the polygon-sampling
 // profile-detection code walked).
-function emitArc(sketcher, seg) {
+// snapEndTo (mm, optional): when this arc is the LAST thing drawn before the
+// wire closes, its end is supposed to land exactly back on the wire's start
+// — but that start came from a stored `pts` value (survivor of a trim's own
+// line/circle-intersection math), while this arc's end is computed fresh
+// from cx/cy/r/angle: two independent floating-point paths to what should
+// be the identical point, verified live to disagree by up to ~1e-6mm. That
+// gap is small enough to be invisible on screen but sits right at OCC's
+// wire-closing tolerance edge — BRepBuilderAPI_MakeWire silently accepts
+// the resulting near-but-not-quite-closed wire, and the face/solid built
+// from it goes on to make the very NEXT boolean cut against it fail
+// outright (see cutTolerant). Snapping only this one endpoint back onto the
+// true start when they're already within dedupeRep's own "same point"
+// tolerance closes that gap exactly, without touching any other point's
+// precision (unlike a blanket rounding pass, which was tried and reliably
+// broke legitimately fine, closely-spaced geometry elsewhere).
+function emitArc(sketcher, seg, snapEndTo=null) {
+  // A near-zero angular span is trim debris, not a real curve — a genuine
+  // arc needs 3 meaningfully distinct points, and threePointsArcTo can
+  // throw an unrecoverable native error when start/mid/end collapse onto
+  // each other. Draw a line to the (barely different) end point instead;
+  // at this angular scale the two are visually and dimensionally identical.
+  if (Math.abs(seg.endAngle - seg.startAngle) < 1e-6) {
+    const endPt = { x: seg.cx + Math.cos(seg.endAngle)*seg.r, y: seg.cy + Math.sin(seg.endAngle)*seg.r }
+    sketcher.lineTo(toMm(endPt))
+    return
+  }
   const midAngle = (seg.startAngle + seg.endAngle) / 2
   const endPt = { x: seg.cx + Math.cos(seg.endAngle)*seg.r, y: seg.cy + Math.sin(seg.endAngle)*seg.r }
   const midPt = { x: seg.cx + Math.cos(midAngle)*seg.r,     y: seg.cy + Math.sin(midAngle)*seg.r }
-  sketcher.threePointsArcTo(toMm(endPt), toMm(midPt))
+  let endMm = toMm(endPt)
+  if (snapEndTo && Math.hypot(endMm[0]-snapEndTo[0], endMm[1]-snapEndTo[1]) < 0.005) endMm = snapEndTo
+  sketcher.threePointsArcTo(endMm, toMm(midPt))
 }
 
 // Mixed profile: walks `pts` by index, switching between straight .lineTo()
@@ -470,13 +588,20 @@ function emitArc(sketcher, seg) {
 function buildMixedProfile(sketcher, pts, curveSegments) {
   const segs = [...curveSegments].sort((a,b)=>a.startIdx-b.startIdx)
   const n = pts.length
-  sketcher.movePointerTo(toMm(pts[0]))
+  const anchor = toMm(pts[0])
+  sketcher.movePointerTo(anchor)
   let i = 0, segPtr = 0
   while (i < n) {
     const seg = (segPtr < segs.length && segs[segPtr].startIdx === i) ? segs[segPtr] : null
     if (seg) {
       if (seg.type === 'spline') emitBezierChain(sketcher, seg.controlPoints)
-      else if (seg.type === 'arc') emitArc(sketcher, seg)
+      else if (seg.type === 'arc') {
+        // Last segment overall, and its jump reaches (or passes) the end of
+        // pts — nothing but close() follows, so this arc's end IS the wire's
+        // closing point back onto anchor.
+        const isLastBeforeClose = segPtr === segs.length - 1 && (seg.startIdx + seg.count) >= n
+        emitArc(sketcher, seg, isLastBeforeClose ? anchor : null)
+      }
       i = seg.startIdx + seg.count
       segPtr++
     } else {

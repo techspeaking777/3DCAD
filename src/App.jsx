@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react'
-import { pxToMm, mmToPx, ALIGN_SNAP_DIST, ACQUIRE_DIST, SELECT_DIST, norm2pi, zoomRef } from './constants.js'
-import { angleOnArc, computeAllIntersections } from './geometry/intersections.js'
-import { getGeoSnap, getAllSnapPoints, checkAngle, getAngleSnap, applyTracking, computeLiveAngle, getTanPtsOnCircle, getExternalTangentPairs, nearestPt } from './geometry/snap.js'
+import { pxToMm, mmToPx, ALIGN_SNAP_DIST, ACQUIRE_DIST, SELECT_DIST, LINE_SNAP_DIST, norm2pi, zoomRef } from './constants.js'
+import { angleOnArc, computeAllIntersections, circleCircleIntersect } from './geometry/intersections.js'
+import { getGeoSnap, getAllSnapPoints, checkAngle, getAngleSnap, applyTracking, computeLiveAngle, getTanPtsOnCircle, getExternalTangentPairs, nearestPt, nearestOnSegment } from './geometry/snap.js'
 import { computeTrimPreview, performTrim, computeDeletePreview, distToSeg } from './tools/trimDelete.js'
 import { nearestOffsetEntity, computeOffsetPreview, distToEntity } from './tools/offsetMath.js'
 import { nearestMirrorEntity, buildMirror } from './tools/mirrorMath.js'
@@ -14,12 +14,22 @@ import { sampleSpline, nearestSpline, computeSplineTrimPreview, performSplineTri
 import { selectionBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform } from './tools/selectMath.js'
 import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
-import { saveJSON, loadJSON, exportDXF, parseDXF } from './tools/saveLoad.js'
+import { saveJSON, loadJSON, exportDXF, parseDXF, saveProjectAs, canPickSaveLocation } from './tools/saveLoad.js'
 import TracerPanel from './tools/TracerPanel.jsx'
 import TextPanel from './tools/TextPanel.jsx'
 import PageSetupPanel from './tools/PageSetupPanel.jsx'
 import GuidePanel from './tools/GuidePanel.jsx'
 import OrthoViewsPanel from './tools/OrthoViewsPanel.jsx'
+import LineSnapPanel from './tools/LineSnapPanel.jsx'
+import CircleSnapPanel from './tools/CircleSnapPanel.jsx'
+import SplineSnapPanel from './tools/SplineSnapPanel.jsx'
+import FilletRadiusPanel from './tools/FilletRadiusPanel.jsx'
+import OffsetDistPanel from './tools/OffsetDistPanel.jsx'
+import CopyModePanel from './tools/CopyModePanel.jsx'
+import ResizeScalePanel from './tools/ResizeScalePanel.jsx'
+import MirrorPanel from './tools/MirrorPanel.jsx'
+import SelectDimPanel from './tools/SelectDimPanel.jsx'
+import SaveAsPanel from './tools/SaveAsPanel.jsx'
 import {
   IconLine, IconCircle, IconTrim, IconDelete, IconExtend, IconOffset,
   IconMirror, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
@@ -40,6 +50,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   const [splineClosed,setSplineClosed]=useState(false) // C key toggles
   const [startPoint,setStartPoint]=useState(null)
   const [circleCenter,setCircleCenter]=useState(null)
+  const [circleTanA,setCircleTanA]=useState(null)
+  const [circleTanB,setCircleTanB]=useState(null)
   const [mousePos,setMousePos]=useState(null)
   const [dimInput,setDimInput]=useState('')
   const [dimLocked,setDimLocked]=useState(false)
@@ -104,6 +116,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   const [textOpen,setTextOpen]=useState(false)
   const [pageSetupOpen,setPageSetupOpen]=useState(false)
   const [orthoWizardOpen,setOrthoWizardOpen]=useState(false)
+  const [saveAsOpen,setSaveAsOpen]=useState(false)
   const [pageConfig,setPageConfig]=useState({size:'A4',orientation:'landscape',margin:10,showPage:false})
 
   // Minimal surface exposed to AppShell so the 3D tab's Save/Open can fold
@@ -194,6 +207,54 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     return ()=>canvas.removeEventListener('wheel',onWheel)
   },[])
 
+  // Two-finger touch = pan + pinch-zoom, combined in one gesture (same anchor
+  // math as the wheel handler above, just re-derived every touchmove from the
+  // previous frame's midpoint/distance instead of a single wheel tick). One
+  // finger is deliberately left alone here — it already reaches the existing
+  // mouse handlers via the browser's native touch-to-mouse-event simulation,
+  // which is what drives drawing/selecting on a touchscreen today.
+  useEffect(()=>{
+    const canvas=canvasRef.current;if(!canvas)return
+    const pinch={active:false,midX:0,midY:0,dist:0}
+    const touchInfo=touches=>{
+      const rect=canvas.getBoundingClientRect()
+      const pts=Array.from(touches).map(t=>({x:t.clientX-rect.left,y:t.clientY-rect.top}))
+      return {
+        midX:(pts[0].x+pts[1].x)/2, midY:(pts[0].y+pts[1].y)/2,
+        dist:Math.hypot(pts[0].x-pts[1].x,pts[0].y-pts[1].y),
+      }
+    }
+    const onTouchStart=e=>{
+      if (e.touches.length!==2) return
+      e.preventDefault()
+      const info=touchInfo(e.touches)
+      pinch.active=true;pinch.midX=info.midX;pinch.midY=info.midY;pinch.dist=info.dist
+    }
+    const onTouchMove=e=>{
+      if (!pinch.active||e.touches.length!==2) return
+      e.preventDefault()
+      const info=touchInfo(e.touches)
+      const {x:tx,y:ty,scale}=viewTransformRef.current
+      const factor=pinch.dist>0?info.dist/pinch.dist:1
+      const newScale=Math.max(0.05,Math.min(200,scale*factor))
+      const wx=(pinch.midX-tx)/scale,wy=(pinch.midY-ty)/scale
+      const vt={x:info.midX-wx*newScale,y:info.midY-wy*newScale,scale:newScale}
+      viewTransformRef.current=vt;zoomRef.scale=newScale;setViewTransform(vt)
+      pinch.midX=info.midX;pinch.midY=info.midY;pinch.dist=info.dist
+    }
+    const onTouchEnd=e=>{ if (e.touches.length<2) pinch.active=false }
+    canvas.addEventListener('touchstart',onTouchStart,{passive:false})
+    canvas.addEventListener('touchmove',onTouchMove,{passive:false})
+    canvas.addEventListener('touchend',onTouchEnd,{passive:false})
+    canvas.addEventListener('touchcancel',onTouchEnd,{passive:false})
+    return ()=>{
+      canvas.removeEventListener('touchstart',onTouchStart)
+      canvas.removeEventListener('touchmove',onTouchMove)
+      canvas.removeEventListener('touchend',onTouchEnd)
+      canvas.removeEventListener('touchcancel',onTouchEnd)
+    }
+  },[])
+
   // Measures the root div itself (via ResizeObserver) rather than
   // window.innerWidth/innerHeight — mounted inside AppShell's tab layout,
   // the available area is smaller than the full window (a tab bar sits
@@ -236,6 +297,13 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     viewTransformRef.current=vt;zoomRef.scale=sc;setViewTransform(vt)
   }
 
+  // Save button / Ctrl+S: Chromium browsers get a native folder+filename dialog;
+  // others fall back to a small filename prompt (still downloads to Downloads).
+  async function handleSave(){
+    if (canPickSaveLocation()) await saveProjectAs(lines,circles,arcs,splines)
+    else setSaveAsOpen(true)
+  }
+
   const { commit, undo, redo, canUndo, canRedo } = useHistory()
   const snapshot = () => ({ lines, circles, arcs, splines })
   const restore = (snap) => { setLines(snap.lines); setCircles(snap.circles); setArcs(snap.arcs); setSplines(snap.splines||[]) }
@@ -257,14 +325,131 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
 
   function resetDrawState(){
     setStartPoint(null);setCircleCenter(null)
+    setCircleTanA(null);setCircleTanB(null)
     setDimInput('');setDimLocked(false);setAngleInput('');setAngleLocked(false);setFocusField('dim')
     setTrackedPts([]);trackedPtsRef.current=[];setDeferredTangent(null);setTKeyDown(false);setPKeyDown(false);setPerpSourceLineIdx(null)
+  }
+  // Typing a length/distance and/or angle only locks that value in — placing
+  // the actual line or move/copy still requires a canvas click (see
+  // LineSnapPanel.jsx and CopyModePanel.jsx's Move distance+direction box,
+  // which share this same dimInput/angleInput state). The existing Tab-key
+  // single-field lock (below, in handleKeyDown) keeps working as a fallback;
+  // this is the visible Lock-It-In button's handler.
+  function applyDimAngleLock(){
+    if (dimInput&&parseFloat(dimInput)>0) setDimLocked(true)
+    if (angleInput&&parseFloat(angleInput)>=0) setAngleLocked(true)
+  }
+  // Circle tool: typing a radius only locks that value in — placing the
+  // actual circle still requires a canvas click (see CircleSnapPanel.jsx).
+  // Harmless no-op for the tangent-to-2-circles case, which already treats
+  // any non-empty dimInput as an override regardless of this flag.
+  function applyCircleRadius(){
+    if (dimInput&&parseFloat(dimInput)>0) setDimLocked(true)
   }
   function resetSelection(){
     setSelection([]);setSelectHover(null);setSelectLiveGeom(null)
     setSelectDimField(null);setSelectDimPending({});setSelectDimAnchor('mc')
     selectDragHandleRef.current=null;selectDragStartRef.current=null
     selectSnapshotRef.current=null;selectBBoxRef.current=null
+  }
+  // Shared by the blind Tab/Enter flow and the visible SelectDimPanel's Apply button.
+  function applySelectDims(finalPending){
+    commit(snapshot())
+    if (selection.length===1){
+      const ent=selection[0]
+      if (ent.kind==='line'){
+        const l=lines[ent.idx]
+        const dx=l.x2-l.x1,dy=l.y2-l.y1
+        const oldLen=Math.hypot(dx,dy)
+        let newLen=oldLen,newAngleRad=Math.atan2(dy,dx)
+        if (finalPending.length&&parseFloat(finalPending.length)>0)
+          newLen=mmToPx(parseFloat(finalPending.length))
+        if (finalPending.angle&&parseFloat(finalPending.angle)>=0)
+          newAngleRad=(360-parseFloat(finalPending.angle))*Math.PI/180
+        const nx=Math.cos(newAngleRad),ny=Math.sin(newAngleRad)
+        // Determine fixed point from anchor handle
+        const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
+        const handles2=bbox2?getBBoxHandles(bbox2):null
+        const anchorPt=handles2?handles2[selectDimAnchor]||handles2['mc']:null
+        if (!anchorPt||selectDimAnchor==='mc'){
+          // Anchor = midpoint
+          const mx=(l.x1+l.x2)/2,my=(l.y1+l.y2)/2
+          setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x1:mx-nx*newLen/2,y1:my-ny*newLen/2,x2:mx+nx*newLen/2,y2:my+ny*newLen/2}:ln))
+        } else {
+          // Find which endpoint is closest to anchor handle — that end stays fixed
+          const d1=Math.hypot(l.x1-anchorPt.x,l.y1-anchorPt.y)
+          const d2=Math.hypot(l.x2-anchorPt.x,l.y2-anchorPt.y)
+          if (d1<=d2){
+            // x1,y1 stays fixed — x2,y2 moves
+            setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x2:l.x1+nx*newLen,y2:l.y1+ny*newLen}:ln))
+          } else {
+            // x2,y2 stays fixed — x1,y1 moves
+            setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x1:l.x2-nx*newLen,y1:l.y2-ny*newLen}:ln))
+          }
+        }
+      } else if (ent.kind==='circle'&&finalPending.radius&&parseFloat(finalPending.radius)>0){
+        const c=circles[ent.idx]
+        const newR=mmToPx(parseFloat(finalPending.radius))
+        const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
+        const handles2=bbox2?getBBoxHandles(bbox2):null
+        const anchorPt=handles2?handles2[selectDimAnchor]||handles2['mc']:null
+        if (!anchorPt||selectDimAnchor==='mc'){
+          // Centre stays fixed
+          setCircles(p=>p.map((ci,i)=>i===ent.idx?{...ci,r:newR}:ci))
+        } else {
+          // Anchor point stays fixed — shift centre
+          // The anchor handle is on the circle's bbox edge
+          // New centre = anchor + offset scaled to new radius
+          const ocx=c.cx,ocy=c.cy,or=c.r
+          const fromAnchorX=ocx-anchorPt.x,fromAnchorY=ocy-anchorPt.y
+          const dist=Math.hypot(fromAnchorX,fromAnchorY)||1
+          const newCx=anchorPt.x+(fromAnchorX/dist)*newR
+          const newCy=anchorPt.y+(fromAnchorY/dist)*newR
+          setCircles(p=>p.map((ci,i)=>i===ent.idx?{...ci,cx:newCx,cy:newCy,r:newR}:ci))
+        }
+      } else if (ent.kind==='arc'&&(finalPending.radius||finalPending.angle)){
+        const a=arcs[ent.idx]
+        let r=a.r,span=norm2pi(a.endAngle-a.startAngle)
+        if (finalPending.radius&&parseFloat(finalPending.radius)>0) r=mmToPx(parseFloat(finalPending.radius))
+        if (finalPending.angle&&parseFloat(finalPending.angle)>0) span=parseFloat(finalPending.angle)*Math.PI/180
+        if (finalPending.radius&&parseFloat(finalPending.radius)>0){
+          const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
+          const handles2=bbox2?getBBoxHandles(bbox2):null
+          const anchorPt=handles2?handles2[selectDimAnchor]||handles2['mc']:null
+          if (anchorPt&&selectDimAnchor!=='mc'){
+            const fromAnchorX=a.cx-anchorPt.x,fromAnchorY=a.cy-anchorPt.y
+            const dist=Math.hypot(fromAnchorX,fromAnchorY)||1
+            const newCx=anchorPt.x+(fromAnchorX/dist)*r
+            const newCy=anchorPt.y+(fromAnchorY/dist)*r
+            const mid=(a.startAngle+a.endAngle)/2
+            setArcs(p=>p.map((ar,i)=>i===ent.idx?{...ar,cx:newCx,cy:newCy,r,startAngle:mid-span/2,endAngle:mid+span/2}:ar))
+          } else {
+            const mid=(a.startAngle+a.endAngle)/2
+            setArcs(p=>p.map((ar,i)=>i===ent.idx?{...ar,r,startAngle:mid-span/2,endAngle:mid+span/2}:ar))
+          }
+        } else {
+          const mid=(a.startAngle+a.endAngle)/2
+          setArcs(p=>p.map((ar,i)=>i===ent.idx?{...ar,r,startAngle:mid-span/2,endAngle:mid+span/2}:ar))
+        }
+      }
+    } else {
+      // Multi-select: apply W and/or H independently
+      const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
+      if (bbox2){
+        // Determine anchor world point from anchor handle id
+        const handles=getBBoxHandles(bbox2)
+        const anchorH=handles[selectDimAnchor]||handles['mc']
+        let sx=1,sy=1
+        if (finalPending.width&&parseFloat(finalPending.width)>0)
+          sx=mmToPx(parseFloat(finalPending.width))/bbox2.w
+        if (finalPending.height&&parseFloat(finalPending.height)>0)
+          sy=mmToPx(parseFloat(finalPending.height))/bbox2.h
+        const result=applySelectionTransform(selection,lines,circles,arcs,splines,{x:anchorH.x,y:anchorH.y},sx,sy,0,0)
+        setLines(result.lines);setCircles(result.circles);setArcs(result.arcs);setSplines(result.splines)
+      }
+    }
+    setSelectDimField(null);setSelectDimPending({});setSelectDimAnchor('mc')
+    setSelectDimInput('')
   }
   function resetSpline(){
     setSplinePoints([]);setSplineClosed(false)
@@ -295,6 +480,20 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   function resetFillet(){
     setFilletSel([]);setFilletAccepted(false)
     setFilletRadiusInput('');setFilletHover(null);setFilletPreview(null)
+  }
+  // Shared by the click-to-apply path, Enter, and FilletRadiusPanel's Apply button.
+  function applyFillet(){
+    if (!filletPreview||filletPreview.tooLarge) return
+    const{newL1,newL2,arc}=filletPreview
+    // Carry style from source lines through fillet
+    const s1=lines[filletSel[0].idx]?.style
+    const s2=lines[filletSel[1].idx]?.style
+    commit(snapshot())
+    setLines(p=>[...p.filter((_,i)=>!filletSel.some(s=>s.idx===i)),
+      s1?{...newL1,style:s1}:newL1,
+      s2?{...newL2,style:s2}:newL2])
+    setArcs(p=>[...p,arc])
+    resetFillet()
   }
   function resetTrace(){
     setTraceOpen(false);setTraceInsertPt(null)
@@ -362,10 +561,57 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     }
   }
 
+  // When a VERT/HORIZ alignment guide is active near a line, find exactly
+  // where that guide crosses the line — otherwise the endpoint just floats
+  // along the raw cursor position past the edge once tracking engages,
+  // which reads as the line having "desnapped": you can drag straight
+  // through the target edge without the endpoint ever landing on it.
+  function intersectTrackWithLine(tp,isVertical,raw,candidateLines){
+    const ld=LINE_SNAP_DIST/zoomRef.scale
+    let best=null,bestDist=ld+1
+    for (const l of candidateLines){
+      const n=nearestOnSegment(raw.x,raw.y,l.x1,l.y1,l.x2,l.y2)
+      if (n.dist<bestDist){bestDist=n.dist;best=l}
+    }
+    if (!best) return null
+    const{x1,y1,x2,y2}=best
+    if (isVertical){
+      const dx=x2-x1
+      if (Math.abs(dx)<1e-9) return null
+      const t=(tp.x-x1)/dx
+      if (t<-0.02||t>1.02) return null
+      return{x:tp.x,y:y1+t*(y2-y1)}
+    } else {
+      const dy=y2-y1
+      if (Math.abs(dy)<1e-9) return null
+      const t=(tp.y-y1)/dy
+      if (t<-0.02||t>1.02) return null
+      return{x:x1+t*(x2-x1),y:tp.y}
+    }
+  }
+
   function computeEnd(start,raw,tracked){
     if (!dimLocked&&!angleLocked){
       const geo=getGeoSnap(raw,lines,circles,arcs,start,false,splines,intersectionPts)
-      if (geo&&geo.type!=='tan') return{x:geo.x,y:geo.y,snapType:geo.type,angleSnap:checkAngle(start,geo),tracks:[]}
+      // 'online' is the weakest geo-snap tier (any point along an edge, not a
+      // specific feature) — when an alignment track is actively engaged, let
+      // it win instead, otherwise it could never apply near an edge: the
+      // cursor is within LINE_SNAP_DIST of the edge (triggering online) well
+      // before it's off the tracked vertical/horizontal line, so online
+      // would always fire first and VERT/HORIZ would show but never snap.
+      const ad=ALIGN_SNAP_DIST/zoomRef.scale
+      const activeTp=tracked.find(tp=>Math.abs(raw.y-tp.y)<ad||Math.abs(raw.x-tp.x)<ad)
+      if (geo&&geo.type==='online'&&activeTp){
+        const isVertical=Math.abs(raw.x-activeTp.x)<ad
+        const hit=intersectTrackWithLine(activeTp,isVertical,raw,lines)
+        // Snap exactly onto where the guide crosses the edge. If there's no
+        // valid crossing (parallel, or the guide misses the segment), fall
+        // through to plain tracking below rather than reusing the raw
+        // online point — that's what caused the desnap symptom originally.
+        if (hit) return{x:hit.x,y:hit.y,snapType:'online',angleSnap:checkAngle(start,hit),tracks:[]}
+      } else if (geo&&geo.type!=='tan'){
+        return{x:geo.x,y:geo.y,snapType:geo.type,angleSnap:checkAngle(start,geo),tracks:[]}
+      }
     }
     const{snapped,tracks}=applyTracking(raw,tracked)
     let endX=snapped.x,endY=snapped.y,angleSnap=null
@@ -690,6 +936,31 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     ctx.restore()
   }
 
+  // Solve for a circle of radius r externally tangent to both circleTanA and circleTanB.
+  // Returns {best,candidates} (best = candidate nearest ref) or null if no fit / no radius yet.
+  function tanCircleSolution(r, ref) {
+    if (!circleTanA||!circleTanB||!(r>0)||!ref) return null
+    const candidates=circleCircleIntersect(circleTanA.cx,circleTanA.cy,circleTanA.r+r,circleTanB.cx,circleTanB.cy,circleTanB.r+r)
+    if (!candidates.length) return null
+    return { best:nearestPt(candidates,ref), candidates }
+  }
+
+  // Approximate "what radius does the cursor imply" for the 2-tangent-circle construction.
+  // There's no simple closed form (the centre depends on r too), so this averages the radius
+  // each target circle would imply if the cursor were the new circle's centre — good enough
+  // for a natural grow/shrink feel while the mouse moves, before an exact number is typed.
+  function tanCircleGuessRadius(ref) {
+    if (!circleTanA||!circleTanB||!ref) return 1
+    const rA=Math.hypot(ref.x-circleTanA.cx,ref.y-circleTanA.cy)-circleTanA.r
+    const rB=Math.hypot(ref.x-circleTanB.cx,ref.y-circleTanB.cy)-circleTanB.r
+    return Math.max(1,(rA+rB)/2)
+  }
+
+  // Current radius for the 2-tangent-circle construction: typed value if present, else live mouse guess.
+  function tanCircleCurrentRadius(ref) {
+    return dimInput ? mmToPx(parseFloat(dimInput)||0) : tanCircleGuessRadius(ref)
+  }
+
   // Apply entity style to canvas context
   function applyEntityStyle(ctx, entity, sc, baseColor, baseLineWidth) {
     const s = entity?.style
@@ -803,12 +1074,13 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       const isRCHov=rotateCopyHover?.kind==='circle'&&rotateCopyHover.idx===idx&&!isRCSel
       const isRzSel=resizeSel.some(e=>e.kind==='circle'&&e.idx===idx)
       const isRzHov=resizeHover?.kind==='circle'&&resizeHover.idx===idx&&!isRzSel
+      const isTanSel=(circleTanA&&circleTanA.circleIdx===idx)||(circleTanB&&circleTanB.circleIdx===idx)
       ctx.beginPath();ctx.arc(c.cx,c.cy,c.r,0,Math.PI*2)
-      const cColor=isDelTarget?'#F44336':isMirSel||isMCSel||isRCSel||isRzSel?'#FF9800':isMirHov||isMCHov||isRCHov||isRzHov?'#FFD600':'#222'
-      const cLW=(isDelTarget||isMirSel||isMCSel||isRCSel||isRzSel?3:isMirHov||isMCHov||isRCHov||isRzHov?2:1.5)/sc
+      const cColor=isDelTarget?'#F44336':isMirSel||isMCSel||isRCSel||isRzSel||isTanSel?'#FF9800':isMirHov||isMCHov||isRCHov||isRzHov?'#FFD600':'#222'
+      const cLW=(isDelTarget||isMirSel||isMCSel||isRCSel||isRzSel||isTanSel?3:isMirHov||isMCHov||isRCHov||isRzHov?2:1.5)/sc
       applyEntityStyle(ctx,c,sc,cColor,cLW);ctx.stroke();ctx.setLineDash([])
       ctx.beginPath();ctx.arc(c.cx,c.cy,2/sc,0,Math.PI*2)
-      ctx.fillStyle=isDelTarget?'#F44336':isMirSel||isMCSel||isRCSel||isRzSel?'#FF9800':isMirHov||isMCHov||isRCHov||isRzHov?'#FFD600':'#222';ctx.fill()
+      ctx.fillStyle=isDelTarget?'#F44336':isMirSel||isMCSel||isRCSel||isRzSel||isTanSel?'#FF9800':isMirHov||isMCHov||isRCHov||isRzHov?'#FFD600':'#222';ctx.fill()
     })
 
     drawArcs.forEach((arc,idx)=>{
@@ -1499,6 +1771,33 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       }
     }
 
+    // Tangent-to-2-circles preview — live radius from cursor until an exact number is typed
+    if (tool==='circle'&&circleTanA&&circleTanB&&mousePos){
+      const r=tanCircleCurrentRadius(mousePos)
+      const sol=tanCircleSolution(r,mousePos)
+      if (!sol){
+        drawLabel(ctx,'No fit — try a different radius',mousePos.x,mousePos.y-20/sc,'#F44336',sc)
+      } else {
+        const{best,candidates}=sol
+        candidates.forEach(cand=>{
+          if (cand===best) return
+          ctx.beginPath();ctx.arc(cand.x,cand.y,r,0,Math.PI*2)
+          ctx.strokeStyle='#4CAF5055';ctx.lineWidth=1/sc;ctx.setLineDash([4/sc,3/sc]);ctx.stroke();ctx.setLineDash([])
+        })
+        ctx.beginPath();ctx.arc(best.x,best.y,r,0,Math.PI*2)
+        ctx.strokeStyle='#4CAF50';ctx.lineWidth=2/sc;ctx.setLineDash([6/sc,3/sc]);ctx.stroke();ctx.setLineDash([])
+        // Tangent point markers — on the line from each target's centre to the new centre, at the target's radius
+        ;[circleTanA,circleTanB].forEach(tc=>{
+          const d=Math.hypot(best.x-tc.cx,best.y-tc.cy)||1
+          const t={x:tc.cx+(best.x-tc.cx)*tc.r/d,y:tc.cy+(best.y-tc.cy)*tc.r/d}
+          ctx.save();ctx.translate(t.x,t.y);ctx.scale(1/sc,1/sc)
+          ctx.beginPath();ctx.arc(0,0,4,0,Math.PI*2);ctx.fillStyle='#4CAF50';ctx.fill()
+          ctx.restore()
+        })
+        drawLabel(ctx,(dimInput?'R ':'R ~')+pxToMm(r).toFixed(1)+' mm · Enter or click to apply',best.x,best.y-r/sc-14/sc,'#4CAF50',sc)
+      }
+    }
+
     if (!mousePos) return
 
     if (tool==='line'&&deferredTangent){
@@ -1652,7 +1951,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       if (geo) drawLineIndicator(ctx,geo.x,geo.y,geo.type,sc)
     }
 
-  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,deferredTangent,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetDistLocked,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,canvasSize,tKeyDown,pKeyDown,perpSourceLineIdx,drawStyle,intersectionPts,joinHover,joinFirstPt,pageConfig,dims,dimToolPreview,dimToolPts,gridVisible,gridSizeMm])
+  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,deferredTangent,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetDistLocked,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,canvasSize,tKeyDown,pKeyDown,perpSourceLineIdx,drawStyle,intersectionPts,joinHover,joinFirstPt,pageConfig,dims,dimToolPreview,dimToolPts,gridVisible,gridSizeMm])
 
   function handleMouseDown(e){
     if (e.button===1){e.preventDefault();isPanningRef.current=true;lastPanPosRef.current={x:e.clientX,y:e.clientY}}
@@ -2056,18 +2355,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         if (already>=0) setFilletSel(p=>p.filter((_,i)=>i!==already))
         else if (filletSel.length<2) setFilletSel(p=>[...p,hit])
       } else {
-        // Click applies the fillet (same as Enter)
-        if (!filletPreview||filletPreview.tooLarge) return
-        const{newL1,newL2,arc}=filletPreview
-        // Carry style from source lines through fillet
-        const s1=lines[filletSel[0].idx]?.style
-        const s2=lines[filletSel[1].idx]?.style
-        commit(snapshot())
-        setLines(p=>[...p.filter((_,i)=>!filletSel.some(s=>s.idx===i)),
-          s1?{...newL1,style:s1}:newL1,
-          s2?{...newL2,style:s2}:newL2])
-        setArcs(p=>[...p,arc])
-        resetFillet()
+        // Click applies the fillet (same as Enter / the FilletRadiusPanel's Apply button)
+        applyFillet()
       }
       return
     }
@@ -2140,10 +2429,31 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         resetDrawState()
       }
     } else if (tool==='circle'){
-      if (!circleCenter){
-        const geo=getGeoSnap(raw,lines,circles,arcs,null,false,splines,intersectionPts)
-        setCircleCenter(geo?{x:geo.x,y:geo.y}:raw)
-        setDimInput('');setDimLocked(false);setTrackedPts([]);trackedPtsRef.current=[]
+      if (circleTanA&&!circleTanB){
+        // Picking second tangent target circle
+        const geo=getGeoSnap(raw,lines,circles,arcs,null,tKeyDown,splines,intersectionPts)
+        if (tKeyDown&&geo?.type==='tan'&&geo.circleIdx!==undefined&&geo.circleIdx!==circleTanA.circleIdx){
+          setCircleTanB({...circles[geo.circleIdx],circleIdx:geo.circleIdx})
+          setDimInput('');setDimLocked(false)
+        }
+      } else if (circleTanA&&circleTanB){
+        // Both targets locked — click commits using the typed radius, or the live cursor radius
+        const r=tanCircleCurrentRadius(raw)
+        const sol=tanCircleSolution(r,raw)
+        if (sol){
+          commit(snapshot())
+          setCircles(p=>[...p,{cx:sol.best.x,cy:sol.best.y,r,...(drawStyle?{style:drawStyle}:{})}])
+        }
+        resetDrawState()
+      } else if (!circleCenter){
+        const geo=getGeoSnap(raw,lines,circles,arcs,null,tKeyDown,splines,intersectionPts)
+        if (tKeyDown&&geo?.type==='tan'&&geo.circleIdx!==undefined){
+          setCircleTanA({...circles[geo.circleIdx],circleIdx:geo.circleIdx})
+          setDimInput('');setDimLocked(false)
+        } else {
+          setCircleCenter(geo?{x:geo.x,y:geo.y}:raw)
+          setDimInput('');setDimLocked(false);setTrackedPts([]);trackedPtsRef.current=[]
+        }
       } else {
         let r
         if (dimLocked){
@@ -2289,7 +2599,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       }
     if (e.ctrlKey&&e.key==='z'){e.preventDefault();undo(snapshot(),restore);return}
     if (e.ctrlKey&&e.key==='y'){e.preventDefault();redo(snapshot(),restore);return}
-    if (e.ctrlKey&&e.key==='s'){e.preventDefault();saveJSON(lines,circles,arcs,splines,dims);return}
+    if (e.ctrlKey&&e.key==='s'){e.preventDefault();handleSave();return}
     if ((e.key==='f'||e.key==='F')&&!e.ctrlKey){zoomToFit();return}
 
     if (tool==='trim'||tool==='delete'||tool==='extend'||tool==='trace'||tool==='text'||tool==='select'||tool==='join'){if(e.key==='Escape'){resetText();resetSelection();resetJoin();resetDim();setTool('line');return}}
@@ -2367,103 +2677,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           const finalPending = selectDimField
             ? {...selectDimPending,[selectDimField]:selectDimInput}
             : selectDimPending
-          // Apply all pending values in one commit
-          commit(snapshot())
-          if (selection.length===1){
-            const ent=selection[0]
-            if (ent.kind==='line'){
-              const l=lines[ent.idx]
-              const dx=l.x2-l.x1,dy=l.y2-l.y1
-              const oldLen=Math.hypot(dx,dy)
-              let newLen=oldLen,newAngleRad=Math.atan2(dy,dx)
-              if (finalPending.length&&parseFloat(finalPending.length)>0)
-                newLen=mmToPx(parseFloat(finalPending.length))
-              if (finalPending.angle&&parseFloat(finalPending.angle)>=0)
-                newAngleRad=(360-parseFloat(finalPending.angle))*Math.PI/180
-              const nx=Math.cos(newAngleRad),ny=Math.sin(newAngleRad)
-              // Determine fixed point from anchor handle
-              const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
-              const handles2=bbox2?getBBoxHandles(bbox2):null
-              const anchorPt=handles2?handles2[selectDimAnchor]||handles2['mc']:null
-              if (!anchorPt||selectDimAnchor==='mc'){
-                // Anchor = midpoint
-                const mx=(l.x1+l.x2)/2,my=(l.y1+l.y2)/2
-                setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x1:mx-nx*newLen/2,y1:my-ny*newLen/2,x2:mx+nx*newLen/2,y2:my+ny*newLen/2}:ln))
-              } else {
-                // Find which endpoint is closest to anchor handle — that end stays fixed
-                const d1=Math.hypot(l.x1-anchorPt.x,l.y1-anchorPt.y)
-                const d2=Math.hypot(l.x2-anchorPt.x,l.y2-anchorPt.y)
-                if (d1<=d2){
-                  // x1,y1 stays fixed — x2,y2 moves
-                  setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x2:l.x1+nx*newLen,y2:l.y1+ny*newLen}:ln))
-                } else {
-                  // x2,y2 stays fixed — x1,y1 moves
-                  setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x1:l.x2-nx*newLen,y1:l.y2-ny*newLen}:ln))
-                }
-              }
-            } else if (ent.kind==='circle'&&finalPending.radius&&parseFloat(finalPending.radius)>0){
-              const c=circles[ent.idx]
-              const newR=mmToPx(parseFloat(finalPending.radius))
-              const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
-              const handles2=bbox2?getBBoxHandles(bbox2):null
-              const anchorPt=handles2?handles2[selectDimAnchor]||handles2['mc']:null
-              if (!anchorPt||selectDimAnchor==='mc'){
-                // Centre stays fixed
-                setCircles(p=>p.map((ci,i)=>i===ent.idx?{...ci,r:newR}:ci))
-              } else {
-                // Anchor point stays fixed — shift centre
-                // The anchor handle is on the circle's bbox edge
-                // New centre = anchor + offset scaled to new radius
-                const ocx=c.cx,ocy=c.cy,or=c.r
-                const fromAnchorX=ocx-anchorPt.x,fromAnchorY=ocy-anchorPt.y
-                const dist=Math.hypot(fromAnchorX,fromAnchorY)||1
-                const newCx=anchorPt.x+(fromAnchorX/dist)*newR
-                const newCy=anchorPt.y+(fromAnchorY/dist)*newR
-                setCircles(p=>p.map((ci,i)=>i===ent.idx?{...ci,cx:newCx,cy:newCy,r:newR}:ci))
-              }
-            } else if (ent.kind==='arc'&&(finalPending.radius||finalPending.angle)){
-              const a=arcs[ent.idx]
-              let r=a.r,span=norm2pi(a.endAngle-a.startAngle)
-              if (finalPending.radius&&parseFloat(finalPending.radius)>0) r=mmToPx(parseFloat(finalPending.radius))
-              if (finalPending.angle&&parseFloat(finalPending.angle)>0) span=parseFloat(finalPending.angle)*Math.PI/180
-              if (finalPending.radius&&parseFloat(finalPending.radius)>0){
-                const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
-                const handles2=bbox2?getBBoxHandles(bbox2):null
-                const anchorPt=handles2?handles2[selectDimAnchor]||handles2['mc']:null
-                if (anchorPt&&selectDimAnchor!=='mc'){
-                  const fromAnchorX=a.cx-anchorPt.x,fromAnchorY=a.cy-anchorPt.y
-                  const dist=Math.hypot(fromAnchorX,fromAnchorY)||1
-                  const newCx=anchorPt.x+(fromAnchorX/dist)*r
-                  const newCy=anchorPt.y+(fromAnchorY/dist)*r
-                  const mid=(a.startAngle+a.endAngle)/2
-                  setArcs(p=>p.map((ar,i)=>i===ent.idx?{...ar,cx:newCx,cy:newCy,r,startAngle:mid-span/2,endAngle:mid+span/2}:ar))
-                } else {
-                  const mid=(a.startAngle+a.endAngle)/2
-                  setArcs(p=>p.map((ar,i)=>i===ent.idx?{...ar,r,startAngle:mid-span/2,endAngle:mid+span/2}:ar))
-                }
-              } else {
-                const mid=(a.startAngle+a.endAngle)/2
-                setArcs(p=>p.map((ar,i)=>i===ent.idx?{...ar,r,startAngle:mid-span/2,endAngle:mid+span/2}:ar))
-              }
-            }
-          } else {
-            // Multi-select: apply W and/or H independently
-            const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
-            if (bbox2){
-              // Determine anchor world point from anchor handle id
-              const handles=getBBoxHandles(bbox2)
-              const anchorH=handles[selectDimAnchor]||handles['mc']
-              let sx=1,sy=1
-              if (finalPending.width&&parseFloat(finalPending.width)>0)
-                sx=mmToPx(parseFloat(finalPending.width))/bbox2.w
-              if (finalPending.height&&parseFloat(finalPending.height)>0)
-                sy=mmToPx(parseFloat(finalPending.height))/bbox2.h
-              const result=applySelectionTransform(selection,lines,circles,arcs,splines,{x:anchorH.x,y:anchorH.y},sx,sy,0,0)
-              setLines(result.lines);setCircles(result.circles);setArcs(result.arcs);setSplines(result.splines)
-            }
-          }
-          setSelectDimField(null);setSelectDimPending({});setSelectDimAnchor('mc')
-          setSelectDimInput('')
+          applySelectDims(finalPending)
           return
         }
         if (e.key==='Escape'){setSelectDimField(null);setSelectDimPending({});setSelectDimInput('');return}
@@ -2549,20 +2763,10 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         if (e.key==='Tab'){e.preventDefault();if(filletSel.length===2)setFilletAccepted(true);return}
         return
       }
-      // Accepted — type radius then Enter/click to apply
+      // Accepted — type radius then Enter/click/panel-Apply to apply
       if (e.key==='Enter'){
         e.preventDefault()
-        if (!filletPreview||filletPreview.tooLarge) return
-        const{newL1,newL2,arc}=filletPreview
-        // Carry style from source lines through fillet
-        const s1=lines[filletSel[0].idx]?.style
-        const s2=lines[filletSel[1].idx]?.style
-        commit(snapshot())
-        setLines(p=>[...p.filter((_,i)=>!filletSel.some(s=>s.idx===i)),
-          s1?{...newL1,style:s1}:newL1,
-          s2?{...newL2,style:s2}:newL2])
-        setArcs(p=>[...p,arc])
-        resetFillet()
+        applyFillet()
         return
       }
       if (e.key==='Backspace'){setFilletRadiusInput(p=>p.slice(0,-1));return}
@@ -2570,7 +2774,25 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       return
     }
 
-    if (!startPoint&&!circleCenter&&!deferredTangent) return
+    if (tool==='circle'&&circleTanA&&circleTanB){
+      if (e.key==='Escape'){resetDrawState();return}
+      if (e.key==='Enter'){
+        e.preventDefault()
+        const r=tanCircleCurrentRadius(mousePos)
+        const sol=tanCircleSolution(r,mousePos)
+        if (sol){
+          commit(snapshot())
+          setCircles(p=>[...p,{cx:sol.best.x,cy:sol.best.y,r,...(drawStyle?{style:drawStyle}:{})}])
+        }
+        resetDrawState()
+        return
+      }
+      if (e.key==='Backspace'){setDimInput(p=>p.slice(0,-1));return}
+      if (/^[0-9.]$/.test(e.key)){setDimInput(p=>p+e.key);return}
+      return
+    }
+
+    if (!startPoint&&!circleCenter&&!deferredTangent&&!circleTanA) return
     if (e.key==='Escape'){resetDrawState();return}
     if (e.key==='Tab'){
       e.preventDefault()
@@ -2831,17 +3053,173 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   const btnBase={border:'none',borderRadius:5,cursor:'pointer',padding:4,display:'flex',alignItems:'center',justifyContent:'center',width:68,height:68,transition:'background 0.1s'}
   const zoomPct=Math.round(viewTransform.scale*100)
 
+  // Live length/angle for the LineSnapPanel's placeholder text while mid-draw
+  let lineLiveLenMm=null, lineLiveAngleDeg=null
+  if (tool==='line'&&startPoint&&mousePos&&!deferredTangent){
+    const endPt=computeEnd(startPoint,mousePos,trackedPts)
+    lineLiveLenMm=pxToMm(Math.hypot(endPt.x-startPoint.x,endPt.y-startPoint.y))
+    lineLiveAngleDeg=computeLiveAngle(startPoint,endPt)
+  }
+
+  // Live radius for the CircleSnapPanel's placeholder text while mid-draw
+  let circleLiveRadiusMm=null
+  if (tool==='circle'&&mousePos){
+    if (circleTanA&&circleTanB) circleLiveRadiusMm=pxToMm(tanCircleGuessRadius(mousePos))
+    else if (circleCenter) circleLiveRadiusMm=pxToMm(Math.hypot(mousePos.x-circleCenter.x,mousePos.y-circleCenter.y))
+  }
+
+  // Live angle for the Rotate/Copy panel's placeholder text while picking the angle
+  let rotateCopyLiveAngleDeg=null
+  if (tool==='rotatecopy'&&rotateCopyAccepted&&startPoint&&mousePos){
+    const dx=mousePos.x-startPoint.x,dy=mousePos.y-startPoint.y
+    let d=Math.atan2(dy,dx)*180/Math.PI
+    if (d<0) d+=360
+    rotateCopyLiveAngleDeg=d
+  }
+
+  // Live distance/direction for the Move/Copy panel's placeholder text while
+  // dragging out the destination point.
+  let moveCopyLiveDistMm=null, moveCopyLiveAngleDeg=null
+  if (tool==='movecopy'&&moveCopyAccepted&&startPoint&&mousePos){
+    const dx=mousePos.x-startPoint.x,dy=mousePos.y-startPoint.y
+    moveCopyLiveDistMm=pxToMm(Math.hypot(dx,dy))
+    let d=Math.atan2(dy,dx)*180/Math.PI
+    if (d<0) d+=360
+    moveCopyLiveAngleDeg=d
+  }
+
+  // Select-tool: real input-box panel, positioned near the current selection
+  let selectDimPanel=null
+  if (tool==='select'&&selection.length>0&&canvasRef.current){
+    const curLines   = selectLiveGeom?.lines   || lines
+    const curCircles = selectLiveGeom?.circles || circles
+    const curArcs    = selectLiveGeom?.arcs    || arcs
+    const curSplines = selectLiveGeom?.splines || splines
+    const bbox=selectionBBox(selection,curLines,curCircles,curArcs,curSplines)
+    if (bbox){
+      let fields=[],live={}
+      if (selection.length===1){
+        const e0=selection[0]
+        if (e0.kind==='line'){
+          const l=curLines[e0.idx]
+          if (l){
+            const len=pxToMm(Math.hypot(l.x2-l.x1,l.y2-l.y1))
+            let ang=Math.atan2(-(l.y2-l.y1),l.x2-l.x1)*180/Math.PI;if(ang<0)ang+=360
+            fields=[{key:'length',label:'Length',unit:'mm'},{key:'angle',label:'Angle',unit:'°'}]
+            live={length:len,angle:ang}
+          }
+        } else if (e0.kind==='circle'){
+          const c=curCircles[e0.idx]
+          if (c){ fields=[{key:'radius',label:'Radius',unit:'mm'}]; live={radius:pxToMm(c.r)} }
+        } else if (e0.kind==='arc'){
+          const a=curArcs[e0.idx]
+          if (a){
+            const span=norm2pi(a.endAngle-a.startAngle)*180/Math.PI
+            fields=[{key:'radius',label:'Radius',unit:'mm'},{key:'angle',label:'Angle',unit:'°'}]
+            live={radius:pxToMm(a.r),angle:span}
+          }
+        }
+      } else {
+        fields=[{key:'width',label:'Width',unit:'mm'},{key:'height',label:'Height',unit:'mm'}]
+        live={width:pxToMm(bbox.w),height:pxToMm(bbox.h)}
+      }
+      if (fields.length){
+        const sc=viewTransform.scale
+        const rect=canvasRef.current.getBoundingClientRect()
+        const screenX=bbox.x2*sc+viewTransform.x
+        const screenY=bbox.y1*sc+viewTransform.y
+        selectDimPanel={
+          left:rect.left+screenX+18,
+          top:Math.max(rect.top+8,rect.top+screenY-20),
+          fields, live,
+        }
+      }
+    }
+  }
+
   return (
     <div ref={rootDivRef} style={{display:'flex',height:'100%',outline:'none'}} tabIndex={0} onKeyDown={handleKeyDown}>
-      <div style={{width:72,background:'#1e1e1e',display:'flex',flexDirection:'column',padding:'8px 4px',gap:4,overflowY:'hidden'}}>
+      {selectDimPanel&&(
+        <SelectDimPanel
+          style={{position:'fixed',left:selectDimPanel.left,top:selectDimPanel.top}}
+          toolColor="#64B5F6"
+          fields={selectDimPanel.fields}
+          liveValues={selectDimPanel.live}
+          pending={selectDimPending}
+          onChangeField={(key,val)=>setSelectDimPending(p=>({...p,[key]:val}))}
+          onApply={()=>applySelectDims(selectDimPending)}
+        />
+      )}
+      <div style={{width:72,background:'#1e1e1e',display:'flex',flexDirection:'column',padding:'8px 4px',gap:4}}>
         {toolConfig.map(([t,Icon,title,activeColor])=>(
-          <button key={t}
-            onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim()}}
-            title={title}
-            style={{...btnBase,background:tool===t?activeColor+'33':'transparent',
-              outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
-            <Icon active={tool===t} />
-          </button>
+          <div key={t} style={{position:'relative'}}>
+            <button
+              onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim()}}
+              title={title}
+              style={{...btnBase,background:tool===t?activeColor+'33':'transparent',
+                outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
+              <Icon active={tool===t} />
+            </button>
+            {t==='line'&&tool==='line'&&(
+              <LineSnapPanel
+                toolColor={activeColor}
+                tKeyDown={tKeyDown} pKeyDown={pKeyDown}
+                onToggleT={()=>setTKeyDown(p=>!p)}
+                onToggleP={()=>setPKeyDown(p=>!p)}
+                drawing={!!startPoint&&!deferredTangent}
+                dimInput={dimInput} angleInput={angleInput}
+                dimLocked={dimLocked} angleLocked={angleLocked}
+                onChangeDim={v=>{setDimLocked(false);setDimInput(v)}}
+                onChangeAngle={v=>{setAngleLocked(false);setAngleInput(v)}}
+                onApply={applyDimAngleLock}
+                liveLenMm={lineLiveLenMm}
+                liveAngleDeg={lineLiveAngleDeg}
+              />
+            )}
+            {t==='circle'&&tool==='circle'&&(
+              <CircleSnapPanel
+                toolColor={activeColor}
+                tKeyDown={tKeyDown}
+                onToggleT={()=>setTKeyDown(p=>!p)}
+                circleTanA={circleTanA} circleTanB={circleTanB}
+                circleCenter={circleCenter}
+                dimInput={dimInput} dimLocked={dimLocked}
+                onChangeDim={v=>{setDimLocked(false);setDimInput(v)}}
+                onApply={applyCircleRadius}
+                liveRadiusMm={circleLiveRadiusMm}
+              />
+            )}
+            {t==='spline'&&tool==='spline'&&(
+              <SplineSnapPanel
+                toolColor={activeColor}
+                splineClosed={splineClosed}
+                onToggleC={()=>setSplineClosed(p=>!p)}
+                splinePoints={splinePoints}
+              />
+            )}
+            {t==='fillet'&&tool==='fillet'&&filletSel.length===2&&(
+              <FilletRadiusPanel
+                toolColor={activeColor}
+                value={filletRadiusInput}
+                onChange={setFilletRadiusInput}
+                onApply={applyFillet}
+                tooLarge={!!filletPreview?.tooLarge}
+              />
+            )}
+            {t==='offset'&&tool==='offset'&&offsetEntity&&(
+              <OffsetDistPanel
+                toolColor={activeColor}
+                value={offsetDistInput}
+                onChange={setOffsetDistInput}
+                canApply={!!offsetPreview}
+                liveValueMm={mousePos?pxToMm(distToEntity(mousePos,
+                  offsetEntity.kind==='line'?lines[offsetEntity.idx]:
+                  offsetEntity.kind==='circle'?circles[offsetEntity.idx]:
+                  offsetEntity.kind==='arc'?arcs[offsetEntity.idx]:splines[offsetEntity.idx],
+                  offsetEntity.kind)):null}
+              />
+            )}
+          </div>
         ))}
       </div>
 
@@ -2864,13 +3242,67 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           {/* Modify group */}
           <span style={{color:'#555',fontFamily:'monospace',fontSize:9,textTransform:'uppercase',letterSpacing:'0.1em',marginRight:2}}>Modify</span>
           {modifyConfig.map(([t,Icon,title,activeColor])=>(
-            <button key={t}
-              onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim()}}
-              title={title}
-              style={{...btnBase,background:tool===t?activeColor+'33':'transparent',
-                outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
-              <Icon active={tool===t}/>
-            </button>
+            <div key={t} style={{position:'relative'}}>
+              <button
+                onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim()}}
+                title={title}
+                style={{...btnBase,background:tool===t?activeColor+'33':'transparent',
+                  outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
+                <Icon active={tool===t}/>
+              </button>
+              {t==='movecopy'&&tool==='movecopy'&&(
+                <CopyModePanel
+                  toolColor={activeColor}
+                  primaryKey="M" primaryLabel="Move" primaryMode="move"
+                  mode={moveCopyMode} count={moveCopyCountInput}
+                  onSetMode={setMoveCopyMode}
+                  onSetCount={n=>setMoveCopyCountInput(String(Math.max(1,Math.min(100,n))))}
+                  locked={!!startPoint}
+                  selCount={moveCopySel.length} accepted={moveCopyAccepted}
+                  onAccept={()=>setMoveCopyAccepted(true)}
+                  dimInput={dimInput} dimLocked={dimLocked}
+                  onChangeDim={val=>{setDimLocked(false);setDimInput(val)}}
+                  angleInput={angleInput} angleLocked={angleLocked}
+                  onChangeAngle={val=>{setAngleLocked(false);setAngleInput(val)}}
+                  onApplyLock={applyDimAngleLock}
+                  liveDistMm={moveCopyLiveDistMm}
+                  liveAngleDeg={moveCopyLiveAngleDeg}
+                />
+              )}
+              {t==='rotatecopy'&&tool==='rotatecopy'&&(
+                <CopyModePanel
+                  toolColor={activeColor}
+                  primaryKey="R" primaryLabel="Rotate" primaryMode="rotate"
+                  mode={rotateCopyMode} count={rotateCopyCountInput}
+                  onSetMode={setRotateCopyMode}
+                  onSetCount={n=>setRotateCopyCountInput(String(Math.max(1,Math.min(100,n))))}
+                  locked={!!startPoint}
+                  selCount={rotateCopySel.length} accepted={rotateCopyAccepted}
+                  onAccept={()=>setRotateCopyAccepted(true)}
+                  angleInput={angleInput} angleLocked={angleLocked}
+                  onChangeAngle={val=>{setAngleLocked(false);setAngleInput(val)}}
+                  onApplyLock={()=>{ if(angleInput) setAngleLocked(true) }}
+                  liveAngleDeg={rotateCopyLiveAngleDeg}
+                />
+              )}
+              {t==='resize'&&tool==='resize'&&(
+                <ResizeScalePanel
+                  toolColor={activeColor}
+                  selCount={resizeSel.length} accepted={resizeAccepted}
+                  onAccept={()=>setResizeAccepted(true)}
+                  scaleInput={resizeScaleInput}
+                  onChangeScale={setResizeScaleInput}
+                />
+              )}
+              {t==='mirror'&&tool==='mirror'&&(
+                <MirrorPanel
+                  toolColor={activeColor}
+                  selCount={mirrorSel.length} accepted={mirrorAccepted}
+                  onAccept={()=>setMirrorAccepted(true)}
+                  hasAxisStart={!!mirrorP1}
+                />
+              )}
+            </div>
           ))}
           {/* Divider */}
           <div style={{width:1,height:48,background:'#333',margin:'0 6px'}}/>
@@ -2890,7 +3322,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           <div style={{flex:1,overflow:'hidden',minWidth:0}}>
           <canvas ref={canvasRef}
           width={canvasSize.w} height={canvasSize.h}
-          style={{background:'white',cursor:isPanningRef.current?'grabbing':tool==='select'?(selectDragHandleRef.current?'grabbing':selectHover?'pointer':'default'):'crosshair',display:'block'}}
+          style={{background:'white',cursor:isPanningRef.current?'grabbing':tool==='select'?(selectDragHandleRef.current?'grabbing':selectHover?'pointer':'default'):'crosshair',display:'block',touchAction:'none'}}
           onClick={handleClick} onDoubleClick={handleDoubleClick} onContextMenu={handleContextMenu}
           onMouseMove={handleMouseMove} onMouseDown={handleMouseDown} onMouseUp={handleMouseUp}
         />
@@ -2927,7 +3359,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
             <IconFitView/>
           </button>
           <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
-          <button onClick={()=>saveJSON(lines,circles,arcs,splines,dims)} title="Save (Ctrl+S)" style={{...btnBase,background:'transparent',border:'none'}}>
+          <button onClick={handleSave} title="Save (Ctrl+S)" style={{...btnBase,background:'transparent',border:'none'}}>
             <IconSave/>
           </button>
           <button onClick={()=>loadFileRef.current.click()} title="Load drawing" style={{...btnBase,background:'transparent',border:'none'}}>
@@ -3136,6 +3568,14 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
             setOrthoWizardOpen(false)
           }}
           onClose={()=>setOrthoWizardOpen(false)}
+        />
+      )}
+
+      {saveAsOpen&&(
+        <SaveAsPanel
+          defaultName="drawing"
+          onSave={async filename=>{ setSaveAsOpen(false); await saveProjectAs(lines,circles,arcs,splines,dims,filename) }}
+          onClose={()=>setSaveAsOpen(false)}
         />
       )}
 

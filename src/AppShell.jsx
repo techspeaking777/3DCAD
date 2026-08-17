@@ -25,24 +25,52 @@ export default function AppShell() {
     })
   }
 
-  const tabBtnStyle = active => ({
-    padding: '0 18px',
+  // Distinct accent per tab (not just position) so the active one reads at a
+  // glance: cyan matches the app's wordmark/3D-viewport accent, orange
+  // matches the Drawing tab's own tool-icon palette.
+  const ACCENT = { '3d': '#3ad6ff', drawing: '#FF7043' }
+
+  const tabBtnStyle = (tab, active) => ({
+    display: 'flex', alignItems: 'center', gap: 9,
+    padding: '0 26px',
     height: '100%',
-    background: active ? '#1a1a1a' : 'transparent',
-    color: active ? '#fff' : '#888',
+    background: active ? '#161616' : 'transparent',
+    color: active ? '#fff' : '#777',
     border: 'none',
-    borderBottom: active ? '2px solid #FF7043' : '2px solid transparent',
+    borderBottom: active ? `3px solid ${ACCENT[tab]}` : '3px solid transparent',
+    boxShadow: active ? `inset 0 0 16px ${ACCENT[tab]}22` : 'none',
     fontFamily: 'monospace',
-    fontSize: 12,
-    letterSpacing: '0.05em',
+    fontWeight: 'bold',
+    fontSize: 15,
+    letterSpacing: '0.08em',
     cursor: 'pointer',
+    transition: 'all 0.12s',
   })
+
+  const CubeIcon = ({ color }) => (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+      <path d="M10 1.5l8 4.5v8l-8 4.5-8-4.5v-8l8-4.5z" stroke={color} strokeWidth="1.5" strokeLinejoin="round"/>
+      <path d="M2 6l8 4.5 8-4.5M10 10.5v8" stroke={color} strokeWidth="1.1" opacity="0.7"/>
+    </svg>
+  )
+  const PencilIcon = ({ color }) => (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+      <path d="M3 17l1-4.2L12.3 4.5a1.5 1.5 0 0 1 2.2 0l1 1a1.5 1.5 0 0 1 0 2.2L7.2 16 3 17z" stroke={color} strokeWidth="1.5" strokeLinejoin="round"/>
+      <path d="M11 6.5l2.5 2.5" stroke={color} strokeWidth="1.1"/>
+    </svg>
+  )
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#000' }}>
-      <div style={{ height: 32, flexShrink: 0, display: 'flex', background: '#0a0a0a', borderBottom: '1px solid #222' }}>
-        <button style={tabBtnStyle(activeTab === '3d')} onClick={() => selectTab('3d')}>3D MODEL</button>
-        <button style={tabBtnStyle(activeTab === 'drawing')} onClick={() => selectTab('drawing')}>DRAWING</button>
+      <div style={{ height: 48, flexShrink: 0, display: 'flex', background: '#0a0a0a', borderBottom: '1px solid #222' }}>
+        <button style={tabBtnStyle('3d', activeTab === '3d')} onClick={() => selectTab('3d')}>
+          <CubeIcon color={activeTab === '3d' ? ACCENT['3d'] : '#777'}/>
+          3D MODEL
+        </button>
+        <button style={tabBtnStyle('drawing', activeTab === 'drawing')} onClick={() => selectTab('drawing')}>
+          <PencilIcon color={activeTab === 'drawing' ? ACCENT.drawing : '#777'}/>
+          DRAWING
+        </button>
       </div>
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
         <div ref={app3dWrapRef} style={{ display: activeTab === '3d' ? 'block' : 'none', height: '100%' }}>

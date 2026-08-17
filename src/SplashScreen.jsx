@@ -39,10 +39,7 @@ export default function SplashScreen({ onChoose }) {
 
       <div style={{ fontFamily: PIXEL_FONT, fontSize: 32, lineHeight: 1.6, textAlign: 'center' }}>
         <div style={{ color: '#FF9800', textShadow: '0 0 10px #FF9800' }}>Retro</div>
-        <div>
-          <span style={{ color: '#eaeaf0' }}>CAD </span>
-          <span style={{ color: '#3ad6ff', textShadow: '0 0 12px #3ad6ff, 0 0 24px #3ad6ff88' }}>3D</span>
-        </div>
+        <div style={{ color: '#3ad6ff', textShadow: '0 0 12px #3ad6ff, 0 0 24px #3ad6ff88' }}>CAD</div>
       </div>
 
       <div style={{

@@ -8253,18 +8253,21 @@ const App3D = forwardRef(function App3D(props, ref) {
           borderBottom:`2px solid ${sketchMode ? getPlaneColor(activePlane) : '#2a2a4a'}`,
           flexWrap:'wrap', transition:'border-color 0.3s'}}>
 
-          {/* Wordmark — always visible regardless of mode, same cyan glow
-              treatment already used for emphasis text elsewhere (Set Depth
-              popup etc.) rather than inventing a new accent color. */}
-          <div style={{display:'flex',alignItems:'center',gap:6,marginRight:6,paddingRight:8,
+          {/* Wordmark — always visible regardless of mode. Single-line so it
+              stays compact next to the view-preset thumbnails, but sized up
+              and two-toned (same orange/cyan split as the splash screen) so
+              it reads as the app's identity mark, not just a label. */}
+          <div style={{display:'flex',alignItems:'center',gap:8,marginRight:8,paddingRight:10,
             borderRight:'1px solid #2a2a4a',flexShrink:0}}>
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-              <path d="M10 1.5l8 4.5v8l-8 4.5-8-4.5v-8l8-4.5z" stroke="#3ad6ff" strokeWidth="1.3" strokeLinejoin="round"/>
-              <path d="M2 6l8 4.5 8-4.5M10 10.5v8" stroke="#3ad6ff" strokeWidth="1" opacity="0.6"/>
+            <svg width="34" height="34" viewBox="0 0 20 20" fill="none">
+              <path d="M10 1.5l8 4.5v8l-8 4.5-8-4.5v-8l8-4.5z" stroke="#3ad6ff" strokeWidth="1.5" strokeLinejoin="round"/>
+              <path d="M2 6l8 4.5 8-4.5M10 10.5v8" stroke="#3ad6ff" strokeWidth="1.2" opacity="0.6"/>
             </svg>
-            <span style={{fontFamily:'monospace',fontWeight:'bold',fontSize:13,
-              letterSpacing:'0.12em',color:'#3ad6ff',textShadow:'0 0 5px #3ad6ff',whiteSpace:'nowrap'}}>
-              RETRO CAD 3D
+            <span style={{fontFamily:'monospace',fontWeight:'bold',fontSize:26,
+              letterSpacing:'0.1em',whiteSpace:'nowrap'}}>
+              <span style={{color:'#FF9800',textShadow:'0 0 8px #FF9800'}}>RETRO</span>
+              {' '}
+              <span style={{color:'#3ad6ff',textShadow:'0 0 10px #3ad6ff,0 0 20px #3ad6ff88'}}>CAD</span>
             </span>
           </div>
 

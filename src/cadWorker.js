@@ -129,6 +129,90 @@ function projectEdge(edge, project, lines, circles, arcs, splines, viewNormal) {
   lines.push({ x1: sp.x, y1: sp.y, x2: ep.x, y2: ep.y })
 }
 
+// A periodic surface (cylinder, cone, sphere, torus) needs a "seam" edge in
+// its parametrization — the line where the surface's U (or V) coordinate
+// wraps back from 2π to 0. It's not a real design feature (drilling a plain
+// hole always produces one, running the hole's full depth), just an
+// artifact of how OCC describes curved surfaces internally — but
+// meshEdges() returns it exactly like any other edge, so a clean cylindrical
+// hole/boss renders with a straight line drawn down one side of it.
+// BRepTools.IsReallyClosed(edge, face) is OCC's own canonical test for
+// this — an edge is a seam on a given face if the face's boundary uses it
+// twice (both parametric directions), which is exactly what a real shared
+// edge between two DIFFERENT faces never does. Reuses the identical
+// per-face `for (const face of shape.faces) { for (const edge of
+// face.edges) }` traversal replicad's own meshEdges() already performs
+// internally (confirmed by reading its source) — same edgeHash values line
+// up 1:1 with `edgeGroups[].edgeId`, so filtering is a plain lookup.
+function getSeamEdgeHashes(shape) {
+  const oc = getOC()
+  const seamHashes = new Set()
+  for (const face of shape.faces) {
+    for (const edge of face.edges) {
+      if (oc.BRepTools.IsReallyClosed(edge.wrapped, face.wrapped)) seamHashes.add(edge.hashCode)
+    }
+  }
+  return seamHashes
+}
+
+// For a cylindrical face viewed non-end-on, meshEdges/projectEdge alone
+// produce only the seam edge (an arbitrary line down one side, now filtered
+// via getSeamEdgeHashes above) plus whatever end-circles/arcs bound the
+// face — never the pair of straight silhouette lines a real orthographic
+// drawing needs to read a cylinder as a rectangle. Those lines aren't
+// topological edges at all (nothing in the BREP sits there), so they have
+// to be constructed geometrically: the two U angles where the circular
+// cross-section's tangent runs parallel to the view direction, i.e. where
+// the radius vector aligns with axis × viewNormal. Each angle only
+// produces a line if it actually falls inside the face's own U range (via
+// UVBounds) — a fillet's cylindrical face only sweeps a fraction of the
+// full circle, so unlike a full hole/boss it may silhouette on only one
+// side, or neither. The V range (also from UVBounds) is literal arc-length
+// distance along the axis per OCC's Geom_CylindricalSurface, so
+// face.pointOnSurface(u,0)/(u,1) — already normalized against UVBounds —
+// naturally bounds the line to this face's own axial extent, correct for
+// blind holes/bosses too, not just through ones.
+function cylinderSilhouetteLines(face, normal, project) {
+  const cyl = face.surface.wrapped.Cylinder()
+  const axisDir = cyl.Axis().Direction()
+  const axis = new Vector([axisDir.X(), axisDir.Y(), axisDir.Z()]).normalize()
+  if (Math.abs(axis.dot(normal)) > 0.999) return [] // viewed end-on: already a circle/arc
+  const perp = axis.cross(normal)
+  if (perp.Length < 1e-9) return []
+  perp.normalize()
+  const xDir0 = cyl.XAxis().Direction(), yDir0 = cyl.YAxis().Direction()
+  const xDir = new Vector([xDir0.X(), xDir0.Y(), xDir0.Z()])
+  const yDir = new Vector([yDir0.X(), yDir0.Y(), yDir0.Z()])
+  const { uMin, uMax } = face.UVBounds
+  const width = uMax - uMin
+  const TWO_PI = Math.PI * 2
+  const out = []
+  for (const dir of [perp, perp.multiply(-1)]) {
+    const angle = Math.atan2(dir.dot(yDir), dir.dot(xDir))
+    let rel = (angle - uMin) % TWO_PI
+    if (rel < 0) rel += TWO_PI
+    if (rel > width + 1e-9) continue // this side of the cylinder isn't part of the face (e.g. a fillet)
+    const uNorm = rel / width
+    const p1 = project(face.pointOnSurface(uNorm, 0))
+    const p2 = project(face.pointOnSurface(uNorm, 1))
+    out.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y })
+  }
+  return out
+}
+
+function stripSeamEdges(shape, meshData) {
+  const seamHashes = getSeamEdgeHashes(shape)
+  if (!seamHashes.size) return meshData
+  const lines = [], edgeGroups = []
+  for (const g of meshData.edgeGroups) {
+    if (seamHashes.has(g.edgeId)) continue
+    const newStart = lines.length / 3
+    for (let i = g.start * 3; i < (g.start + g.count) * 3; i++) lines.push(meshData.lines[i])
+    edgeGroups.push({ ...g, start: newStart })
+  }
+  return { lines, edgeGroups }
+}
+
 // Pure-JS estimate of how big baseParams's own solid is, in mm — deliberately
 // avoids calling live OCC's .boundingBox() on the actual built shape: a
 // solid that already has one or more cuts baked in can fail BRepBndLib's
@@ -373,7 +457,15 @@ self.onmessage = async function(e) {
         for (const solidId of params.solidIds) {
           const shape = shapeStore.get(solidId)
           if (!shape) throw new Error(`computeOrthoViews-MISS: solid ${solidId} not in store`)
-          for (const edge of shape.edges) projectEdge(edge, project, lines, circles, arcs, splines, normal)
+          const seamHashes = getSeamEdgeHashes(shape)
+          for (const edge of shape.edges) {
+            if (seamHashes.has(edge.hashCode)) continue
+            projectEdge(edge, project, lines, circles, arcs, splines, normal)
+          }
+          for (const face of shape.faces) {
+            if (face.geomType !== 'CYLINDRE') continue
+            lines.push(...cylinderSilhouetteLines(face, normal, project))
+          }
         }
         views[viewName] = { lines, circles, arcs, splines }
       }
@@ -515,7 +607,7 @@ self.onmessage = async function(e) {
     }
     if (!shape) throw new Error('Null shape')
     const faces = shape.mesh({ tolerance:0.05, angularTolerance:30 })
-    const edges = shape.meshEdges({ keepMesh:true })
+    const edges = stripSeamEdges(shape, shape.meshEdges({ keepMesh:true }))
     self.postMessage({ type:'result', id, faces, edges })
   } catch(err) {
     self.postMessage({ type:'error', id, message:err.message||String(err) })

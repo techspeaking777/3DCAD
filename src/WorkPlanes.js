@@ -172,15 +172,30 @@ export function hitTestPlanes(raycaster, planes) {
 }
 
 /**
- * Set hover highlight on a plane (pass null to clear all).
+ * Set hover highlight on a plane (pass null to clear all). `accentColor`
+ * (optional) overrides the hovered plane's own color instead of just
+ * bumping opacity — used by Mirror's Pick Plane step so a candidate mirror
+ * plane reads as a strong "this is what I'm about to click" cue, matching
+ * the orange body-hover from its own body-select step, rather than the
+ * default subtle same-hue opacity bump every other tool's plane hover uses.
+ * Always explicitly (re)asserts a color (def.color when not hovered, or when
+ * no accentColor is given) rather than only setting it conditionally, so a
+ * plane that was accented on a previous call correctly resets once the
+ * caller stops passing accentColor.
  */
-export function setPlaneHover(planes, hoveredId) {
+export function setPlaneHover(planes, hoveredId, accentColor) {
   for (const { group, def } of Object.values(planes)) {
     const isHov = def.id === hoveredId
     const fill   = group.children.find(c => c.userData.isFill)
     const border = group.children.find(c => c.userData.isBorder)
-    if (fill)   fill.material.opacity   = isHov ? 0.14 : 0.06
-    if (border) border.material.opacity = isHov ? 0.90 : 0.45
+    const color = (isHov && accentColor) ? accentColor : def.color
+    // An accented hover (Mirror's Pick Plane step) pushes fill opacity much
+    // harder than the default same-hue bump (0.14) — that subtlety is easy
+    // to miss entirely against a colored accent, since the accent color
+    // itself is the main cue, not just "slightly less transparent."
+    const fillHovOpacity = accentColor ? 0.42 : 0.14
+    if (fill)   { fill.material.opacity   = isHov ? fillHovOpacity : 0.06; fill.material.color.set(color) }
+    if (border) { border.material.opacity = isHov ? 0.90 : 0.45; border.material.color.set(color) }
   }
 }
 

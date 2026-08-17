@@ -365,18 +365,6 @@ function loftSweepBoxPx(profiles, basis) {
   return new THREE.Box3().setFromPoints(allPts)
 }
 
-// ── Mirror3D reflection helpers ─────────────────────────────────────────────
-// Reflect a world-space point/direction across a plane (origin O, unit normal n).
-function reflectPoint(p, O, n) {
-  const rel = new THREE.Vector3().subVectors(p, O)
-  const d = rel.dot(n)
-  return p.clone().addScaledVector(n, -2 * d)
-}
-function reflectDir(v, n) {
-  const d = v.dot(n)
-  return v.clone().addScaledVector(n, -2 * d)
-}
-
 // A plain work plane (XY/XZ/YZ) has no FacePlane object of its own — derive an
 // equivalent {origin,normal,uAxis,vAxis} basis DIRECTLY from sketchToWorld's
 // own behavior (rather than hand-deriving normal signs per plane, which is
@@ -678,11 +666,10 @@ function CutoutGlyph({ color='#7fa8cc' }) {
   )
 }
 
-function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, mirrorPickActive, onPickMirrorSource, joinPickActive, joinSel, onToggleJoinMember, onEditLoft, hiddenSolidIds, onToggleBodyVisible, onConvertSketch, hasSolids }) {
+function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, joinPickActive, joinSel, onToggleJoinMember, onEditLoft, hiddenSolidIds, onToggleBodyVisible, onConvertSketch, hasSolids }) {
   const [editingName, setEditingName] = useState(null)
   const [editDepthId, setEditDepthId] = useState(null)
   const [depthVal, setDepthVal]       = useState('')
-  const [hoveredMirrorRow, setHoveredMirrorRow] = useState(null)
 
   function startRename(id, currentName) {
     setEditingName(id)
@@ -748,10 +735,6 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           // wherever the tree assumed every cutout has the plain shape.
           const isLoftCutout = isExtrude && feat.operation === 'cutout' && !!feat.profiles
           const isLocked = !!feat.joinedInto
-          // Mirroring-a-cutout (commitMirrorCutout) reflects profilePts/
-          // planeId/facePlane — fields a loft-cutout doesn't have — so it's
-          // excluded from mirror-source eligibility rather than crashing.
-          const isMirrorEligible = isExtrude && !isMirror && !isLocked && !isLoftCutout
           // A source with a dependent mirror used to be excluded here too —
           // but rebuildJoinBaseMesh already knows how to rebuild a mirror
           // member from its source (see its mf.operation==='mirror' branch),
@@ -760,10 +743,9 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           // Blocking it just made "join a mirrored part to its original" —
           // an ordinary CAD operation — impossible.
           const isJoinEligible = isExtrude && feat.operation !== 'cutout' && !isJoin && !isLocked
-          // Only rows that own an independent solid can be hidden — a cutout/
-          // fillet (or a mirrored cutout, which shows up as operation:'cutout'
-          // too, see commitMirrorCutout) modifies an EXISTING body in place
-          // rather than creating one, so there's nothing separate to hide.
+          // Only rows that own an independent solid can be hidden — a cutout
+          // or fillet modifies an EXISTING body in place rather than creating
+          // one, so there's nothing separate to hide.
           // Locked (joined-away) rows are excluded too: their own solid was
           // consumed into the Join's new body, so only the Join row's eye
           // icon does anything meaningful now.
@@ -778,28 +760,23 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
             : feat.operation === 'revolve' ? 'revolve' : 'extrude'
           const rowColor = featureOpColor(feat)
 
-          const mirrorHover = mirrorPickActive && isMirrorEligible && hoveredMirrorRow === feat.id
-          const itemBg = isJoinSelected ? '#FFEE8822' : mirrorHover ? '#8E65F322' : isActiveSketch ? '#4FC3F722' : 'transparent'
+          const itemBg = isJoinSelected ? '#FFEE8822' : isActiveSketch ? '#4FC3F722' : 'transparent'
           const borderLeft = `3px solid ${
-            isJoinSelected ? '#FFEE88' : mirrorHover ? '#8E65F3' : isActiveSketch ? '#4FC3F7' : rowColor + '55'
+            isJoinSelected ? '#FFEE88' : isActiveSketch ? '#4FC3F7' : rowColor + '55'
           }`
 
           return (
             <div key={feat.id}
               title={isLocked ? `Part of ${features.find(f=>f.id===feat.joinedInto)?.name || 'a Join'} — delete the join to edit` : undefined}
-              onMouseEnter={()=>{ if (mirrorPickActive && isMirrorEligible) setHoveredMirrorRow(feat.id) }}
-              onMouseLeave={()=>{ if (mirrorPickActive) setHoveredMirrorRow(null) }}
               onClick={()=>{
-                if (mirrorPickActive && isMirrorEligible) onPickMirrorSource(feat.id)
-                else if (joinPickActive && isJoinEligible) onToggleJoinMember(feat.id)
+                if (joinPickActive && isJoinEligible) onToggleJoinMember(feat.id)
               }}
               style={{
               borderLeft, background: itemBg,
               padding: '6px 10px 6px 8px',
               borderBottom: '1px solid #2a2a4a',
               opacity: isLocked ? 0.5 : 1,
-              cursor: mirrorPickActive ? (isMirrorEligible ? 'pointer' : 'default')
-                    : joinPickActive   ? (isJoinEligible ? 'pointer' : 'default')
+              cursor: joinPickActive   ? (isJoinEligible ? 'pointer' : 'default')
                     : (isSketch ? 'pointer' : 'default'),
             }}>
               {/* Feature header row */}
@@ -3262,9 +3239,26 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }
 
+  // Mirror step 2: a plane/face pick either arms the offset-plane's base (if
+  // "+ Offset Plane" mode is on and no base is picked yet — see the offset
+  // distance popup) or commits immediately for every selected body. Shared by
+  // handleFaceClick/handlePlaneClick below since both need identical branching.
+  function handleMirror3DPlanePick(pick) {
+    if (mirror3dOffsetMode) {
+      if (!mirror3dOffsetBase) setMirror3dOffsetBase(pick)
+      else commitMirror3DOffset()  // base already picked — any further click accepts the live distance
+      return
+    }
+    commitMirror3DBatch(pick)
+  }
+
   // ── Phase 2 Step 3b: Sketch on face ──────────────────────────────────────
   function handleFaceClick(facePlane) {
-    if (tool==='mirror3d' && mirror3dSourceFeatureId) { commitMirror3D({ kind:'face', facePlane }); return }
+    if (tool==='mirror3d' && mirror3dSelectionDone) { handleMirror3DPlanePick({ kind:'face', facePlane }); return }
+    // Mirror step 1 (still picking bodies) — a face click here is a stray
+    // hit that slipped past sketchArmed being false; must NOT fall through
+    // to enterSketch below, same reasoning as handlePlaneClick's own guard.
+    if (tool==='mirror3d' && !mirror3dSelectionDone) return
     if (tool==='loft3d' && !loftState) { startLoftProfile1({ kind:'face', facePlane }); return }
     if (tool==='exportfacedxf') { handleExportFaceDXFFaceClick(facePlane); return }
     if (extrudeState) return  // step 3 (depth): ignore stray face clicks
@@ -3273,15 +3267,22 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   function handlePlaneClick({ id }) {
-    if (tool==='mirror3d' && mirror3dSourceFeatureId) { commitMirror3D({ kind:'workplane', planeId:id }); return }
+    if (tool==='mirror3d' && mirror3dSelectionDone) { handleMirror3DPlanePick({ kind:'workplane', planeId:id }); return }
     if (tool==='loft3d' && !loftState) { startLoftProfile1({ kind:'workplane', planeId:id }); return }
     if (extrudeState) return  // step 3 (depth): ignore stray plane clicks
     // Work planes pass through/near the model with no occlusion check against
     // solids in front of them (see WorkPlanes.js's hitTestPlanes) — clicking an
     // edge near a plane could otherwise register as a plane click too and drop
-    // into sketch mode. showWorkPlanes already excludes fillet3d mode; this is
-    // a second guard in case a stray click still gets through.
+    // into sketch mode. showWorkPlanes already excludes fillet3d mode; these
+    // are more second guards in case a stray click still gets through.
     if (tool==='fillet3d') return
+    // Mirror step 1 (still picking bodies) — clicking a body that happens to
+    // sit on/near the XY work plane (planes have no occlusion check, see
+    // above) was incorrectly falling through to enterSketch, silently
+    // knocking the user out of Mirror and into sketch mode — which also wiped
+    // the just-set selection highlight (its own useEffect clears on tool
+    // change) the instant it happened, reading as "highlights then reverts."
+    if (tool==='mirror3d' && !mirror3dSelectionDone) return
     enterSketch(id)
     viewport3dRef.current?.snapToPlane(id)
   }
@@ -3978,10 +3979,33 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   // ── Mirror (3D feature) state machine ─────────────────────────────────────
-  // Step 1: click a feature row in the Feature Tree to pick mirror3dSourceFeatureId.
-  // Step 2: click a work plane or solid face — commits immediately (see
-  //   commitMirror3D), no third input step needed unlike fillet3d/extrude.
-  const [mirror3dSourceFeatureId, setMirror3dSourceFeatureId] = useState(null)
+  // Step 1: click bodies directly in the 3D view to accumulate mirror3dSel
+  //   (hover glows orange via hoverSolid, selected bodies glow light blue via
+  //   the shared highlightJoinMembers) — Enter or the SmartStepBar's ✓ Next
+  //   action sets mirror3dSelectionDone, advancing to step 2. currentStep is
+  //   driven by that explicit flag, NOT by mirror3dSel.length>0 (unlike every
+  //   other single-shot picker in this file), because multi-select needs to
+  //   stay on step 1 across several clicks.
+  // Step 2: click a work plane or solid face — commits immediately for EVERY
+  //   selected body (see commitMirror3DBatch) — or create a live offset plane
+  //   first (mirror3dOffsetMode/mirror3dOffsetBase, see the offset-plane popup).
+  const [mirror3dSel, setMirror3dSel] = useState([])              // [{solidId, featureId}, ...]
+  const [mirror3dHoverSolidId, setMirror3dHoverSolidId] = useState(null)
+  const [mirror3dSelectionDone, setMirror3dSelectionDone] = useState(false)
+  const [mirror3dOffsetMode, setMirror3dOffsetMode] = useState(false)
+  const [mirror3dOffsetBase, setMirror3dOffsetBase] = useState(null)   // {kind:'workplane',planeId} | {kind:'face',facePlane} | null
+  const [mirror3dOffsetDistInput, setMirror3dOffsetDistInput] = useState('20')
+
+  // Given a solid clicked in the viewport, finds the ONE feature that owns it
+  // (the extrude/revolve/loft/join/mirror row — never a cutout/fillet, which
+  // modify an existing body rather than creating one) — same predicate
+  // FeatureTree's own isBodyOwner already uses to decide which rows can be
+  // hidden. A solid whose owner is itself a mirror is rejected by callers
+  // (can't re-mirror a mirror), same rule the old feature-tree-based picker enforced.
+  function baseFeatureForSolid(solidId) {
+    return features.find(f => f.type==='extrude' && !f.joinedInto && f.solidId===solidId &&
+      ['extrude','revolve','loft','mirror','join'].includes(f.operation || 'extrude'))
+  }
 
   function activateMirror3DTool() {
     resetSelection()
@@ -4001,14 +4025,59 @@ const App3D = forwardRef(function App3D(props, ref) {
     setExtrudeTool(null)
     setExtrudeState(null)
     setEditingFeatureId(null)
-    setMirror3dSourceFeatureId(null)
-    viewport3dRef.current?.clearSolidHighlight()
+    resetMirror3D()
   }
 
   function resetMirror3D() {
-    setMirror3dSourceFeatureId(null)
+    setMirror3dSel([])
+    setMirror3dHoverSolidId(null)
+    setMirror3dSelectionDone(false)
+    setMirror3dOffsetMode(false)
+    setMirror3dOffsetBase(null)
+    setMirror3dOffsetDistInput('20')
     viewport3dRef.current?.clearSolidHighlight()
+    viewport3dRef.current?.clearJoinHighlight()
+    viewport3dRef.current?.clearSolidHover()
+    viewport3dRef.current?.hideOffsetPlanePreview()
   }
+
+  // Toggles `solidId` into/out of mirror3dSel — only while still on step 1
+  // and only for a solid that resolves to a valid, non-mirror body owner.
+  function handleMirror3DBodyClick(e) {
+    if (tool!=='mirror3d' || mirror3dSelectionDone) return
+    const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
+    if (!hit || hit.solidId==null) return
+    const feat = baseFeatureForSolid(hit.solidId)
+    if (!feat || feat.operation==='mirror') return
+    setMirror3dSel(prev => prev.some(s=>s.solidId===hit.solidId)
+      ? prev.filter(s=>s.solidId!==hit.solidId)
+      : [...prev, {solidId:hit.solidId, featureId:feat.id}])
+  }
+
+  // Live hover glow while still picking bodies — mirrors handleExportSTLClick's
+  // raycast, but on mousemove instead of click, and skips solids already in
+  // mirror3dSel so hover never fights the light-blue selected glow.
+  function handleMirror3DHover(e) {
+    const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
+    const solidId = hit?.solidId ?? null
+    setMirror3dHoverSolidId(prev => {
+      if (solidId!=null && mirror3dSel.some(s=>s.solidId===solidId)) return null
+      return solidId === prev ? prev : solidId
+    })
+  }
+
+  // Keeps every selected body glowing light blue, live as the selection
+  // changes — same effect shape as Join3D/Export STL's own highlight sync.
+  useEffect(() => {
+    if (tool !== 'mirror3d') { viewport3dRef.current?.clearJoinHighlight(); return }
+    viewport3dRef.current?.highlightJoinMembers(mirror3dSel.map(s => s.solidId))
+  }, [mirror3dSel, tool])
+
+  // Keeps the hovered body glowing orange, live as the mouse moves.
+  useEffect(() => {
+    if (tool !== 'mirror3d' || mirror3dHoverSolidId==null) { viewport3dRef.current?.clearSolidHover(); return }
+    viewport3dRef.current?.hoverSolid(mirror3dHoverSolidId)
+  }, [mirror3dHoverSolidId, tool])
 
   // ── Join (3D boolean union) state machine ─────────────────────────────────
   // Step 1: toggle 2+ eligible feature rows in the Feature Tree into joinSel.
@@ -4456,129 +4525,96 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }
 
-  function handlePickMirror3DSource(featId) {
-    if (tool !== 'mirror3d' || mirror3dSourceFeatureId) return
-    const feat = features.find(f => f.id === featId)
-    if (!feat) return
-    setMirror3dSourceFeatureId(featId)
-    if (feat.operation === 'cutout') {
-      // A cutout is often a small detail on a much larger body — highlight
-      // just the cutout's own profile (at its entry plane) instead of
-      // glowing the whole solid, same reasoning as commitMirrorCutout's
-      // reflection math needing the source's own plane basis.
-      const toWorld = feat.facePlane
-        ? p => feat.facePlane.sketchToWorld(p.x, p.y)
-        : p => sketchToWorld(p.x, p.y, feat.planeId)
-      viewport3dRef.current?.highlightCutoutFace(feat.profilePts.map(toWorld))
-    } else {
-      viewport3dRef.current?.highlightSolid(feat.solidId)
-    }
-  }
-
-  // Step 2 commit — picking the plane/face immediately mirrors, no third
-  // input step. `pick` is {kind:'face', facePlane} or {kind:'workplane', planeId}.
-  // Dispatches on the SOURCE feature's operation per the confirmed behavior:
-  // cutout -> mirrored onto the same solid; extrude/revolve -> separate new solid.
-  async function commitMirror3D(pick) {
-    const sourceFeat = features.find(f => f.id === mirror3dSourceFeatureId)
-    setMirror3dSourceFeatureId(null)
-    viewport3dRef.current?.clearSolidHighlight()
+  // Step 2 commit — picking a plane/face (or confirming an offset plane, see
+  // commitMirror3DOffset below) mirrors EVERY selected body in one go. `pick`
+  // is {kind:'face', facePlane} or {kind:'workplane', planeId} — same shape
+  // commitMirrorSolid already expects, so this is just a loop over the
+  // accumulated picks, sequentially awaited (same style as
+  // rebuildDependentMirrors' own loop below).
+  async function commitMirror3DBatch(pick) {
+    const picked = [...mirror3dSel]
+    resetMirror3D()
     setTool('select')
-    if (!sourceFeat) return
-    try {
-      if (sourceFeat.operation === 'cutout') {
-        await commitMirrorCutout(sourceFeat, pick)
-      } else {
-        await commitMirrorSolid(sourceFeat, pick)
+    for (const { featureId } of picked) {
+      const feat = features.find(f => f.id === featureId)
+      if (!feat) continue
+      try {
+        await commitMirrorSolid(feat, pick)
+      } catch (err) {
+        console.error('Mirror failed:', err)
+        setCadError(`Mirror failed: ${err.message || String(err)}`)
+        setTimeout(() => setCadError(null), 6000)
       }
-    } catch (err) {
-      console.error('Mirror failed:', err)
-      setCadError(`Mirror failed: ${err.message || String(err)}`)
-      setTimeout(() => setCadError(null), 6000)
     }
   }
 
-  // Mirroring a CUTOUT stays on the SAME solid — rebuildSolidChain's replay
-  // loop only understands cutout PARAMS (re-derived fresh every rebuild), not
-  // a cached shape an OCC mirror() could substitute in, so this reflects the
-  // cutout's own definition (plane + profile points, + revolve axis if any)
-  // across the picked mirror plane client-side, and adds the result as an
-  // ordinary new cutout feature — no worker mirror call needed at all.
-  // `pick` is the RAW picked plane: {kind:'workplane', planeId} or
-  // {kind:'face', facePlane: <real FacePlane instance>}.
-  async function commitMirrorCutout(cutFeat, pick) {
-    const baseSolid = solids.find(s => s.id === cutFeat.solidId)
-    if (!baseSolid) throw new Error('Target solid not found')
-
-    const { O, n } = pick.kind === 'face'
-      ? { O: pick.facePlane.origin, n: pick.facePlane.normal }
-      : { O: new THREE.Vector3(0, 0, 0), n: planeIdBasis(pick.planeId).normal }
-
-    // Unify work-plane and face-plane sources into one FacePlane-shaped
-    // object so the rest of this function doesn't need two code paths.
-    const sourceBasis = cutFeat.facePlane || (() => {
-      const b = planeIdBasis(cutFeat.planeId)
-      return new FacePlane(b.origin, b.normal, b.uAxis, b.vAxis)
-    })()
-
-    const mirroredNormal = reflectDir(sourceBasis.normal, n)
-    const mirroredUAxis  = reflectDir(sourceBasis.uAxis, n)
-    const mirroredOrigin = reflectPoint(sourceBasis.origin, O, n)
-    // Re-derive (not reflect) vAxis — reflecting normal/uAxis independently
-    // then crossing them keeps the frame orthonormal; the mirror is
-    // orientation-reversing by nature, which is correct here, not a bug.
-    const mirroredVAxis = new THREE.Vector3().crossVectors(mirroredNormal, mirroredUAxis).normalize()
-    const mirroredFacePlane = new FacePlane(mirroredOrigin, mirroredNormal, mirroredUAxis, mirroredVAxis)
-
-    const reflectPt2D = (p) => {
-      const world = sourceBasis.sketchToWorld(p.x, p.y)
-      return mirroredFacePlane.worldToSketch(reflectPoint(world, O, n))
-    }
-
-    // Plain points only — arcs/splines' curveSegments metadata isn't carried
-    // over (reflecting an arc/spline's true-curve definition into a NEW 2D
-    // plane needs its own angle/tangent transform, not just point reflection).
-    // Falls back to the polygonized approximation, same accepted fidelity
-    // trade-off this app already makes for other mixed profiles.
-    const mirroredPts = cutFeat.profilePts.map(reflectPt2D)
-    if (cutFeat.profilePts.circleMeta) {
-      const cm = cutFeat.profilePts.circleMeta
-      const c2 = reflectPt2D({ x: cm.cx, y: cm.cy })
-      mirroredPts.circleMeta = { cx: c2.x, cy: c2.y, r: cm.r }
-    }
-    let mirroredAxis = null
-    if (cutFeat.revolveAxis) {
-      const a = cutFeat.revolveAxis
-      const p1 = reflectPt2D({ x: a.x1, y: a.y1 })
-      const p2 = reflectPt2D({ x: a.x2, y: a.y2 })
-      mirroredAxis = { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y }
-    }
-
-    const newFeat = {
-      id: `cutout-${baseSolid.id}-${Date.now()}`,
-      type: 'extrude', name: nextCutoutName(), operation: 'cutout',
-      solidId: baseSolid.id, sourceFeatureId: cutFeat.id,
-      planeId: 'face', facePlane: mirroredFacePlane,
-      profilePts: mirroredPts,
-      depthMm: cutFeat.depthMm, cutDepthMm: cutFeat.cutDepthMm, cutDirection: cutFeat.cutDirection,
-      extentMode: cutFeat.extentMode, color: cutFeat.color,
-      revolveAxis: mirroredAxis, angleDeg: cutFeat.angleDeg, revolveReverse: cutFeat.revolveReverse,
-    }
-
-    // Same pattern as committing any other brand-new cutout (see commitExtrude):
-    // apply this ONE cut directly against the target's current shapeStore-cached
-    // shape, rather than rebuildSolidChain's full replay — replaying would read
-    // `features` from this closure, which is stale until the setFeatures below
-    // actually lands.
-    const cutParams = buildCutWorkerParams(newFeat)
-    const baseParams = buildBaseWorkerParams(baseSolid)
-    const meshData = await cadEngine.subtract({ baseSolidId: baseSolid.id, cut: cutParams, base: baseParams })
-    const group = replicadMeshToThree(meshData, baseSolid.color, baseSolid.id)
-    const updatedSolid = { ...baseSolid, group }
-    setSolids(prev => prev.map(s => s.id === baseSolid.id ? updatedSolid : s))
-    setFeatures(prev => [...prev, newFeat])
-    await rebuildDependentMirrors(updatedSolid)
+  // Resolves mirror3dOffsetBase + mirror3dOffsetDistInput into a real
+  // FacePlane offset along the base plane's own normal — shared by the live
+  // preview effect (below) and commitMirror3DOffset, so the plane the user
+  // sees is exactly the plane that gets committed.
+  function mirror3dOffsetFacePlane() {
+    if (!mirror3dOffsetBase) return null
+    const basis = mirror3dOffsetBase.kind === 'face'
+      ? mirror3dOffsetBase.facePlane
+      : planeIdBasis(mirror3dOffsetBase.planeId)
+    const distMm = parseFloat(mirror3dOffsetDistInput) || 0
+    const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(distMm))
+    const vAxis = new THREE.Vector3().crossVectors(basis.normal, basis.uAxis).normalize()
+    return new FacePlane(origin, basis.normal, basis.uAxis, vAxis)
   }
+
+  // Commits through the exact same {kind:'face', facePlane} path a directly-
+  // picked face already uses — no separate pick.kind, no worker changes.
+  function commitMirror3DOffset() {
+    const facePlane = mirror3dOffsetFacePlane()
+    if (!facePlane) return
+    commitMirror3DBatch({ kind: 'face', facePlane })
+  }
+
+  // Mirror step 2 (offset plane): moving the mouse over the viewport while a
+  // base is picked live-updates the offset distance, so the plane can be
+  // pushed forward/backward just by moving the cursor — same drag-to-set
+  // mechanism handleExtrudeDragMove uses for "Set Depth" (project the mouse
+  // offset onto the plane's own screen-space normal direction, divide by
+  // screen-px-per-mm). Computed directly from basis.normal via worldToScreen
+  // here rather than reusing computeExtrudeDirScreen/planeExtrudeDirection —
+  // those flip XZ's normal sign for camera-orientation reasons (see
+  // workPlaneToFacePlaneBasisPx's comment), which would silently invert drag
+  // direction relative to what mirror3dOffsetFacePlane's own basis.normal
+  // actually does. Signed, not abs()'d — the plane can go either side of
+  // the base, not just outward.
+  function handleMirror3DOffsetDragMove(e) {
+    if (tool !== 'mirror3d' || !mirror3dOffsetBase) return
+    const vp = viewport3dRef.current
+    if (!vp) return
+    const basis = mirror3dOffsetBase.kind === 'face' ? mirror3dOffsetBase.facePlane : planeIdBasis(mirror3dOffsetBase.planeId)
+    const p0 = vp.worldToScreen(basis.origin.x, basis.origin.y, basis.origin.z)
+    const p1 = vp.worldToScreen(
+      basis.origin.x + basis.normal.x * 2,
+      basis.origin.y + basis.normal.y * 2,
+      basis.origin.z + basis.normal.z * 2,
+    )
+    if (!p0 || !p1) return
+    const dx = p1.x - p0.x, dy = p1.y - p0.y
+    const pxPerMm = Math.hypot(dx, dy)
+    if (!pxPerMm) return
+    const vpRect = vp.getDomElement?.()?.parentElement?.getBoundingClientRect?.()
+    if (!vpRect) return
+    const mx = e.clientX - vpRect.left, my = e.clientY - vpRect.top
+    const proj = (mx - p0.x) * (dx / pxPerMm) + (my - p0.y) * (dy / pxPerMm)
+    let mm = proj / pxPerMm
+    if (gridSnap) mm = Math.round(mm / gridSizeMm) * gridSizeMm
+    setMirror3dOffsetDistInput(String(Math.round(mm * 100) / 100))
+  }
+
+  // Live offset-plane preview — updates every time the base pick or the
+  // distance input changes, so dragging/typing moves the translucent plane
+  // in the 3D view in real time.
+  useEffect(() => {
+    if (tool !== 'mirror3d' || !mirror3dOffsetBase) { viewport3dRef.current?.hideOffsetPlanePreview(); return }
+    const fp = mirror3dOffsetFacePlane()
+    if (fp) viewport3dRef.current?.showOffsetPlanePreview({ origin: fp.origin, normal: fp.normal, uAxis: fp.uAxis, vAxis: fp.vAxis })
+  }, [tool, mirror3dOffsetBase, mirror3dOffsetDistInput])
 
   // Mirroring an EXTRUDE/REVOLVE produces a completely separate new solid —
   // not fused with the source (a future "Union (Join)" tool handles merging
@@ -6721,6 +6757,24 @@ const App3D = forwardRef(function App3D(props, ref) {
       return
     }
 
+    // Mirror step 1 (still picking bodies) — step 2's plane/face pick runs
+    // through sketchArmed + handleFaceClick/handlePlaneClick instead, same as
+    // exportfacedxf above, so this only fires before mirror3dSelectionDone.
+    if (tool==='mirror3d' && !mirror3dSelectionDone) {
+      handleMirror3DBodyClick(e)
+      return
+    }
+
+    // Mirror step 2, offset-plane base already picked — accept the live
+    // drag distance on ANY canvas click, not just one that happens to land
+    // on a plane/face/body (those route through handleMirror3DPlanePick
+    // instead, via sketchArmed's onFaceClick/onPlaneClick — this covers
+    // everything else: empty grid space, a body, off in space).
+    if (tool==='mirror3d' && mirror3dOffsetBase) {
+      commitMirror3DOffset()
+      return
+    }
+
     if (tool==='color') {
       handleColorClick(e)
       return
@@ -7308,6 +7362,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (tool==='includeedge') { handleIncludeEdgeHover(e); return }
     // exportfacedxf's face hover is handled entirely inside Viewport3D via
     // sketchArmed (the same square face-plane indicator Mirror3D/Loft3D use).
+    // Mirror step 1 (still picking bodies) — step 2 goes back to that same
+    // sketchArmed face-hover indicator, so this only fires beforehand.
+    if (tool==='mirror3d' && !mirror3dSelectionDone) { handleMirror3DHover(e); return }
 
     const worldPos=screenToWorld(sx,sy)
 
@@ -7427,10 +7484,28 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (fillet3dAccepted || fillet3dSel.length>0) { resetFillet3D(); return }
       resetFillet3D(); setTool('select'); return
     }
+    if (e.key==='Enter'&&tool==='mirror3d'&&!mirror3dSelectionDone&&mirror3dSel.length>0){
+      // Finish picking bodies (same role as the SmartStepBar's ✓ Next button)
+      // — advances to step 2 without touching the accumulated picks.
+      e.preventDefault()
+      setMirror3dSelectionDone(true)
+      return
+    }
+    if (e.key==='Enter'&&tool==='mirror3d'&&mirror3dOffsetBase){
+      // Confirm the live offset distance and commit — see the offset-plane
+      // popup, which is the only other place Enter means anything for Mirror.
+      e.preventDefault()
+      commitMirror3DOffset()
+      return
+    }
     if (e.key==='Escape'&&tool==='mirror3d'){
-      // First Escape backs step 2 (plane pick) out to step 1 (still picking
-      // a source feature); a second Escape (nothing picked yet) leaves the tool.
-      if (mirror3dSourceFeatureId) { resetMirror3D(); return }
+      // Each Escape backs out exactly one level: offset base pick, then
+      // offset mode itself, then step 2 back to step 1 (keeping picks), then
+      // clears the picks, then finally leaves the tool.
+      if (mirror3dOffsetBase) { setMirror3dOffsetBase(null); return }
+      if (mirror3dOffsetMode) { setMirror3dOffsetMode(false); return }
+      if (mirror3dSelectionDone) { setMirror3dSelectionDone(false); return }
+      if (mirror3dSel.length>0) { setMirror3dSel([]); return }
       resetMirror3D(); setTool('select'); return
     }
     if (e.key==='Escape'&&tool==='measure'){
@@ -8084,7 +8159,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   return (
     <div ref={rootDivRef} style={{display:'flex',height:'100%',outline:'none'}} tabIndex={0}
       onKeyDown={handleKeyDown}
-      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e) }}
+      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e); handleMirror3DOffsetDragMove(e) }}
       onMouseUp={e=>{ }}
     >
 
@@ -8247,30 +8322,22 @@ const App3D = forwardRef(function App3D(props, ref) {
 
       <div style={{flex:1,display:'flex',flexDirection:'column',minWidth:0}}>
 
-        {/* ══ TOP TOOLBAR ═══════════════════════════════════════════════════ */}
-        <div style={{background:'#1a1a2e',display:'flex',alignItems:'center',
+        {/* ══ TOP TOOLBAR ═══════════════════════════════════════════════════
+            Outer row does NOT wrap — it has exactly two children: a wrapping
+            content box (tool groups, which may spill onto a 2nd/3rd line when
+            narrow) and a pinned action slot (Cancel/Finish/Guide) that's
+            excluded from that wrap entirely via flexShrink:0 + alignItems
+            'flex-start' on the parent. That keeps Finish always in the same
+            top-right spot no matter how many rows the tool groups wrap
+            into — it can no longer get pushed below the fold or covered by a
+            sidebar tool's flyout panel. */}
+        <div style={{background:'#1a1a2e',display:'flex',alignItems:'flex-start',
           padding:'0 8px',gap:4,flexShrink:0,
           borderBottom:`2px solid ${sketchMode ? getPlaneColor(activePlane) : '#2a2a4a'}`,
-          flexWrap:'wrap', transition:'border-color 0.3s'}}>
+          transition:'border-color 0.3s'}}>
 
-          {/* Wordmark — always visible regardless of mode. Single-line so it
-              stays compact next to the view-preset thumbnails, but sized up
-              and two-toned (same orange/cyan split as the splash screen) so
-              it reads as the app's identity mark, not just a label. */}
-          <div style={{display:'flex',alignItems:'center',gap:8,marginRight:8,paddingRight:10,
-            borderRight:'1px solid #2a2a4a',flexShrink:0}}>
-            <svg width="34" height="34" viewBox="0 0 20 20" fill="none">
-              <path d="M10 1.5l8 4.5v8l-8 4.5-8-4.5v-8l8-4.5z" stroke="#3ad6ff" strokeWidth="1.5" strokeLinejoin="round"/>
-              <path d="M2 6l8 4.5 8-4.5M10 10.5v8" stroke="#3ad6ff" strokeWidth="1.2" opacity="0.6"/>
-            </svg>
-            <span style={{fontFamily:'monospace',fontWeight:'bold',fontSize:26,
-              letterSpacing:'0.1em',whiteSpace:'nowrap'}}>
-              <span style={{color:'#FF9800',textShadow:'0 0 8px #FF9800'}}>RETRO</span>
-              {' '}
-              <span style={{color:'#3ad6ff',textShadow:'0 0 10px #3ad6ff,0 0 20px #3ad6ff88'}}>CAD</span>
-            </span>
-          </div>
-
+          <div style={{display:'flex',alignItems:'center',gap:4,flexWrap:'wrap',
+            rowGap:4,flex:1,minWidth:0}}>
           {sketchMode ? (
             /* ── SKETCH top toolbar ── */
             <>
@@ -8423,41 +8490,6 @@ const App3D = forwardRef(function App3D(props, ref) {
                 </div>
               ))}
 
-              <div style={{flex:1}}/>
-
-              {/* CANCEL FEATURE — only for Cut/Extrude/Loft, which have a whole
-                  in-progress feature to abandon (a plain standalone sketch
-                  doesn't). Placed left of Finish so the two can't be confused. */}
-              {(extrudeTool || loftState) && (
-                <button
-                  title="Cancel — abandons this Cut/Extrude/Loft entirely"
-                  onClick={cancelFeature}
-                  style={{...btnBase,background:'#3a1a1a',outline:'2px solid #e05a4e',
-                    outlineOffset:'-2px',flexDirection:'column',gap:2,
-                    width:'auto',padding:'0 18px'}}>
-                  <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-                    <line x1="4" y1="4" x2="16" y2="16" stroke="#e05a4e" strokeWidth="2.5" strokeLinecap="round"/>
-                    <line x1="16" y1="4" x2="4" y2="16" stroke="#e05a4e" strokeWidth="2.5" strokeLinecap="round"/>
-                  </svg>
-                  <span style={{fontSize:8,fontFamily:'monospace',color:'#e05a4e',
-                    letterSpacing:'0.05em',whiteSpace:'nowrap'}}>CANCEL</span>
-                </button>
-              )}
-
-              {/* FINISH SKETCH — right-aligned */}
-              <button
-                title="Finish Sketch"
-                onClick={handleFinishSketch}
-                style={{...btnBase,background:'#1a3a2a',outline:'2px solid #69F0AE',
-                  outlineOffset:'-2px',flexDirection:'column',gap:2,
-                  width:'auto',padding:'0 18px'}}>
-                <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-                  <polyline points="3,10 8,15 17,5" stroke="#69F0AE" strokeWidth="2.5"
-                    strokeLinecap="round" strokeLinejoin="round" fill="none"/>
-                </svg>
-                <span style={{fontSize:8,fontFamily:'monospace',color:'#69F0AE',
-                  letterSpacing:'0.05em',whiteSpace:'nowrap'}}>FINISH</span>
-              </button>
             </>
           ) : (
             /* ── 3D top toolbar ── */
@@ -8489,23 +8521,64 @@ const App3D = forwardRef(function App3D(props, ref) {
                 <span style={{fontSize:9,fontFamily:'monospace',color:'#6688aa',
                   letterSpacing:'0.06em'}}>FIT</span>
               </button>
-
-              <div style={{flex:1}}/>
             </>
           )}
+          </div>
 
-          {/* Guide — sketch profile environment only, not the 3D environment */}
-          {sketchMode && (
-            <button
-              onClick={()=>setGuideOpen(p=>!p)}
-              title="Toggle Guide Panel"
-              style={{...btnBase,
-                background:guideOpen?'#f7fb0422':'transparent',
-                outline:guideOpen?'2px solid #f7fb04':'none',
-                outlineOffset:'-2px'}}>
-              <IconGuide active={guideOpen}/>
-            </button>
-          )}
+          {/* Pinned action slot — flexShrink:0, outside the wrapping content
+              box above and outside the outer row's wrap entirely, so Cancel/
+              Finish/Guide always stay in the same top-right spot no matter
+              how many rows the tool groups wrap into. */}
+          <div style={{display:'flex',alignItems:'center',gap:4,flexShrink:0,height:70}}>
+            {/* CANCEL FEATURE — only for Cut/Extrude/Loft, which have a whole
+                in-progress feature to abandon (a plain standalone sketch
+                doesn't). Placed left of Finish so the two can't be confused. */}
+            {sketchMode && (extrudeTool || loftState) && (
+              <button
+                title="Cancel — abandons this Cut/Extrude/Loft entirely"
+                onClick={cancelFeature}
+                style={{...btnBase,background:'#3a1a1a',outline:'2px solid #e05a4e',
+                  outlineOffset:'-2px',flexDirection:'column',gap:2,
+                  width:'auto',padding:'0 18px'}}>
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                  <line x1="4" y1="4" x2="16" y2="16" stroke="#e05a4e" strokeWidth="2.5" strokeLinecap="round"/>
+                  <line x1="16" y1="4" x2="4" y2="16" stroke="#e05a4e" strokeWidth="2.5" strokeLinecap="round"/>
+                </svg>
+                <span style={{fontSize:8,fontFamily:'monospace',color:'#e05a4e',
+                  letterSpacing:'0.05em',whiteSpace:'nowrap'}}>CANCEL</span>
+              </button>
+            )}
+
+            {/* FINISH SKETCH */}
+            {sketchMode && (
+              <button
+                title="Finish Sketch"
+                onClick={handleFinishSketch}
+                style={{...btnBase,background:'#1a3a2a',outline:'2px solid #69F0AE',
+                  outlineOffset:'-2px',flexDirection:'column',gap:2,
+                  width:'auto',padding:'0 18px'}}>
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                  <polyline points="3,10 8,15 17,5" stroke="#69F0AE" strokeWidth="2.5"
+                    strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+                </svg>
+                <span style={{fontSize:8,fontFamily:'monospace',color:'#69F0AE',
+                  letterSpacing:'0.05em',whiteSpace:'nowrap'}}>FINISH</span>
+              </button>
+            )}
+
+            {/* Guide — sketch profile environment only, not the 3D environment */}
+            {sketchMode && (
+              <button
+                onClick={()=>setGuideOpen(p=>!p)}
+                title="Toggle Guide Panel"
+                style={{...btnBase,
+                  background:guideOpen?'#f7fb0422':'transparent',
+                  outline:guideOpen?'2px solid #f7fb04':'none',
+                  outlineOffset:'-2px'}}>
+                <IconGuide active={guideOpen}/>
+              </button>
+            )}
+          </div>
         </div>
         {/* ── Viewport3D + Guide side by side ── */}
         <div style={{flex:1,display:'flex',minHeight:0,position:'relative',
@@ -8529,11 +8602,12 @@ const App3D = forwardRef(function App3D(props, ref) {
             onScaleChange={handleScaleChange}
             onPlaneClick={handlePlaneClick}
             onFaceClick={handleFaceClick}
-            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode) || (tool==='mirror3d' && !!mirror3dSourceFeatureId) || (tool==='loft3d' && !loftState) || tool==='exportfacedxf'}
+            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode) || (tool==='mirror3d' && mirror3dSelectionDone) || (tool==='loft3d' && !loftState) || tool==='exportfacedxf'}
+            mirrorPlanePickArmed={tool==='mirror3d' && mirror3dSelectionDone && !mirror3dOffsetBase}
             dxfPickMode={tool==='exportfacedxf'}
             dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : []}
             extrudeArmed={!!extrudeState || isLoftDragArmed()}
-            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='color'}
+            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='color' && !(tool==='mirror3d' && !mirror3dSelectionDone)}
             activePlane={activePlane}
             sketchMode={sketchMode}
             gridVisible={gridVisible}
@@ -8636,13 +8710,63 @@ const App3D = forwardRef(function App3D(props, ref) {
           {/* ── SmartStep bar: overlays bottom of viewport during Mirror3D ── */}
           <SmartStepBar
             op={tool==='mirror3d' ? 'MIRROR' : null}
-            steps={[{ id:1, label:'Pick Feature' }, { id:2, label:'Pick Plane' }]}
-            currentStep={mirror3dSourceFeatureId ? 2 : 1}
+            steps={[{ id:1, label:'Select Bodies' }, { id:2, label:'Pick Plane' }]}
+            currentStep={mirror3dSelectionDone ? 2 : 1}
             color="#8E65F3"
+            hint={!mirror3dSelectionDone
+              ? (mirror3dSel.length>0 ? `${mirror3dSel.length} selected — Enter to continue` : 'Click bodies to mirror (click again to remove)')
+              : mirror3dOffsetBase
+                ? 'Move the mouse or type a distance, Enter to confirm'
+                : mirror3dOffsetMode
+                  ? 'Click a plane or face to offset from'
+                  : 'Click a plane or face to mirror across — or create an offset plane'}
+            action={!mirror3dSelectionDone
+              ? {label:'✓ Next', enabled:mirror3dSel.length>0, onClick:()=>setMirror3dSelectionDone(true)}
+              : mirror3dOffsetBase
+                ? {label:'✓ Use Plane', enabled:true, onClick:commitMirror3DOffset}
+                : {label: mirror3dOffsetMode ? '✕ Cancel Offset' : '+ Offset Plane', enabled:true,
+                    onClick:()=>{
+                      if (mirror3dOffsetMode) { setMirror3dOffsetMode(false); setMirror3dOffsetBase(null) }
+                      else setMirror3dOffsetMode(true)
+                    }}}
             onStepBack={step => {
-              if (step === 1) resetMirror3D()   // back to step 1 — stays in the tool
+              // Back to step 1 keeps the accumulated body picks — only the
+              // "done" flag (and any in-progress offset pick) resets.
+              if (step === 1) { setMirror3dSelectionDone(false); setMirror3dOffsetMode(false); setMirror3dOffsetBase(null) }
             }}
           />
+
+          {/* ── Mirror3D offset-plane distance popup — fixed, geometry-
+              independent dock above the SmartStepBar, same reasoning as the
+              Extrude "Set Depth" popup (extrudeHandlePos): a bottom-center
+              CSS dock never overlaps the canvas regardless of where the
+              picked base plane actually sits on screen. Enter is handled by
+              handleKeyDown's mirror3d block (this input has no onKeyDown of
+              its own — the keydown bubbles up naturally), so there's no risk
+              of double-committing. */}
+          {tool==='mirror3d' && mirror3dOffsetBase && (
+            <div style={{
+              position:'absolute', left:'50%', bottom:70, transform:'translateX(-50%)',
+              zIndex:200, background:'rgba(12,12,26,0.97)', border:'2px solid #8E65F3',
+              borderRadius:8, padding:'10px 16px', display:'flex', alignItems:'center', gap:10,
+            }}>
+              <span style={{fontFamily:'monospace',fontSize:11,fontWeight:'bold',color:'#8E65F3',letterSpacing:'0.08em'}}>OFFSET</span>
+              <input
+                type="number"
+                autoFocus
+                value={mirror3dOffsetDistInput}
+                onChange={e=>setMirror3dOffsetDistInput(e.target.value)}
+                style={{width:70,textAlign:'center',fontFamily:'monospace',fontSize:14,fontWeight:'bold',
+                  background:'#0d0d1a',color:'#fff',border:'2px solid #8E65F3',borderRadius:6,padding:'4px 6px'}}
+              />
+              <span style={{fontFamily:'monospace',fontSize:11,color:'#888'}}>mm</span>
+              <button onClick={commitMirror3DOffset}
+                style={{fontFamily:'monospace',fontSize:11,fontWeight:'bold',color:'#69F0AE',
+                  background:'#1a3a2a',border:'2px solid #69F0AE',borderRadius:4,padding:'5px 12px',cursor:'pointer'}}>
+                ✓ Use Plane
+              </button>
+            </div>
+          )}
 
           {/* ── SmartStep bar: overlays bottom of viewport during Join3D ── */}
           <SmartStepBar
@@ -9627,8 +9751,6 @@ const App3D = forwardRef(function App3D(props, ref) {
         onEditDepth={handleEditExtrudeDepth}
         onEditExtent={handleEditExtent}
         onEditFilletRadius={handleEditFilletRadius}
-        mirrorPickActive={tool==='mirror3d' && !mirror3dSourceFeatureId}
-        onPickMirrorSource={handlePickMirror3DSource}
         joinPickActive={tool==='join3d'}
         joinSel={joinSel}
         onToggleJoinMember={handleToggleJoinMember}

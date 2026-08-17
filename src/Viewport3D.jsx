@@ -385,6 +385,13 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     extrudeTool    = null,   // 'extrude'|'cutout' — bypasses work plane click
     filletActive   = false,  // true while the fillet edge-pick tool is active
     measureActive  = false,  // true while the measure tool is active (reuses fillet's edge-highlight machinery, see measureActiveRef)
+    // Mirror tool step 2 (Pick Plane): true while hovering a work plane or
+    // solid face is a live "this is what I'm about to mirror across" pick,
+    // not yet an offset-distance drag — see handleMouseMoveInternal's
+    // mirrorPlanePickArmedRef branches for what this actually changes
+    // (orange hover instead of the default subtle opacity/square-indicator
+    // cues every other tool's face/plane hover already uses).
+    mirrorPlanePickArmed = false,
   } = props
 
   const mountRef   = useRef(null)
@@ -396,6 +403,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   // Face hover state
   const hoveredFaceRef   = useRef(null)  // { mesh, origMat }
   const sketchArmedRef   = useRef(false)
+  const mirrorPlanePickArmedRef = useRef(false)
   const dxfPickModeRef   = useRef(false)
   const dxfSelectedFacesRef = useRef([])
   // Extrude/cutout Phase 2/3 (a profile is picked, awaiting the commit
@@ -435,6 +443,16 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   // Mirror's single highlightSolid, Join is a multi-select) — array of
   // faceMesh objects, same reset-to-black-emissive convention as highlightSolid.
   const highlightedJoinMeshesRef = useRef([])
+  // Mirror tool step 1 (new multi-select flow): the body currently under the
+  // mouse, separate from highlightedJoinMeshesRef (which now carries Mirror's
+  // SELECTED set too) so hover and selection never fight over the same mesh
+  // reference — hoverSolid()/clearSolidHover() only ever touch this one.
+  const hoveredSolidMeshRef = useRef(null)
+  // Mirror tool step 2 (offset plane): a translucent preview plane shown while
+  // dragging/typing a live offset distance from a picked base plane/face.
+  // Built lazily on first use, repositioned in place on every call rather than
+  // rebuilt — see showOffsetPlanePreview/hideOffsetPlanePreview.
+  const offsetPlanePreviewRef = useRef(null)
 
   // ── init ──────────────────────────────────────────────────────────────────
 
@@ -1029,6 +1047,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   useEffect(() => { dxfPickModeRef.current = dxfPickMode }, [dxfPickMode])
   useEffect(() => { dxfSelectedFacesRef.current = dxfSelectedFaces }, [dxfSelectedFaces])
   useEffect(() => { extrudeArmedRef.current = extrudeArmed }, [extrudeArmed])
+  useEffect(() => { mirrorPlanePickArmedRef.current = mirrorPlanePickArmed }, [mirrorPlanePickArmed])
   useEffect(() => {
     filletActiveRef.current = filletActive
     if (!filletActive) {
@@ -1052,12 +1071,39 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     tabEdgeIndexRef.current = null
   }
 
+  // Plain, non-imperative-handle versions of hoverSolid/clearSolidHover (the
+  // ref-exposed methods just delegate to these) — needed as ordinary
+  // functions so handleMouseMoveInternal's own face-hover pass can call them
+  // directly for Mirror step 2 (hovering a face glows its owning solid
+  // orange, same as step 1's body hover), not just App3D via the ref.
+  function hoverSolidByRef(solidId) {
+    const s = stateRef.current; if (!s?.solidsGroup) return
+    clearSolidHoverByRef()
+    const group = s.solidsGroup.children.find(g => g.userData?.solidId === solidId)
+    const faceMesh = group?.children.find(c => c.isMesh && !c.userData?.isSolidEdge)
+    if (faceMesh && !highlightedJoinMeshesRef.current.includes(faceMesh)) {
+      faceMesh.material.emissive.set(0xff9800)
+      hoveredSolidMeshRef.current = faceMesh
+    }
+  }
+  // See the ref-exposed clearSolidHover's own comment for why this checks
+  // highlightedJoinMeshesRef before blackening — same reasoning applies here.
+  function clearSolidHoverByRef() {
+    if (hoveredSolidMeshRef.current) {
+      if (!highlightedJoinMeshesRef.current.includes(hoveredSolidMeshRef.current)) {
+        hoveredSolidMeshRef.current.material.emissive.set(0x000000)
+      }
+      hoveredSolidMeshRef.current = null
+    }
+  }
+
   function handleMouseMoveInternal(e) {
     const s = stateRef.current
     if (!s) { if (onMouseMove) onMouseMove(e); return }
 
     sketchArmedRef.current = sketchArmed
     extrudeArmedRef.current = extrudeArmed
+    mirrorPlanePickArmedRef.current = mirrorPlanePickArmed
 
     const el  = mountRef.current
     const rect = el ? el.getBoundingClientRect() : s.renderer.domElement.getBoundingClientRect()
@@ -1081,8 +1127,18 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
         // sliding across the solid without the mesh identity ever changing
         // (only setIsFaceHovered is gated, to avoid a React re-render per move).
         if (!hoveredFaceRef.current) setIsFaceHovered(true)
+        // Mirror step 2: hovering a face glows its whole owning solid orange,
+        // the same cue step 1's body hover gives, so picking a mirror plane
+        // reads consistently with picking bodies. Only re-fire on a
+        // genuinely different mesh (compare BEFORE overwriting the ref below)
+        // to avoid redundant emissive writes every frame while sliding
+        // across one face.
+        if (mirrorPlanePickArmedRef.current && hoveredFaceRef.current?.mesh !== hitMesh) {
+          hoverSolidByRef(findOwningSolidId(hitMesh))
+        }
         hoveredFaceRef.current = { mesh: hitMesh, hit: meshHit }
       } else if (hoveredFaceRef.current) {
+        if (mirrorPlanePickArmedRef.current) clearSolidHoverByRef()
         clearFaceHover()
       }
     } else if (!sketchArmedRef.current) {
@@ -1104,7 +1160,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       const newId = hit ? hit.id : null
       if (newId !== hoveredPlaneRef.current) {
         hoveredPlaneRef.current = newId
-        setPlaneHover(s.workPlanes, newId)
+        setPlaneHover(s.workPlanes, newId, mirrorPlanePickArmedRef.current ? 0xff9800 : undefined)
       }
     } else if (extrudeArmedRef.current && hoveredPlaneRef.current) {
       hoveredPlaneRef.current = null
@@ -1584,6 +1640,62 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     clearJoinHighlight() {
       for (const mesh of highlightedJoinMeshesRef.current) mesh.material.emissive.set(0x000000)
       highlightedJoinMeshesRef.current = []
+    },
+
+    /**
+     * Mirror tool: glows the body currently under the mouse orange — step 1's
+     * body picker (via App3D's own hover-sync effect) and step 2's plane/face
+     * picker (via handleMouseMoveInternal's mirrorPlanePickArmed branch,
+     * hovering a face glows its owning solid) both use this. Distinct from
+     * the light-blue highlightJoinMembers() glow used for the SELECTED set —
+     * see hoverSolidByRef's own guard against overwriting a selected mesh.
+     * Just delegates to the plain version so handleMouseMoveInternal can call
+     * it directly too, not only App3D via this ref.
+     */
+    hoverSolid(solidId) { hoverSolidByRef(solidId) },
+
+    /** Clears whatever hoverSolid() lit up, if any — see clearSolidHoverByRef. */
+    clearSolidHover() { clearSolidHoverByRef() },
+
+    /**
+     * Mirror tool step 2 (offset plane): shows/repositions a translucent
+     * preview plane at `origin`, oriented so local +Z (a PlaneGeometry's own
+     * face normal) matches `normal` and local +X matches `uAxis` — same
+     * (uAxis, vAxis, normal) basis convention as FacePlane and planeIdBasis.
+     * Built once and reused/repositioned on every call rather than rebuilt,
+     * since this updates live as the user drags/types a distance.
+     */
+    showOffsetPlanePreview({ origin, normal, uAxis, vAxis }) {
+      const s = stateRef.current; if (!s?.scene) return
+      let group = offsetPlanePreviewRef.current
+      if (!group) {
+        const SIZE = 220
+        const fillGeo = new THREE.PlaneGeometry(SIZE * 2, SIZE * 2)
+        const fillMat = new THREE.MeshBasicMaterial({
+          color: 0xff9800, transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false,
+        })
+        const fill = new THREE.Mesh(fillGeo, fillMat)
+        const corners = [
+          new THREE.Vector3(-SIZE, -SIZE, 0), new THREE.Vector3(SIZE, -SIZE, 0),
+          new THREE.Vector3(SIZE, SIZE, 0), new THREE.Vector3(-SIZE, SIZE, 0), new THREE.Vector3(-SIZE, -SIZE, 0),
+        ]
+        const borderGeo = new THREE.BufferGeometry().setFromPoints(corners)
+        const borderMat = new THREE.LineBasicMaterial({ color: 0xff9800, transparent: true, opacity: 0.8, depthTest: false })
+        const border = new THREE.Line(borderGeo, borderMat)
+        group = new THREE.Group()
+        group.renderOrder = 3
+        group.add(fill, border)
+        s.scene.add(group)
+        offsetPlanePreviewRef.current = group
+      }
+      group.position.copy(origin)
+      group.setRotationFromMatrix(new THREE.Matrix4().makeBasis(uAxis, vAxis, normal))
+      group.visible = true
+    },
+
+    /** Hides whatever showOffsetPlanePreview() last showed, if anything. */
+    hideOffsetPlanePreview() {
+      if (offsetPlanePreviewRef.current) offsetPlanePreviewRef.current.visible = false
     },
 
     /**

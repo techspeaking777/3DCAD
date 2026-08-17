@@ -30,7 +30,7 @@ class CadEngine {
       )
 
       this._worker.onmessage = (e) => {
-        const { type, id, faces, edges, stlBlob, dxfData, message } = e.data
+        const { type, id, faces, edges, stlBlob, dxfData, orthoViews, message } = e.data
 
         if (type === 'ready') {
           this._ready = true
@@ -53,9 +53,14 @@ class CadEngine {
 
         if (type === 'result') {
           // Most operations return mesh data for Three.js; exportSTL returns a
-          // Blob instead, exportFaceDXF returns plain {lines,circles,arcs}
+          // Blob instead, exportFaceDXF/computeOrthoViews return plain
           // geometry — pass through whichever fields are actually present.
-          pending.resolve(stlBlob ? { stlBlob } : dxfData ? { dxfData } : { faces, edges })
+          pending.resolve(
+            stlBlob ? { stlBlob } :
+            dxfData ? { dxfData } :
+            orthoViews ? { orthoViews } :
+            { faces, edges }
+          )
         } else if (type === 'error') {
           pending.reject(new Error(message || 'CAD operation failed'))
         }
@@ -153,6 +158,21 @@ class CadEngine {
    */
   async exportFaceDXF(params) {
     return this._send('exportFaceDXF', params)
+  }
+
+  /**
+   * Project every edge of one or more existing solids onto one or more fixed
+   * canonical view planes — params: {solidIds:[id,...], views:['front','top',...]}
+   * (views ⊂ front|back|left|right|top|bottom). True circles/arcs are
+   * preserved where an edge's own plane lines up with the view; everything
+   * else falls back to a straight chord or a sampled polyline (see
+   * cadWorker.js's projectEdge for the exact policy — same one exportFaceDXF
+   * already uses). Returns {orthoViews:{views:{front:{lines,circles,arcs,splines}, ...}}},
+   * each view's geometry in mm, in one shared world-anchored frame per view
+   * (not yet laid out on a page — see tools/orthoViewsMath.js for that step).
+   */
+  async computeOrthoViews(params) {
+    return this._send('computeOrthoViews', params)
   }
 
   /** True once OpenCascade has finished loading. */

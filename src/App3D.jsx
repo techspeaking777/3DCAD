@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react'
 import * as THREE from 'three'
 import viewOpIconSheet from './assets/view-op-icons.png'
 import Viewport3D from './Viewport3D.jsx'
@@ -1080,7 +1080,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
   )
 }
 
-export default function App() {
+const App3D = forwardRef(function App3D(props, ref) {
   // ── Phase 2 Step 1: Work planes ──
   const [sketchMode,setSketchMode]=useState(false)
   const [activePlane,setActivePlane]=useState(null)
@@ -1135,6 +1135,27 @@ export default function App() {
   // features: ordered list of {type:'sketch'|'extrude', id, name, ...}
   // sketches hold their own geometry; working arrays are the active sketch buffer
   const [features,setFeatures]=useState([])
+
+  // Minimal surface exposed to AppShell/the Drawing tab — just enough to
+  // populate OrthoViewsPanel's solid picker. Deliberately NOT lifting
+  // features/solids state itself out of this component: cadEngine's
+  // shapeStore (keyed by solidId) already holds the live shape for every
+  // entry here the instant it's built/edited, so the Drawing tab can query
+  // geometry straight from cadEngine with no further plumbing once it knows
+  // which solidIds exist.
+  useImperativeHandle(ref, () => ({
+    getSolidIds() {
+      return solids
+        .filter(s => s.id !== '__preview__')
+        .map(s => ({
+          id: s.id,
+          name: features.find(f => f.solidId === s.id)?.name || `Solid ${s.id}`,
+          color: s.color,
+          hidden: !!s.hidden,
+        }))
+    },
+  }), [solids, features])
+
   // Set right before arming an extrude/cutout that's converting an EXISTING
   // standalone Sketch feature (from either the sketchIntentPrompt or a
   // feature-tree row button) — once the new solid feature actually lands in
@@ -1347,6 +1368,7 @@ export default function App() {
   // continue to work — we sync .scale from the Three.js camera via onScaleChange.
   const [viewTransform,setViewTransform]=useState({x:0,y:0,scale:1})
   const [canvasSize,setCanvasSize]=useState({w:window.innerWidth-56,h:window.innerHeight-52})
+  const rootDivRef=useRef(null)
   const viewTransformRef=useRef({x:0,y:0,scale:1})
   const isPanningRef=useRef(false)
   const lastPanPosRef=useRef({x:0,y:0})
@@ -1358,11 +1380,19 @@ export default function App() {
     zoomRef.scale=viewTransform.scale
   },[viewTransform])
 
-  // Resize: update canvasSize so panels reflow correctly
+  // Measures the root div itself (via ResizeObserver) rather than
+  // window.innerWidth/innerHeight — when mounted inside AppShell's tab
+  // layout, the available area is smaller than the full window (a tab bar
+  // sits above it), so reading the window directly would overshoot by
+  // whatever the shell's chrome takes up.
   useEffect(()=>{
-    const onResize=()=>setCanvasSize({w:window.innerWidth-56,h:window.innerHeight-52})
-    window.addEventListener('resize',onResize)
-    return ()=>window.removeEventListener('resize',onResize)
+    const el=rootDivRef.current
+    if(!el) return
+    const update=()=>setCanvasSize({w:el.clientWidth-56,h:el.clientHeight-52})
+    update()
+    const ro=new ResizeObserver(update)
+    ro.observe(el)
+    return ()=>ro.disconnect()
   },[])
 
   // Called by Viewport3D whenever the camera zoom changes
@@ -1468,7 +1498,7 @@ export default function App() {
   async function handleSaveProject(){
     if (canPickSaveLocation()) {
       try {
-        const { handle } = await saveProjectFileAs(features, solids, 'drawing.trc', projectFileHandleRef.current)
+        const { handle } = await saveProjectFileAs(features, solids, 'drawing.trc', projectFileHandleRef.current, props.getSheetData?.())
         if (handle) projectFileHandleRef.current = handle
       } catch (err) {
         setCadError('Save failed: ' + (err.message || String(err)))
@@ -1535,6 +1565,7 @@ export default function App() {
     projectFileHandleRef.current = null
     if (projectData) {
       setFeatures(projectData.features)
+      props.onSheetLoaded?.(projectData.sheet)
       try {
         const newSolids = await rebuildProjectFromFeatures(projectData.features)
         setSolids(newSolids)
@@ -8051,7 +8082,7 @@ export default function App() {
   })
 
   return (
-    <div style={{display:'flex',height:'100vh',outline:'none'}} tabIndex={0}
+    <div ref={rootDivRef} style={{display:'flex',height:'100%',outline:'none'}} tabIndex={0}
       onKeyDown={handleKeyDown}
       onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e) }}
       onMouseUp={e=>{ }}
@@ -9749,7 +9780,7 @@ export default function App() {
           extension={saveAsOpen==='project' ? '.trc' : '.json'}
           onSave={async filename=>{
             setSaveAsOpen(false)
-            if (saveAsOpen==='project') await saveProjectFileAs(features, solids, filename)
+            if (saveAsOpen==='project') await saveProjectFileAs(features, solids, filename, null, props.getSheetData?.())
             else await saveProjectAs(lines,circles,arcs,splines,dims,filename)
           }}
           onClose={()=>setSaveAsOpen(false)}
@@ -9785,4 +9816,6 @@ export default function App() {
       )}
     </div>
   )
-}
+})
+
+export default App3D

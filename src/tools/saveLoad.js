@@ -155,12 +155,18 @@ export function deserializeFeature(obj) {
 
 const PROJECT_FORMAT_VERSION = 1
 
-function serializeProject(features, solids) {
+// `drawingSheet` (optional) is the Drawing tab's own content — lines/circles/
+// arcs/splines/dims/pageConfig, the same shape its own plain-JSON save
+// already uses (see App.jsx's getSheetData) — folded in as a sibling to
+// `features` so one .trc round-trips both the 3D feature tree and whatever's
+// on the Drawing tab's sheet. Absent on older files; loads as an empty sheet.
+function serializeProject(features, solids, drawingSheet) {
   const hiddenById = new Map(solids.map(s => [s.id, !!s.hidden]))
   return JSON.stringify({
     formatVersion: PROJECT_FORMAT_VERSION,
     app: '3d-retro-cad',
     features: features.map(f => serializeFeature(f, hiddenById.get(f.solidId) || false)),
+    ...(drawingSheet ? { sheet: drawingSheet } : {}),
   }, null, 2)
 }
 
@@ -182,10 +188,10 @@ function serializeProject(features, solids) {
 // noticeable blocked-main-thread delay.
 //
 // Returns {status: 'saved'|'cancelled'|'downloaded', handle: FileSystemFileHandle|null}.
-export async function saveProjectFileAs(features, solids, suggestedName = 'drawing.trc', existingHandle = null) {
+export async function saveProjectFileAs(features, solids, suggestedName = 'drawing.trc', existingHandle = null, drawingSheet = null) {
   if (existingHandle) {
     try {
-      const data = serializeProject(features, solids)
+      const data = serializeProject(features, solids, drawingSheet)
       const writable = await existingHandle.createWritable()
       await writable.write(data)
       await writable.close()
@@ -203,13 +209,13 @@ export async function saveProjectFileAs(features, solids, suggestedName = 'drawi
       if (err && err.name === 'AbortError') return { status: 'cancelled', handle: null }
       throw err
     }
-    const data = serializeProject(features, solids)
+    const data = serializeProject(features, solids, drawingSheet)
     const writable = await handle.createWritable()
     await writable.write(data)
     await writable.close()
     return { status: 'saved', handle }
   }
-  const data = serializeProject(features, solids)
+  const data = serializeProject(features, solids, drawingSheet)
   dlText(suggestedName, data, 'application/json')
   return { status: 'downloaded', handle: null }
 }
@@ -225,7 +231,7 @@ export function loadProjectFile(file) {
       try {
         const data = JSON.parse(e.target.result)
         if (!Array.isArray(data.features)) return reject(new Error('Not a project file (no feature tree)'))
-        resolve({ features: data.features.map(deserializeFeature), formatVersion: data.formatVersion })
+        resolve({ features: data.features.map(deserializeFeature), formatVersion: data.formatVersion, sheet: data.sheet || null })
       } catch {
         reject(new Error('Could not parse file'))
       }

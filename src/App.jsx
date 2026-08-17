@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react'
 import { pxToMm, mmToPx, ALIGN_SNAP_DIST, ACQUIRE_DIST, SELECT_DIST, norm2pi, zoomRef } from './constants.js'
 import { angleOnArc, computeAllIntersections } from './geometry/intersections.js'
 import { getGeoSnap, getAllSnapPoints, checkAngle, getAngleSnap, applyTracking, computeLiveAngle, getTanPtsOnCircle, getExternalTangentPairs, nearestPt } from './geometry/snap.js'
@@ -19,13 +19,14 @@ import TracerPanel from './tools/TracerPanel.jsx'
 import TextPanel from './tools/TextPanel.jsx'
 import PageSetupPanel from './tools/PageSetupPanel.jsx'
 import GuidePanel from './tools/GuidePanel.jsx'
+import OrthoViewsPanel from './tools/OrthoViewsPanel.jsx'
 import {
   IconLine, IconCircle, IconTrim, IconDelete, IconExtend, IconOffset,
   IconMirror, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
   IconUndo, IconRedo, IconFitView, IconSave, IconLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim
 } from './draw/ToolIcons.jsx'  // retro sprites 28×36
 
-export default function App() {
+const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   const canvasRef=useRef(null)
   const [tool,setTool]=useState('line')
   const [lines,setLines]=useState([])
@@ -102,7 +103,27 @@ export default function App() {
   // Text tool state
   const [textOpen,setTextOpen]=useState(false)
   const [pageSetupOpen,setPageSetupOpen]=useState(false)
+  const [orthoWizardOpen,setOrthoWizardOpen]=useState(false)
   const [pageConfig,setPageConfig]=useState({size:'A4',orientation:'landscape',margin:10,showPage:false})
+
+  // Minimal surface exposed to AppShell so the 3D tab's Save/Open can fold
+  // this sheet's contents into the same .trc as the 3D feature tree —
+  // mirrors App3D.jsx's getSolidIds handle (same additive, no-state-lifting
+  // pattern). Plain data in, plain data out; App.jsx keeps owning this state.
+  useImperativeHandle(ref, () => ({
+    getSheetData() {
+      return { lines, circles, arcs, splines, dims, pageConfig }
+    },
+    restoreSheetData(sheet) {
+      if (!sheet) return
+      setLines(sheet.lines || [])
+      setCircles(sheet.circles || [])
+      setArcs(sheet.arcs || [])
+      setSplines(sheet.splines || [])
+      setDims(sheet.dims || [])
+      if (sheet.pageConfig) setPageConfig(sheet.pageConfig)
+    },
+  }), [lines, circles, arcs, splines, dims, pageConfig])
   const [guideOpen,setGuideOpen]=useState(false)
   const [gridVisible,setGridVisible]=useState(false)
   const [gridSnap,setGridSnap]=useState(false)
@@ -146,6 +167,7 @@ export default function App() {
   // ── VIEWPORT ──
   const [viewTransform,setViewTransform]=useState({x:0,y:0,scale:1})
   const [canvasSize,setCanvasSize]=useState({w:window.innerWidth-56,h:window.innerHeight-52})
+  const rootDivRef=useRef(null)
   const viewTransformRef=useRef({x:0,y:0,scale:1})
   const isPanningRef=useRef(false)
   const lastPanPosRef=useRef({x:0,y:0})
@@ -172,10 +194,18 @@ export default function App() {
     return ()=>canvas.removeEventListener('wheel',onWheel)
   },[])
 
+  // Measures the root div itself (via ResizeObserver) rather than
+  // window.innerWidth/innerHeight — mounted inside AppShell's tab layout,
+  // the available area is smaller than the full window (a tab bar sits
+  // above it), so reading the window directly would overshoot.
   useEffect(()=>{
-    const onResize=()=>setCanvasSize({w:window.innerWidth-56,h:window.innerHeight-52})
-    window.addEventListener('resize',onResize)
-    return ()=>window.removeEventListener('resize',onResize)
+    const el=rootDivRef.current
+    if(!el) return
+    const update=()=>setCanvasSize({w:el.clientWidth-56,h:el.clientHeight-52})
+    update()
+    const ro=new ResizeObserver(update)
+    ro.observe(el)
+    return ()=>ro.disconnect()
   },[])
 
   function screenToWorld(sx,sy){
@@ -2802,7 +2832,7 @@ export default function App() {
   const zoomPct=Math.round(viewTransform.scale*100)
 
   return (
-    <div style={{display:'flex',height:'100vh',outline:'none'}} tabIndex={0} onKeyDown={handleKeyDown}>
+    <div ref={rootDivRef} style={{display:'flex',height:'100%',outline:'none'}} tabIndex={0} onKeyDown={handleKeyDown}>
       <div style={{width:72,background:'#1e1e1e',display:'flex',flexDirection:'column',padding:'8px 4px',gap:4,overflowY:'hidden'}}>
         {toolConfig.map(([t,Icon,title,activeColor])=>(
           <button key={t}
@@ -2934,6 +2964,14 @@ export default function App() {
           </label>
           <button onClick={()=>exportDXF(lines,circles,arcs,splines)} title="Export DXF" style={{...btnBase,background:'transparent',border:'none'}}>
             <IconDXF/>
+          </button>
+          <button onClick={()=>setOrthoWizardOpen(true)} title="Generate Orthogonal Views from the open 3D project" style={{...btnBase,background:'transparent',border:'none'}}>
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+              <rect x="2" y="2" width="7" height="7" stroke="#FF7043" strokeWidth="1.3"/>
+              <rect x="12" y="2" width="8" height="7" stroke="#FF7043" strokeWidth="1.3" opacity="0.5"/>
+              <rect x="2" y="12" width="7" height="8" stroke="#FF7043" strokeWidth="1.3" opacity="0.5"/>
+              <path d="M9 5.5h3M5.5 9v3" stroke="#FF7043" strokeWidth="1.1"/>
+            </svg>
           </button>
           <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
           {/* Grid toggle */}
@@ -3086,6 +3124,21 @@ export default function App() {
         />
       )}
 
+      {orthoWizardOpen&&(
+        <OrthoViewsPanel
+          getSolidIds={getSolidIds}
+          onGenerate={({lines:nLines,circles:nCircles,arcs:nArcs,splines:nSplines})=>{
+            commit(snapshot())
+            setLines(p=>[...p,...nLines])
+            setCircles(p=>[...p,...nCircles])
+            setArcs(p=>[...p,...nArcs])
+            setSplines(p=>[...p,...nSplines])
+            setOrthoWizardOpen(false)
+          }}
+          onClose={()=>setOrthoWizardOpen(false)}
+        />
+      )}
+
       {pageSetupOpen&&(
         <PageSetupPanel
           lines={lines} circles={circles} arcs={arcs} splines={splines} dims={dims}
@@ -3107,4 +3160,6 @@ export default function App() {
       )}
     </div>
   )
-}
+})
+
+export default DrawingApp

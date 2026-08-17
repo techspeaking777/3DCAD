@@ -59,6 +59,76 @@ function cutTolerant(a, b) {
   return result
 }
 
+// Classifies one OCC edge against a projection (u,v) basis and pushes true
+// geometry into the output buckets. Shared by exportFaceDXF (basis derived
+// from a picked FACE's own normal — every circle it touches is guaranteed
+// view-parallel by construction, so it never passes viewNormal and always
+// takes the true-circle/arc branch below) and computeOrthoViews (a FIXED
+// axis-aligned basis independent of any given edge's own plane, so circles
+// can come in view-parallel, edge-on, or oblique — hence the extra checks
+// that only activate when viewNormal is supplied).
+function projectEdge(edge, project, lines, circles, arcs, splines, viewNormal) {
+  if (edge.geomType === 'CIRCLE') {
+    // No convenience center/radius getter on Edge/Curve — drop to the raw OCC
+    // circle adaptor, same "replicad doesn't cover this, use .wrapped
+    // directly" pattern already used throughout this file.
+    const circ = edge.curve.wrapped.Circle()
+    const loc = circ.Location()
+    const center3D = new Vector([loc.X(), loc.Y(), loc.Z()])
+    const center = project(center3D)
+    const r = circ.Radius()
+    let cosAngle = 1, circNormal = null
+    if (viewNormal) {
+      const ax = circ.Axis().Direction()
+      circNormal = new Vector([ax.X(), ax.Y(), ax.Z()])
+      cosAngle = Math.abs(circNormal.dot(viewNormal))
+    }
+    if (cosAngle > 0.999) {
+      if (edge.isClosed) {
+        circles.push({ cx: center.x, cy: center.y, r })
+      } else {
+        const sp = project(edge.startPoint), ep = project(edge.endPoint)
+        arcs.push({
+          cx: center.x, cy: center.y, r,
+          startAngle: Math.atan2(sp.y - center.y, sp.x - center.x),
+          endAngle:   Math.atan2(ep.y - center.y, ep.x - center.x),
+        })
+      }
+      return
+    }
+    if (edge.isClosed) {
+      // Not view-parallel: the true projection of a full circle is a line
+      // (edge-on) or an ellipse (oblique) — this app has no ellipse
+      // primitive, so sample the real 3D circle and emit a closed polyline
+      // instead (same {points,closed} shape parseDXF's LWPOLYLINE import
+      // already produces). Sampling naturally degenerates to a thin sliver
+      // in the edge-on case too, so no separate branch is needed for that.
+      //
+      // gp_Circ has no "point at parameter" method in this OCC build
+      // (confirmed live: .Value() is not a function) — build the sample
+      // points manually instead, from an in-plane (xDir,yDir) basis derived
+      // off circNormal via the same Gram-Schmidt technique this file already
+      // uses to build a face-normal projection frame (see exportFaceDXF).
+      const refAxis = Math.abs(circNormal.x) < 0.9 ? new Vector([1,0,0]) : new Vector([0,0,1])
+      const xDir = refAxis.sub(circNormal.multiply(refAxis.dot(circNormal))).normalize()
+      const yDir = circNormal.cross(xDir).normalize()
+      const pts = []
+      const N = 48
+      for (let i = 0; i < N; i++) {
+        const t = (i / N) * 2 * Math.PI
+        const p3d = center3D.add(xDir.multiply(r*Math.cos(t))).add(yDir.multiply(r*Math.sin(t)))
+        pts.push(project(p3d))
+      }
+      splines.push({ points: pts, closed: true })
+      return
+    }
+    // Non-view-parallel partial arc: falls through to the straight-chord
+    // fallback below, same accepted policy as any other non-circle curve.
+  }
+  const sp = project(edge.startPoint), ep = project(edge.endPoint)
+  lines.push({ x1: sp.x, y1: sp.y, x2: ep.x, y2: ep.y })
+}
+
 // Pure-JS estimate of how big baseParams's own solid is, in mm — deliberately
 // avoids calling live OCC's .boundingBox() on the actual built shape: a
 // solid that already has one or more cuts baked in can fail BRepBndLib's
@@ -255,7 +325,7 @@ self.onmessage = async function(e) {
       const origin = faces[0].center
       const project = v => { const rel = v.sub(origin); return { x: rel.dot(uAxis), y: rel.dot(vAxis) } }
 
-      const lines = [], circles = [], arcs = []
+      const lines = [], circles = [], arcs = [], splines = []
       for (const f of faces) {
         // face.outerWire()/innerWires() each DELETE their receiver as a side
         // effect (replicad's "consuming" idiom — see Face.outerWire()/
@@ -264,36 +334,50 @@ self.onmessage = async function(e) {
         // outer-wire call so the original survives for innerWires().
         const wires = [f.clone().outerWire(), ...f.innerWires()]
         for (const wire of wires) {
-          for (const edge of wire.edges) {
-            if (edge.geomType === 'CIRCLE') {
-              // No convenience center/radius getter on Edge/Curve — drop to the
-              // raw OCC circle adaptor, same "replicad doesn't cover this, use
-              // .wrapped directly" pattern already used throughout this file.
-              const circ = edge.curve.wrapped.Circle()
-              const loc = circ.Location()
-              const center = project(new Vector([loc.X(), loc.Y(), loc.Z()]))
-              const r = circ.Radius()
-              if (edge.isClosed) {
-                circles.push({ cx: center.x, cy: center.y, r })
-              } else {
-                const sp = project(edge.startPoint), ep = project(edge.endPoint)
-                arcs.push({
-                  cx: center.x, cy: center.y, r,
-                  startAngle: Math.atan2(sp.y - center.y, sp.x - center.x),
-                  endAngle:   Math.atan2(ep.y - center.y, ep.x - center.x),
-                })
-              }
-            } else {
-              // Any other curve type (LINE, or an unexpected BEZIER/BSPLINE
-              // edge) — a straight chord between endpoints is a reasonable
-              // fallback for DXF export.
-              const sp = project(edge.startPoint), ep = project(edge.endPoint)
-              lines.push({ x1: sp.x, y1: sp.y, x2: ep.x, y2: ep.y })
-            }
-          }
+          // No viewNormal passed — every circle on a face's own boundary is
+          // guaranteed view-parallel to that face's projection basis by
+          // construction, so projectEdge always takes the true-circle/arc
+          // branch here (splines stays empty for this call site).
+          for (const edge of wire.edges) projectEdge(edge, project, lines, circles, arcs, splines)
         }
       }
       self.postMessage({ type:'result', id, dxfData: { lines, circles, arcs } })
+      return
+    }
+
+    if (type==='computeOrthoViews') {
+      // Front/top/right reuse this app's existing on-screen view conventions
+      // (Viewport3D.jsx's PLANE_VIEWS, SketchPlane.js's worldToSketch) so a
+      // generated front/top/right view visually matches what clicking those
+      // work planes in the 3D tab already shows. back/left/bottom mirror the
+      // opposite pair.
+      const VIEW_BASES = {
+        front:  { uAxis: new Vector([1,0,0]),  vAxis: new Vector([0,0,1]), normal: new Vector([0,-1,0]) },
+        back:   { uAxis: new Vector([-1,0,0]), vAxis: new Vector([0,0,1]), normal: new Vector([0,1,0]) },
+        right:  { uAxis: new Vector([0,1,0]),  vAxis: new Vector([0,0,1]), normal: new Vector([1,0,0]) },
+        left:   { uAxis: new Vector([0,-1,0]), vAxis: new Vector([0,0,1]), normal: new Vector([-1,0,0]) },
+        top:    { uAxis: new Vector([1,0,0]),  vAxis: new Vector([0,1,0]), normal: new Vector([0,0,1]) },
+        bottom: { uAxis: new Vector([1,0,0]),  vAxis: new Vector([0,-1,0]), normal: new Vector([0,0,-1]) },
+      }
+      const views = {}
+      for (const viewName of params.views) {
+        const basis = VIEW_BASES[viewName]
+        if (!basis) throw new Error(`computeOrthoViews: unknown view "${viewName}"`)
+        const { uAxis, vAxis, normal } = basis
+        // Origin is the world origin (not a per-face center like
+        // exportFaceDXF) so every solid's edges land in ONE shared frame per
+        // view — required for the client-side layout step to bbox solids
+        // correctly relative to each other.
+        const project = v => ({ x: v.dot(uAxis), y: v.dot(vAxis) })
+        const lines = [], circles = [], arcs = [], splines = []
+        for (const solidId of params.solidIds) {
+          const shape = shapeStore.get(solidId)
+          if (!shape) throw new Error(`computeOrthoViews-MISS: solid ${solidId} not in store`)
+          for (const edge of shape.edges) projectEdge(edge, project, lines, circles, arcs, splines, normal)
+        }
+        views[viewName] = { lines, circles, arcs, splines }
+      }
+      self.postMessage({ type:'result', id, orthoViews: { views } })
       return
     }
 

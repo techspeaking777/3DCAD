@@ -12,10 +12,17 @@ const PAPER_SIZES = {
 
 const SCALES = ['Fit to page', '1:1', '1:2', '1:5', '1:10', '1:20', '1:50', '1:100', '1:200', '1:500']
 
-export default function PageSetupPanel({ lines, circles, arcs, splines, pxToMm, mmToPx, onClose }) {
-  const [size, setSize]         = useState('A4')
-  const [orientation, setOri]   = useState('landscape')
-  const [margin, setMargin]     = useState('10')
+export default function PageSetupPanel({ lines, circles, arcs, splines, dims=[], pxToMm, mmToPx, pageConfig, setPageConfig, onClose }) {
+  // size/orientation/margin are read/written straight through pageConfig
+  // (the same state App.jsx's on-canvas page-border preview already uses)
+  // instead of a separate local copy — previously these were two
+  // independently-tracked states that never agreed with each other.
+  const size = pageConfig.size
+  const setSize = v => setPageConfig(p => ({ ...p, size: v }))
+  const orientation = pageConfig.orientation
+  const setOri = v => setPageConfig(p => ({ ...p, orientation: v }))
+  const margin = pageConfig.margin
+  const setMargin = v => setPageConfig(p => ({ ...p, margin: parseFloat(v) || 0 }))
   const [scale, setScale]       = useState('Fit to page')
   const [customW, setCustomW]   = useState('210')
   const [customH, setCustomH]   = useState('297')
@@ -48,6 +55,18 @@ export default function PageSetupPanel({ lines, circles, arcs, splines, pxToMm, 
       circles.forEach(c => { allX.push(c.cx-c.r,c.cx+c.r); allY.push(c.cy-c.r,c.cy+c.r) })
       arcs.forEach(a => { allX.push(a.cx-a.r,a.cx+a.r); allY.push(a.cy-a.r,a.cy+a.r) })
       splines.forEach(sp => sp.points.forEach(p => { allX.push(p.x); allY.push(p.y) }))
+      dims.forEach(d => {
+        if (d.kind === 'linear') {
+          const dx=d.x2-d.x1, dy=d.y2-d.y1, len=Math.hypot(dx,dy)||1
+          const nx=-dy/len, ny=dx/len, off=d.offset
+          allX.push(d.x1, d.x2, d.x1+nx*off, d.x2+nx*off)
+          allY.push(d.y1, d.y2, d.y1+ny*off, d.y2+ny*off)
+        } else {
+          const cos=Math.cos(d.angle), sin=Math.sin(d.angle)
+          allX.push(d.cx-d.r*cos, d.cx+d.r*cos)
+          allY.push(d.cy-d.r*sin, d.cy+d.r*sin)
+        }
+      })
 
       if (!allX.length) { setStatus('Nothing to export'); setExporting(false); return }
 
@@ -145,6 +164,14 @@ export default function PageSetupPanel({ lines, circles, arcs, splines, pxToMm, 
         const pts = sampleSplineForPDF(sp)
         drawPolylinePDF(doc, pts.map(p => [tx(p.x), ty(p.y)]))
       })
+
+      // Draw dimensions — same geometry the canvas overlay already draws
+      // (App.jsx's dims.forEach), ported to jsPDF calls.
+      doc.setDrawColor(30, 30, 30)
+      doc.setFillColor(30, 30, 30)
+      doc.setLineWidth(LW)
+      doc.setLineDashPattern([], 0)
+      dims.forEach(d => drawDimPDF(doc, d, tx, ty, px2mm))
 
       // Draw page border
       doc.setDrawColor(200, 200, 200)
@@ -274,6 +301,56 @@ function drawPolylinePDF(doc, pts) {
   if (pts.length < 2) return
   for (let i = 0; i < pts.length - 1; i++) {
     doc.line(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1])
+  }
+}
+
+// Ports App.jsx's canvas dims.forEach rendering (linear/diameter/radius) to
+// jsPDF calls — same geometry, same three dim.kind branches, one arrowhead
+// helper shared across all three instead of inlined per-branch.
+function drawArrowheadPDF(doc, ax, ay, dx, dy, arrMm) {
+  const x1 = ax + dx*arrMm - dy*arrMm*0.35, y1 = ay + dy*arrMm + dx*arrMm*0.35
+  const x2 = ax + dx*arrMm + dy*arrMm*0.35, y2 = ay + dy*arrMm - dx*arrMm*0.35
+  doc.triangle(ax, ay, x1, y1, x2, y2, 'F')
+}
+
+function drawDimPDF(doc, dim, tx, ty, px2mm) {
+  const ARR = px2mm(6)
+  if (dim.kind === 'linear') {
+    const dx=dim.x2-dim.x1, dy=dim.y2-dim.y1, len=Math.hypot(dx,dy)
+    if (len < 1) return
+    const ux=dx/len, uy=dy/len, nx=-uy, ny=ux, off=dim.offset
+    const ext = 6*1.5 // px, matches canvas's ARR*1.5 extension length
+    doc.line(tx(dim.x1), ty(dim.y1), tx(dim.x1+nx*(off+Math.sign(off)*ext)), ty(dim.y1+ny*(off+Math.sign(off)*ext)))
+    doc.line(tx(dim.x2), ty(dim.y2), tx(dim.x2+nx*(off+Math.sign(off)*ext)), ty(dim.y2+ny*(off+Math.sign(off)*ext)))
+    const d1x=tx(dim.x1+nx*off), d1y=ty(dim.y1+ny*off)
+    const d2x=tx(dim.x2+nx*off), d2y=ty(dim.y2+ny*off)
+    doc.line(d1x, d1y, d2x, d2y)
+    drawArrowheadPDF(doc, d1x, d1y, ux, uy, ARR)
+    drawArrowheadPDF(doc, d2x, d2y, -ux, -uy, ARR)
+    let ang = -Math.atan2(uy,ux) * 180/Math.PI
+    if (ang > 90 || ang < -90) ang += 180
+    doc.text(dim.text || `${px2mm(len).toFixed(2)} mm`, (d1x+d2x)/2, (d1y+d2y)/2 - 1, { angle: ang, align: 'center' })
+  } else if (dim.kind === 'diameter') {
+    const {cx,cy,r,angle} = dim
+    const cos=Math.cos(angle), sin=Math.sin(angle)
+    const p1x=tx(cx-r*cos), p1y=ty(cy-r*sin)
+    const p2x=tx(cx+r*cos), p2y=ty(cy+r*sin)
+    doc.line(p1x, p1y, p2x, p2y)
+    drawArrowheadPDF(doc, p1x, p1y, cos, sin, ARR)
+    drawArrowheadPDF(doc, p2x, p2y, -cos, -sin, ARR)
+    let a = -angle * 180/Math.PI
+    if (a > 90 || a < -90) a += 180
+    doc.text(dim.text || `⌀${px2mm(r*2).toFixed(2)} mm`, tx(cx), ty(cy) - 1, { angle: a, align: 'center' })
+  } else if (dim.kind === 'radius') {
+    const {cx,cy,r,angle} = dim
+    const ex=cx+r*Math.cos(angle), ey=cy+r*Math.sin(angle)
+    const cxPdf=tx(cx), cyPdf=ty(cy), exPdf=tx(ex), eyPdf=ty(ey)
+    doc.line(cxPdf, cyPdf, exPdf, eyPdf)
+    const cos=Math.cos(angle), sin=Math.sin(angle)
+    drawArrowheadPDF(doc, exPdf, eyPdf, -cos, -sin, ARR)
+    let a = -angle * 180/Math.PI
+    if (a > 90 || a < -90) a += 180
+    doc.text(dim.text || `R${px2mm(r).toFixed(2)} mm`, (cxPdf+exPdf)/2, (cyPdf+eyPdf)/2 - 1, { angle: a, align: 'center' })
   }
 }
 

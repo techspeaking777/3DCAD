@@ -8847,6 +8847,25 @@ const App3D = forwardRef(function App3D(props, ref) {
             }
             onStepBack={step => { if (step===1) resetFillet3D() }}
           />
+
+          {/* ── SmartStep bar: overlays bottom of viewport during Measure ── */}
+          <SmartStepBar
+            op={tool==='measure' ? 'MEASURE' : null}
+            steps={[{ id:1, label:'Click Geometry' }, { id:2, label:'Click Second Point' }]}
+            currentStep={measureP1 ? 2 : 1}
+            color="#4FC3F7"
+            hint={
+              measureP1
+                ? 'Click a second point for distance'
+                : measureResult
+                  ? (measureResult.kind==='distance' ? `Distance: ${measureResult.distance.toFixed(2)} mm`
+                    : measureResult.kind==='straight'  ? `Length: ${measureResult.length.toFixed(2)} mm`
+                    : measureResult.kind==='circular'  ? `⌀ ${measureResult.diameter.toFixed(2)} mm`
+                    : `Length: ${measureResult.length.toFixed(2)} mm (curve)`) + ' — click new geometry to remeasure'
+                  : 'Click an edge to measure it, or a point to start a distance'
+            }
+            onStepBack={step => { if (step===1) resetMeasure() }}
+          />
         </div>
         <div style={{height:52,background:'#16162a',display:'flex',alignItems:'center',padding:'0 8px',gap:4,flexShrink:0,borderTop:'2px solid #2a2a4a'}}>
           {/* Undo/Redo/Save/Load/PDF/DXF only mean anything for the 2D sketch

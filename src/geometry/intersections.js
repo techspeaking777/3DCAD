@@ -35,6 +35,19 @@ export function circleCircleIntersect(cx1,cy1,r1,cx2,cy2,r2) {
 
 export function angleOnArc(θ,start,end) {
   θ=norm2pi(θ);start=norm2pi(start);end=norm2pi(end)
+  // start≈end is ambiguous (zero-length arc, or a full 2π sweep expressed
+  // with an endpoint marker so it can chain onto another entity — e.g. a
+  // circle trimmed at a single tangent point, where there's no real segment
+  // to remove, just a connection point to introduce). Trimming/deleting
+  // never legitimately produces a TRUE zero-length arc (there'd be nothing
+  // left to add), so the full-sweep reading is always the right one — treat
+  // it as valid everywhere, matching how ctx.arc() already renders it.
+  // "Close" has to be checked the SHORT way around the circle — start=2π-ε,
+  // end=0 are practically the same point, but their raw numeric difference
+  // is ≈2π, not ≈0 (this is exactly the shape a tangent-point split leaves
+  // behind — see circleIntersectionAngles).
+  const rawDiff = Math.abs(start-end)
+  if (Math.min(rawDiff, 2*Math.PI-rawDiff) < 1e-4) return true
   if (start<=end) return θ>=start-1e-8&&θ<=end+1e-8
   return θ>=start-1e-8||θ<=end+1e-8
 }
@@ -200,8 +213,16 @@ export function arcIntersectionAngles(arcIdx,lines,circles,arcs,splines=[]) {
       }
     }
   })
+  // 1e-4 matches circleIntersectionAngles' own dedup tolerance below — a
+  // tangent-circle construction (see tanCircleSolution) can produce the SAME
+  // touch point from two different formulas that round differently in their
+  // last few bits, ~1e-7 apart. The previous 1e-8 threshold was tighter than
+  // that noise floor, so a tangent point's two near-duplicate angles could
+  // survive as distinct entries and split off a hairline sliver arc when
+  // trimmed — invisible, but permanently stuck (unselectable/undeletable,
+  // see angleOnArc) once created.
   const uniq=[]
-  angles.forEach(a=>{if(!uniq.some(b=>Math.abs(b-a)<1e-8))uniq.push(a)})
+  angles.forEach(a=>{if(!uniq.some(b=>Math.abs(b-a)<1e-4))uniq.push(a)})
   return uniq.sort((a,b)=>a-b)
 }
 

@@ -104,14 +104,28 @@ export function performTrim(preview,lines,circles,arcs) {
     for (let i=0;i<n;i++) {
       const aS=allAngles[i],aE=allAngles[(i+1)%n]
       if (Math.abs(aS-arcStart)<1e-8&&Math.abs(aE-arcEnd)<1e-8) continue
+      // A near-zero angular span here is floating-point noise from a tangent
+      // touch point (two intersection formulas rounding the SAME point
+      // slightly differently — see circleIntersectionAngles), not a sliver
+      // the user actually asked to keep. Dropping it here avoids leaving an
+      // invisible, permanently stuck arc behind (unselectable/undeletable —
+      // see angleOnArc — and dropped by the DXF exporter too).
+      if ((norm2pi(aE-aS)||2*Math.PI) < 1e-4) continue
       na.push({...orig,startAngle:aS,endAngle:aE})
     }
   }
   if (preview.kind==='arc') {
     const arc=arcs[preview.idx]
     na=arcs.filter((_,i)=>i!==preview.idx)
-    if (Math.abs(norm2pi(arc.startAngle)-preview.arcStart)>1e-8) na.push({...arc,endAngle:preview.arcStart})
-    if (Math.abs(preview.arcEnd-norm2pi(arc.endAngle))>1e-8) na.push({...arc,startAngle:preview.arcEnd})
+    // 1e-4 (not the original 1e-8) — same tangent-point floating-point noise
+    // as the circle branch above can leave a near-duplicate split angle just
+    // outside the old tolerance, keeping a hairline sliver piece. Checked the
+    // SHORT way around the circle (angleClose), not a raw difference — two
+    // angles either side of the 0/2π wrap (e.g. ~0 and ~2π) are practically
+    // the same point despite a raw difference of ~2π.
+    const angleClose=(a,b)=>{const d=Math.abs(a-b);return Math.min(d,2*Math.PI-d)<1e-4}
+    if (!angleClose(norm2pi(arc.startAngle),preview.arcStart)) na.push({...arc,endAngle:preview.arcStart})
+    if (!angleClose(preview.arcEnd,norm2pi(arc.endAngle))) na.push({...arc,startAngle:preview.arcEnd})
   }
   return {lines:nl,circles:nc,arcs:na}
 }

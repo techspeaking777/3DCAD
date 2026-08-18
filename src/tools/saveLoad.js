@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { pxToMm } from '../constants.js'
+import { pxToMm, norm2pi } from '../constants.js'
 import { splineToPolyline } from './splineMath.js'
 import { FacePlane } from '../FacePlane.js'
 
@@ -295,6 +295,23 @@ function dxfArc(cx,cy,r,startDeg,endDeg,style) {
   return `0\nARC\n8\n${dxfLayer(style)}${dxfLtype(style)}\n10\n${cx.toFixed(4)}\n20\n${cy.toFixed(4)}\n30\n0.0\n40\n${r.toFixed(4)}\n50\n${startDeg.toFixed(6)}\n51\n${endDeg.toFixed(6)}\n`
 }
 
+// An arc whose startAngle/endAngle are (within noise) equal represents a full
+// 2π sweep with an endpoint marker for chaining onto another entity — e.g. a
+// circle trimmed at a single tangent point, where there's nothing to actually
+// cut, just a connection point to introduce (see angleOnArc in
+// geometry/intersections.js for the same ambiguity on the read/hit-test
+// side). Writing that as a DXF ARC entity means a start/end pair a hairsbreadth
+// apart (like "0°"/"359.999999°") — most DXF readers round that gap away and
+// treat the arc as zero-length, silently dropping it. A native CIRCLE entity
+// has no such ambiguity, so full-sweep arcs export as one instead.
+function isFullSweepArc(a) {
+  // Checked the SHORT way around the circle — start=2π-ε, end=0 are
+  // practically the same point, but their raw difference is ≈2π, not ≈0
+  // (see angleOnArc in geometry/intersections.js for the same check).
+  const diff = Math.abs(norm2pi(a.startAngle) - norm2pi(a.endAngle))
+  return Math.min(diff, 2*Math.PI-diff) < 1e-4
+}
+
 export function exportDXF(lines, circles, arcs, splines=[], filename='drawing.dxf') {
   const mm   = px => pxToMm(px)
   const fy   = y  => -mm(y)
@@ -320,6 +337,7 @@ export function exportDXF(lines, circles, arcs, splines=[], filename='drawing.dx
   // Y-flip reverses direction so we swap start/end angles.
   arcs.forEach(a => {
     const cx = mm(a.cx), cy = fy(a.cy), r = mm(a.r)
+    if (isFullSweepArc(a)) { entities += dxfCircle(cx, cy, r, a.style); return }
     const startDeg = toDXFdeg(a.endAngle)
     const endDeg   = toDXFdeg(a.startAngle)
     entities += dxfArc(cx, cy, r, startDeg, endDeg, a.style)
@@ -361,7 +379,10 @@ export async function exportFaceDXF(lines, circles, arcs, suggestedName='face.dx
   let entities = ''
   lines.forEach(l => { entities += dxfLine(l.x1, l.y1, l.x2, l.y2) })
   circles.forEach(c => { entities += dxfCircle(c.cx, c.cy, c.r) })
-  arcs.forEach(a => { entities += dxfArc(a.cx, a.cy, a.r, toDeg(a.startAngle), toDeg(a.endAngle)) })
+  arcs.forEach(a => {
+    if (isFullSweepArc(a)) { entities += dxfCircle(a.cx, a.cy, a.r); return }
+    entities += dxfArc(a.cx, a.cy, a.r, toDeg(a.startAngle), toDeg(a.endAngle))
+  })
   const dxf =
     '0\nSECTION\n2\nHEADER\n' +
     '9\n$INSUNITS\n70\n4\n' +

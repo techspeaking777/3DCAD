@@ -912,14 +912,16 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
 
     // ── Render working arrays (current in-progress sketch) ──
     // ghostRef entries (Loft's previous-profile reference, see App3D.jsx's
-    // injectLoftGhost) render dimmed, same treatment as an inactive committed
-    // sketch above — they're a visual + snap reference only, not part of the
-    // profile currently being drawn.
-    const ghostColor = 0xaaaaaa
-    lines  .forEach(l  => { const o=buildLine(l,   l.ghostRef?ghostColor:lineColor); if(l.ghostRef)setHaloOpacity(o,0.3); geomGroup.add(o) })
-    circles.forEach(c  => { const o=buildCircle(c, c.ghostRef?ghostColor:lineColor); if(c.ghostRef)setHaloOpacity(o,0.3); geomGroup.add(o) })
-    arcs   .forEach(a  => { const o=buildArc(a,    a.ghostRef?ghostColor:lineColor); if(a.ghostRef)setHaloOpacity(o,0.3); geomGroup.add(o) })
-    splines.forEach(sp => { const o=buildSpline(sp,sp.ghostRef?ghostColor:lineColor); if(o&&sp.ghostRef)setHaloOpacity(o,0.3); if(o) geomGroup.add(o) })
+    // injectLoftGhost) render dimmed — but noticeably darker/more opaque than
+    // an inactive committed sketch (above): the user is actively aligning the
+    // new profile against this one, not just glancing past unrelated
+    // background geometry, so the faint 0xaaaaaa/0.3 treatment used above
+    // made it nearly disappear against the light isometric grid.
+    const ghostColor = 0x555555
+    lines  .forEach(l  => { const o=buildLine(l,   l.ghostRef?ghostColor:lineColor); if(l.ghostRef)setHaloOpacity(o,0.6); geomGroup.add(o) })
+    circles.forEach(c  => { const o=buildCircle(c, c.ghostRef?ghostColor:lineColor); if(c.ghostRef)setHaloOpacity(o,0.6); geomGroup.add(o) })
+    arcs   .forEach(a  => { const o=buildArc(a,    a.ghostRef?ghostColor:lineColor); if(a.ghostRef)setHaloOpacity(o,0.6); geomGroup.add(o) })
+    splines.forEach(sp => { const o=buildSpline(sp,sp.ghostRef?ghostColor:lineColor); if(o&&sp.ghostRef)setHaloOpacity(o,0.6); if(o) geomGroup.add(o) })
 
     // Fills for working arrays. Include circles/splines' planes too — a
     // text-only sketch (no lines/arcs yet) would otherwise never get a fill

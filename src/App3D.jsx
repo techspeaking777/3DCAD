@@ -666,7 +666,7 @@ function CutoutGlyph({ color='#7fa8cc' }) {
   )
 }
 
-function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, joinPickActive, joinSel, onToggleJoinMember, onEditLoft, hiddenSolidIds, onToggleBodyVisible, onConvertSketch, hasSolids }) {
+function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, onEditLoft, hiddenSolidIds, onToggleBodyVisible, onConvertSketch, hasSolids }) {
   const [editingName, setEditingName] = useState(null)
   const [editDepthId, setEditDepthId] = useState(null)
   const [depthVal, setDepthVal]       = useState('')
@@ -735,24 +735,19 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           // wherever the tree assumed every cutout has the plain shape.
           const isLoftCutout = isExtrude && feat.operation === 'cutout' && !!feat.profiles
           const isLocked = !!feat.joinedInto
-          // A source with a dependent mirror used to be excluded here too —
-          // but rebuildJoinBaseMesh already knows how to rebuild a mirror
-          // member from its source (see its mf.operation==='mirror' branch),
-          // and a locked/joined feature can't be edited, so nothing can ever
-          // trigger rebuildDependentMirrors against a joined-away source.
-          // Blocking it just made "join a mirrored part to its original" —
-          // an ordinary CAD operation — impossible.
-          const isJoinEligible = isExtrude && feat.operation !== 'cutout' && !isJoin && !isLocked
           // Only rows that own an independent solid can be hidden — a cutout
           // or fillet modifies an EXISTING body in place rather than creating
           // one, so there's nothing separate to hide.
           // Locked (joined-away) rows are excluded too: their own solid was
           // consumed into the Join's new body, so only the Join row's eye
-          // icon does anything meaningful now.
+          // icon does anything meaningful now. Mirror-operation rows are NOT
+          // excluded from being joinable/mirrorable-again — rebuildJoinBaseMesh
+          // already knows how to rebuild a mirror member from its source, and
+          // blocking it just made "join a mirrored part to its original" — an
+          // ordinary CAD operation — impossible.
           const isBodyOwner = isExtrude && !isLocked &&
             ['extrude','revolve','loft','mirror','join'].includes(feat.operation || 'extrude')
           const isBodyHidden = isBodyOwner && hiddenSolidIds?.includes(feat.solidId)
-          const isJoinSelected = joinSel?.includes(feat.id)
           const editingDepth = editDepthId === feat.id
 
           const rowKind = isSketch ? 'sketch' : isFillet ? 'fillet' : isMirror ? 'mirror'
@@ -760,39 +755,21 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
             : feat.operation === 'revolve' ? 'revolve' : 'extrude'
           const rowColor = featureOpColor(feat)
 
-          const itemBg = isJoinSelected ? '#FFEE8822' : isActiveSketch ? '#4FC3F722' : 'transparent'
-          const borderLeft = `3px solid ${
-            isJoinSelected ? '#FFEE88' : isActiveSketch ? '#4FC3F7' : rowColor + '55'
-          }`
+          const itemBg = isActiveSketch ? '#4FC3F722' : 'transparent'
+          const borderLeft = `3px solid ${isActiveSketch ? '#4FC3F7' : rowColor + '55'}`
 
           return (
             <div key={feat.id}
               title={isLocked ? `Part of ${features.find(f=>f.id===feat.joinedInto)?.name || 'a Join'} — delete the join to edit` : undefined}
-              onClick={()=>{
-                if (joinPickActive && isJoinEligible) onToggleJoinMember(feat.id)
-              }}
               style={{
               borderLeft, background: itemBg,
               padding: '6px 10px 6px 8px',
               borderBottom: '1px solid #2a2a4a',
               opacity: isLocked ? 0.5 : 1,
-              cursor: joinPickActive   ? (isJoinEligible ? 'pointer' : 'default')
-                    : (isSketch ? 'pointer' : 'default'),
+              cursor: isSketch ? 'pointer' : 'default',
             }}>
               {/* Feature header row */}
               <div style={{display:'flex', alignItems:'center', gap:6}}>
-                {/* Join-pick checkbox */}
-                {joinPickActive && isJoinEligible && (
-                  <span style={{
-                    width:13, height:13, flexShrink:0, borderRadius:3,
-                    border:`1.5px solid ${isJoinSelected ? '#FFEE88' : '#556'}`,
-                    background: isJoinSelected ? '#FFEE88' : 'transparent',
-                    display:'flex', alignItems:'center', justifyContent:'center',
-                    fontSize:10, color:'#3a3000', lineHeight:1,
-                  }}>
-                    {isJoinSelected ? '✓' : ''}
-                  </span>
-                )}
                 {/* Icon */}
                 <span style={{display:'flex', alignItems:'center', gap:3, flexShrink:0}}>
                   <RowIcon kind={rowKind} color={rowColor}/>
@@ -3259,6 +3236,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     // hit that slipped past sketchArmed being false; must NOT fall through
     // to enterSketch below, same reasoning as handlePlaneClick's own guard.
     if (tool==='mirror3d' && !mirror3dSelectionDone) return
+    // Join (picking bodies the whole time it's active, no second step) — same
+    // stray-hit guard as Mirror step 1 above.
+    if (tool==='join3d') return
     if (tool==='loft3d' && !loftState) { startLoftProfile1({ kind:'face', facePlane }); return }
     if (tool==='exportfacedxf') { handleExportFaceDXFFaceClick(facePlane); return }
     if (extrudeState) return  // step 3 (depth): ignore stray face clicks
@@ -3283,6 +3263,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     // the just-set selection highlight (its own useEffect clears on tool
     // change) the instant it happened, reading as "highlights then reverts."
     if (tool==='mirror3d' && !mirror3dSelectionDone) return
+    // Join (picking bodies the whole time it's active) — same guard.
+    if (tool==='join3d') return
     enterSketch(id)
     viewport3dRef.current?.snapToPlane(id)
   }
@@ -4080,10 +4062,13 @@ const App3D = forwardRef(function App3D(props, ref) {
   }, [mirror3dHoverSolidId, tool])
 
   // ── Join (3D boolean union) state machine ─────────────────────────────────
-  // Step 1: toggle 2+ eligible feature rows in the Feature Tree into joinSel.
-  // Step 2: accept via Enter, right-click, or Tab — commits immediately, no
-  //   3D-viewport interaction needed at all (unlike Mirror3D's plane pick).
+  // Step 1: click bodies directly in the 3D view to accumulate joinSel
+  //   (same viewport click/hover pattern as Mirror/Export STL/Body Color —
+  //   orange hover via hoverSolid, selected glow via the shared
+  //   highlightJoinMembers). Step 2: accept via Enter, right-click, or Tab —
+  //   commits immediately, no plane pick needed (unlike Mirror3D).
   const [joinSel, setJoinSel] = useState([])   // [featureId, ...] accumulated picks
+  const [join3dHoverSolidId, setJoin3dHoverSolidId] = useState(null)
 
   function activateJoin3DTool() {
     resetSelection()
@@ -4104,24 +4089,43 @@ const App3D = forwardRef(function App3D(props, ref) {
     setExtrudeState(null)
     setEditingFeatureId(null)
     setJoinSel([])
+    setJoin3dHoverSolidId(null)
   }
 
   function resetJoin3D() {
     setJoinSel([])
+    setJoin3dHoverSolidId(null)
+    viewport3dRef.current?.clearSolidHover()
   }
 
-  function handleToggleJoinMember(featId) {
+  // Toggles a clicked solid's owning feature into/out of joinSel — same
+  // resolution baseFeatureForSolid already does for Mirror. A Feature Tree
+  // row can represent a whole multi-body group (e.g. a whole-word text
+  // extrude — one row, N letter solids, see groupSize() in FeatureTree)
+  // collapsed down to a single unit; clicking ANY of its solids in the
+  // viewport must still pull in every sibling sharing that groupId, or only
+  // one letter would ever join — preserved here exactly as the old
+  // Feature-Tree-row click handler did it.
+  function handleJoin3DBodyClick(e) {
     if (tool !== 'join3d') return
-    // A Feature Tree row can represent a whole multi-body group (e.g. a
-    // whole-word text extrude — one row, N letter solids, see groupSize()
-    // in FeatureTree) collapsed down to a single displayed/clickable row.
-    // Toggling must pull in every sibling sharing that groupId, not just
-    // the clicked row's own feature id, or only one body ever joins.
-    const feat = features.find(f => f.id === featId)
-    const ids = feat?.groupId ? features.filter(f => f.groupId === feat.groupId).map(f => f.id) : [featId]
+    const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
+    if (!hit || hit.solidId==null) return
+    const feat = baseFeatureForSolid(hit.solidId)
+    if (!feat || feat.operation==='join') return   // can't join an already-joined solid into another join
+    const ids = feat.groupId ? features.filter(f => f.groupId === feat.groupId).map(f => f.id) : [feat.id]
     setJoinSel(prev => {
       const allSelected = ids.every(id => prev.includes(id))
       return allSelected ? prev.filter(id => !ids.includes(id)) : [...new Set([...prev, ...ids])]
+    })
+  }
+
+  // Live hover glow while still picking members — mirrors handleMirror3DHover.
+  function handleJoin3DHover(e) {
+    const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
+    const solidId = hit?.solidId ?? null
+    setJoin3dHoverSolidId(prev => {
+      if (solidId!=null && joinSel.some(id => features.find(f=>f.id===id)?.solidId===solidId)) return null
+      return solidId === prev ? prev : solidId
     })
   }
 
@@ -4136,6 +4140,12 @@ const App3D = forwardRef(function App3D(props, ref) {
     const solidIds = joinSel.map(id => features.find(f => f.id === id)?.solidId).filter(Boolean)
     viewport3dRef.current?.highlightJoinMembers(solidIds)
   }, [joinSel, tool])
+
+  // Keeps the hovered body glowing orange, live as the mouse moves.
+  useEffect(() => {
+    if (tool !== 'join3d' || join3dHoverSolidId==null) { viewport3dRef.current?.clearSolidHover(); return }
+    viewport3dRef.current?.hoverSolid(join3dHoverSolidId)
+  }, [join3dHoverSolidId, tool])
 
   // Boolean-unions every selected member into one new solid. Members are
   // removed from `solids` (not rendered independently anymore) but their
@@ -5460,6 +5470,17 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (isBoth) {
         glowFill(ctx, facePath(basePts), strokeColor, 0.06)
         glowStroke(ctx, facePath(basePts), strokeColor, 1.25)
+      } else if (opType === 'loft') {
+        // Loft's current profile (basePts, direction is always 'front' here)
+        // has no other on-screen representation while positioning the NEXT
+        // profile's offset — it's not a committed feature yet (see
+        // loftState.profiles, only promoted to `features` once the whole loft
+        // commits), so without drawing it here it visually disappears the
+        // moment its own sketch closes, leaving only the moving cap ghost
+        // below. Neutral gray (not strokeColor) so it doesn't read as a
+        // second copy of the moving target at the wrong position.
+        glowFill(ctx, facePath(basePts), '#888888', 0.05)
+        glowStroke(ctx, facePath(basePts), '#888888', 1.25)
       }
       glowFill(ctx, facePath(capPts), strokeColor, 0.1)
       glowStroke(ctx, facePath(capPts), strokeColor, 1.75)
@@ -6775,6 +6796,13 @@ const App3D = forwardRef(function App3D(props, ref) {
       return
     }
 
+    // Join — picks bodies the whole time it's active, same viewport-click
+    // pattern as Mirror step 1/Export STL/Body Color.
+    if (tool==='join3d') {
+      handleJoin3DBodyClick(e)
+      return
+    }
+
     if (tool==='color') {
       handleColorClick(e)
       return
@@ -7365,6 +7393,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     // Mirror step 1 (still picking bodies) — step 2 goes back to that same
     // sketchArmed face-hover indicator, so this only fires beforehand.
     if (tool==='mirror3d' && !mirror3dSelectionDone) { handleMirror3DHover(e); return }
+    // Join — picks bodies the whole time it's active, same hover pattern.
+    if (tool==='join3d') { handleJoin3DHover(e); return }
 
     const worldPos=screenToWorld(sx,sy)
 
@@ -8606,8 +8636,8 @@ const App3D = forwardRef(function App3D(props, ref) {
             mirrorPlanePickArmed={tool==='mirror3d' && mirror3dSelectionDone && !mirror3dOffsetBase}
             dxfPickMode={tool==='exportfacedxf'}
             dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : []}
-            extrudeArmed={!!extrudeState || isLoftDragArmed()}
-            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='color' && !(tool==='mirror3d' && !mirror3dSelectionDone)}
+            extrudeArmed={!!extrudeState || (!!loftState && !sketchMode)}
+            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='color' && tool!=='join3d' && !(tool==='mirror3d' && !mirror3dSelectionDone)}
             activePlane={activePlane}
             sketchMode={sketchMode}
             gridVisible={gridVisible}
@@ -8771,12 +8801,12 @@ const App3D = forwardRef(function App3D(props, ref) {
           {/* ── SmartStep bar: overlays bottom of viewport during Join3D ── */}
           <SmartStepBar
             op={tool==='join3d' ? 'JOIN' : null}
-            steps={[{ id:1, label:'Select Features' }]}
+            steps={[{ id:1, label:'Select Bodies' }]}
             currentStep={1}
             color="#FFEE88"
             hint={joinSel.length>0
-              ? `${joinSel.length} selected`
-              : 'Select 2+ features in the tree'}
+              ? `${joinSel.length} selected — Enter to join`
+              : 'Click bodies to join (click again to remove)'}
             action={{label:'✓ Join', enabled:joinSel.length>=2, onClick:commitJoin}}
             onStepBack={()=>{}}
           />
@@ -8793,6 +8823,29 @@ const App3D = forwardRef(function App3D(props, ref) {
             onStepBack={step => {
               if (step === 1) resetLoft3D()
             }}
+          />
+
+          {/* ── SmartStep bar: overlays bottom of viewport during Fillet3D ── */}
+          <SmartStepBar
+            op={tool==='fillet3d' ? 'FILLET' : null}
+            steps={[{ id:1, label:'Select Edges' }, { id:2, label:'Set Radius' }]}
+            currentStep={fillet3dAccepted ? 2 : 1}
+            color="#9c6ade"
+            hint={
+              fillet3dAccepted
+                ? `Radius for ${fillet3dSel.length} edge${fillet3dSel.length!==1?'s':''} — Enter to apply`
+                : fillet3dSel.length>0
+                  ? `${fillet3dSel.length} edge${fillet3dSel.length!==1?'s':''} selected — Enter to lock`
+                  : 'Click an edge to select it'
+            }
+            action={
+              !fillet3dAccepted && fillet3dSel.length>0
+                ? {label:'✓ Lock Edges', enabled:true, onClick:()=>setFillet3dAccepted(true)}
+                : fillet3dAccepted
+                  ? {label:'✓ Apply', enabled:true, onClick:commitFillet3D}
+                  : null
+            }
+            onStepBack={step => { if (step===1) resetFillet3D() }}
           />
         </div>
         <div style={{height:52,background:'#16162a',display:'flex',alignItems:'center',padding:'0 8px',gap:4,flexShrink:0,borderTop:'2px solid #2a2a4a'}}>
@@ -8854,46 +8907,56 @@ const App3D = forwardRef(function App3D(props, ref) {
               <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
             </>
           )}
-          <button onClick={activateExportSTLTool}
-            title="Export STL — click bodies in the 3D view to choose which ones to export (none selected = export all)"
-            style={{...btnBase, flexDirection:'column', gap:2, background: tool==='exportstl' ? '#4CAF5033' : 'transparent',
-              border: tool==='exportstl' ? '1px solid #4CAF50' : 'none'}}>
-            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-              <path d="M11 2l8 4.5v9L11 20l-8-4.5v-9L11 2z" stroke="#aaa" strokeWidth="1.5" strokeLinejoin="round"/>
-              <path d="M3 6.5L11 11l8-4.5M11 11v9" stroke="#aaa" strokeWidth="1.2"/>
-              <text x="4.5" y="19.5" fontSize="5" fill="#4CAF50" fontFamily="monospace" fontWeight="bold">STL</text>
-            </svg>
-            <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>STL</span>
-          </button>
-          <button onClick={activateColorTool}
-            title="Body Color — click bodies in the 3D view, then pick a color to apply"
-            style={{...btnBase, flexDirection:'column', gap:2, background: tool==='color' ? '#FF704333' : 'transparent',
-              border: tool==='color' ? '1px solid #FF7043' : 'none'}}>
-            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-              <path d="M11 2C8 6.5 6 9.5 6 12.5C6 15.5 8.2 17.5 11 17.5C13.8 17.5 16 15.5 16 12.5C16 9.5 14 6.5 11 2Z"
-                fill="#FF7043" stroke="#FF7043" strokeWidth="1"/>
-              <circle cx="9" cy="11.5" r="1.1" fill="#fff" fillOpacity="0.6"/>
-            </svg>
-            <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>COLOR</span>
-          </button>
-          <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
-          {/* Whole-PROJECT new/save/open (.trc) — always visible (not gated
-              behind sketchMode like the sketch-buffer Save/Load above),
-              since the feature tree exists independent of whether you're
-              currently sketching. */}
-          <button onClick={handleNewProject} title="New Project" style={{...btnBase,flexDirection:'column',gap:2,background:'transparent',border:'none'}}>
-            <IconNew/>
-            <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>NEW</span>
-          </button>
-          <button onClick={handleSaveProject} title="Save Project (Ctrl+S)" style={{...btnBase,flexDirection:'column',gap:2,background:'transparent',border:'none'}}>
-            <IconSave/>
-            <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>SAVE</span>
-          </button>
-          <button onClick={()=>loadProjectFileRef.current.click()} title="Open Project" style={{...btnBase,flexDirection:'column',gap:2,background:'transparent',border:'none'}}>
-            <IconLoad/>
-            <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>OPEN</span>
-          </button>
-          <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
+          {/* Body/project-level actions (STL/Color/New/Save/Open) — hidden
+              while sketching: none of them commit the live sketch buffer
+              first, so clicking any of these mid-sketch silently discarded
+              whatever profile was in progress (STL/Color cleanly exit sketch
+              mode but never save it; Project Save persists only the
+              committed feature tree, not the buffer, so it looked like it
+              saved current work but didn't). Gating behind !sketchMode
+              matches the sketch-only Undo/Redo/Save/Load/PDF/DXF block
+              above, just inverted — this row is now purely sketch tools
+              while sketching, model/project tools otherwise. */}
+          {!sketchMode && (
+            <>
+              <button onClick={activateExportSTLTool}
+                title="Export STL — click bodies in the 3D view to choose which ones to export (none selected = export all)"
+                style={{...btnBase, flexDirection:'column', gap:2, background: tool==='exportstl' ? '#4CAF5033' : 'transparent',
+                  border: tool==='exportstl' ? '1px solid #4CAF50' : 'none'}}>
+                <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                  <path d="M11 2l8 4.5v9L11 20l-8-4.5v-9L11 2z" stroke="#aaa" strokeWidth="1.5" strokeLinejoin="round"/>
+                  <path d="M3 6.5L11 11l8-4.5M11 11v9" stroke="#aaa" strokeWidth="1.2"/>
+                  <text x="4.5" y="19.5" fontSize="5" fill="#4CAF50" fontFamily="monospace" fontWeight="bold">STL</text>
+                </svg>
+                <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>STL</span>
+              </button>
+              <button onClick={activateColorTool}
+                title="Body Color — click bodies in the 3D view, then pick a color to apply"
+                style={{...btnBase, flexDirection:'column', gap:2, background: tool==='color' ? '#FF704333' : 'transparent',
+                  border: tool==='color' ? '1px solid #FF7043' : 'none'}}>
+                <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                  <path d="M11 2C8 6.5 6 9.5 6 12.5C6 15.5 8.2 17.5 11 17.5C13.8 17.5 16 15.5 16 12.5C16 9.5 14 6.5 11 2Z"
+                    fill="#FF7043" stroke="#FF7043" strokeWidth="1"/>
+                  <circle cx="9" cy="11.5" r="1.1" fill="#fff" fillOpacity="0.6"/>
+                </svg>
+                <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>COLOR</span>
+              </button>
+              <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
+              <button onClick={handleNewProject} title="New Project" style={{...btnBase,flexDirection:'column',gap:2,background:'transparent',border:'none'}}>
+                <IconNew/>
+                <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>NEW</span>
+              </button>
+              <button onClick={handleSaveProject} title="Save Project (Ctrl+S)" style={{...btnBase,flexDirection:'column',gap:2,background:'transparent',border:'none'}}>
+                <IconSave/>
+                <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>SAVE</span>
+              </button>
+              <button onClick={()=>loadProjectFileRef.current.click()} title="Open Project" style={{...btnBase,flexDirection:'column',gap:2,background:'transparent',border:'none'}}>
+                <IconLoad/>
+                <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>OPEN</span>
+              </button>
+              <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
+            </>
+          )}
           {/* Grid toggle — stays visible in 3D mode too: gridSnap/gridSizeMm
               also drive the extrude/cutout hover-follow depth snapping. */}
           <button
@@ -9390,89 +9453,23 @@ const App3D = forwardRef(function App3D(props, ref) {
         </div>
       )}
 
-      {/* ── Loft: persistent top banner ──────────────────────────────────────
-          Shown the whole time a loft is in progress (from the moment Profile
-          1's plane is picked until Finish/cancel), anchored to the TOP of the
-          viewport — not tied to the profile's screen position like the old
-          popup was, so it's always in the same, discoverable spot regardless
-          of where/how big the sketch is. While actively sketching, it's just
-          the "Loft Profile N" label; once a profile is finished (Finish
-          Sketch, same trigger every sketch flow uses), it also shows the
-          distance-to-next input and Previous/Next/Finish controls. */}
-      {loftState && (
-        <div style={{
-          position: 'absolute',
-          top: 70, left: sketchMode ? 72 : 112, right: 0,
-          zIndex: 300,
-          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 14,
-          padding: '8px 16px',
-          background: 'rgba(15,20,40,0.95)',
-          borderBottom: `1.5px solid ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}`,
-          fontFamily: 'monospace',
-          pointerEvents: 'all',
-        }}>
-          <div style={{color: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D', fontSize:13, fontWeight:'bold', letterSpacing:'0.04em'}}>
-            {loftTool==='loftcutout' ? 'LOFT CUTOUT' : 'LOFT'} · PROFILE {loftState.currentIdx+1}
-          </div>
-
-          {sketchMode ? (
-            <div style={{color:'#6688aa', fontSize:11}}>
-              Sketch a closed profile, then Finish Sketch
-            </div>
-          ) : (
-            <>
-              <label
-                title="Off: smooth blended surface between profiles. On: straight faceted panels instead."
-                style={{display:'flex', gap:6, alignItems:'center', cursor:'pointer', color:'#6688aa', fontSize:11}}
-              >
-                <input
-                  type="checkbox"
-                  checked={!!loftState.ruled}
-                  onChange={e=>setLoftState(prev=>({...prev, ruled:e.target.checked}))}
-                  style={{accentColor: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D', cursor:'pointer'}}
-                />
-                Ruled
-              </label>
-              <div style={{display:'flex', gap:6}}>
-                <button
-                  onClick={loftPreviousProfile}
-                  disabled={loftState.currentIdx===0}
-                  title="Previous profile"
-                  style={{
-                    padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold',
-                    background:'#1e1e38', color: loftState.currentIdx===0 ? '#334455' : '#6688aa',
-                    border:'1px solid #2a3a5a', borderRadius:4,
-                    cursor: loftState.currentIdx===0 ? 'default' : 'pointer',
-                  }}
-                >◀ Prev</button>
-                <button
-                  onClick={commitLoft}
-                  disabled={loftState.profiles.filter(Boolean).length < 2}
-                  title="Finish loft"
-                  style={{
-                    padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold',
-                    background: loftState.profiles.filter(Boolean).length < 2 ? '#1e1e38' : '#4caf50',
-                    color: loftState.profiles.filter(Boolean).length < 2 ? '#334455' : '#fff',
-                    border:'none', borderRadius:4,
-                    cursor: loftState.profiles.filter(Boolean).length < 2 ? 'default' : 'pointer',
-                  }}
-                >✓ Finish</button>
-              </div>
-              <div style={{color:'#445566', fontSize:10}}>
-                {loftState.profiles.filter(Boolean).length < 2 ? 'Need 2+ profiles to finish' : 'Esc to cancel'}
-              </div>
-            </>
-          )}
-        </div>
-      )}
-
-      {/* ── Loft: distance-to-next popup, shown only during the drag-to-
-          position step (isLoftDragArmed). Mirrors Extrude's own popup —
-          movable, mm input, ↵ accept — but with just the one value and no
-          direction toggle, since loft's v1 is always forward along the
-          shared normal. Fixed-position dock (not tied to the profile's
-          screen position) since it's draggable anyway if it's ever in the way. */}
-      {isLoftDragArmed() && (
+      {/* ── Loft: unified between-profiles panel ─────────────────────────────
+          Shown whenever a loft is mid-flight and not actively sketching —
+          replaces what used to be TWO separate surfaces (a persistent top
+          banner with Ruled/Prev/Finish, plus this popup showing only the
+          distance-to-next input) that duplicated each other's "which profile
+          am I on" display and were visible at the same time. The SmartStepBar
+          already covers that display (see its Loft hint below), so this
+          panel is purely controls: Ruled, Prev, Finish, and — swapping
+          depending on whether the next profile already exists — either the
+          distance-to-position input (isLoftDragArmed, same drag/click-
+          anywhere/Enter-to-accept mechanics as before, all unchanged) or a
+          plain Next button. That Next button is new: previously, stepping
+          Prev back to review an already-fully-sketched profile left no way
+          to move forward again — loftNextProfile() already handled that
+          case correctly (reuses the existing profile's stored offset), it
+          just had no button to reach it. */}
+      {loftState && !sketchMode && (
         <div style={{
           position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
           zIndex: 1000,
@@ -9482,48 +9479,109 @@ const App3D = forwardRef(function App3D(props, ref) {
           border: `1.5px solid ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}`,
           borderRadius: 2,
           padding: '10px 14px',
-          minWidth: 180,
+          minWidth: 220,
           boxShadow: `0 0 14px ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}77, 0 0 3px ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'} inset`,
           fontFamily: 'monospace',
           ...loftPanelDrag.panelStyle,
         }}>
-          <DragHandle {...loftPanelDrag.handleProps}>{loftTool==='loftcutout' ? 'Loft Cutout' : 'Loft'}</DragHandle>
-          <div style={{display:'flex', alignItems:'center', gap:8}}>
-            <div style={{
-              flex:1, background:'#000', border:`1px solid ${loftTool==='loftcutout' ? '#53D3E455' : '#FBDA2D55'}`,
-              borderRadius:2, padding:'4px 8px',
-              display:'flex', alignItems:'center', justifyContent:'space-between',
-            }}>
-              <input
-                autoFocus
-                value={loftState.distanceInput}
-                onChange={e=>setLoftState(prev=>({...prev, distanceInput:e.target.value}))}
-                onKeyDown={e=>{
-                  e.stopPropagation()
-                  if (e.key==='Enter') loftNextProfile()
-                  else if (e.key==='Escape') resetLoft3D()
-                }}
-                style={{
-                  background:'none', border:'none', outline:'none',
-                  color: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D',
-                  textShadow: `0 0 5px ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}`,
-                  fontFamily:'monospace', fontSize:16, fontWeight:'bold', width:70,
-                }}
-              />
-              <span style={{color:'#556', fontSize:12}}>mm</span>
-            </div>
+          <DragHandle {...loftPanelDrag.handleProps}>
+            {loftTool==='loftcutout' ? 'Loft Cutout' : 'Loft'} · Profile {loftState.currentIdx+1}
+          </DragHandle>
+
+          <label
+            title="Off: smooth blended surface between profiles. On: straight faceted panels instead."
+            style={{display:'flex', gap:6, alignItems:'center', cursor:'pointer', color:'#6688aa', fontSize:11, marginBottom:8}}
+          >
+            <input
+              type="checkbox"
+              checked={!!loftState.ruled}
+              onChange={e=>setLoftState(prev=>({...prev, ruled:e.target.checked}))}
+              style={{accentColor: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D', cursor:'pointer'}}
+            />
+            Ruled
+          </label>
+
+          <div style={{display:'flex', alignItems:'center', gap:6}}>
             <button
-              onClick={loftNextProfile}
+              onClick={loftPreviousProfile}
+              disabled={loftState.currentIdx===0}
+              title="Previous profile"
               style={{
-                padding:'4px 10px', background: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D', color:'#000',
-                border:'none', borderRadius:2, cursor:'pointer',
-                fontFamily:'monospace', fontSize:12, fontWeight:'bold',
-                boxShadow: `0 0 6px ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}`,
+                padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold',
+                background:'#1e1e38', color: loftState.currentIdx===0 ? '#334455' : '#6688aa',
+                border:'1px solid #2a3a5a', borderRadius:4,
+                cursor: loftState.currentIdx===0 ? 'default' : 'pointer',
               }}
-            >↵</button>
+            >◀ Prev</button>
+
+            {isLoftDragArmed() ? (
+              <>
+                <div style={{
+                  flex:1, background:'#000', border:`1px solid ${loftTool==='loftcutout' ? '#53D3E455' : '#FBDA2D55'}`,
+                  borderRadius:2, padding:'4px 8px',
+                  display:'flex', alignItems:'center', justifyContent:'space-between',
+                }}>
+                  <input
+                    autoFocus
+                    value={loftState.distanceInput}
+                    onChange={e=>setLoftState(prev=>({...prev, distanceInput:e.target.value}))}
+                    onKeyDown={e=>{
+                      e.stopPropagation()
+                      if (e.key==='Enter') loftNextProfile()
+                      else if (e.key==='Escape') resetLoft3D()
+                    }}
+                    style={{
+                      background:'none', border:'none', outline:'none',
+                      color: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D',
+                      textShadow: `0 0 5px ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}`,
+                      fontFamily:'monospace', fontSize:16, fontWeight:'bold', width:70,
+                    }}
+                  />
+                  <span style={{color:'#556', fontSize:12}}>mm</span>
+                </div>
+                <button
+                  onClick={loftNextProfile}
+                  title="Accept distance, sketch next profile"
+                  style={{
+                    padding:'4px 10px', background: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D', color:'#000',
+                    border:'none', borderRadius:2, cursor:'pointer',
+                    fontFamily:'monospace', fontSize:12, fontWeight:'bold',
+                    boxShadow: `0 0 6px ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}`,
+                  }}
+                >↵</button>
+              </>
+            ) : (
+              <button
+                onClick={loftNextProfile}
+                disabled={!loftState.profiles[loftState.currentIdx]}
+                title="Next profile"
+                style={{
+                  flex:1, padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold',
+                  background: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D', color:'#000',
+                  border:'none', borderRadius:2, cursor:'pointer',
+                  boxShadow: `0 0 6px ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}`,
+                }}
+              >Next ▶</button>
+            )}
+
+            <button
+              onClick={commitLoft}
+              disabled={loftState.profiles.filter(Boolean).length < 2}
+              title="Finish loft"
+              style={{
+                padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold',
+                background: loftState.profiles.filter(Boolean).length < 2 ? '#1e1e38' : '#4caf50',
+                color: loftState.profiles.filter(Boolean).length < 2 ? '#334455' : '#fff',
+                border:'none', borderRadius:4,
+                cursor: loftState.profiles.filter(Boolean).length < 2 ? 'default' : 'pointer',
+              }}
+            >✓ Finish</button>
           </div>
+
           <div style={{color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em'}}>
-            Drag or type distance to next{gridSnap ? ` (snap ${gridSizeMm}mm)` : ''} · Esc to cancel
+            {isLoftDragArmed()
+              ? `Drag or type distance to next${gridSnap ? ` (snap ${gridSizeMm}mm)` : ''} · Esc to cancel`
+              : (loftState.profiles.filter(Boolean).length < 2 ? 'Need 2+ profiles to finish' : 'Esc to cancel')}
           </div>
         </div>
         </div>
@@ -9751,9 +9809,6 @@ const App3D = forwardRef(function App3D(props, ref) {
         onEditDepth={handleEditExtrudeDepth}
         onEditExtent={handleEditExtent}
         onEditFilletRadius={handleEditFilletRadius}
-        joinPickActive={tool==='join3d'}
-        joinSel={joinSel}
-        onToggleJoinMember={handleToggleJoinMember}
         onEditLoft={handleEditLoft}
         hiddenSolidIds={hiddenSolidIds}
         onToggleBodyVisible={handleToggleBodyVisible}

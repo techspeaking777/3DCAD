@@ -165,26 +165,10 @@ export function IconJoin({ active }) {
   )
 }
 
-// ── INCLUDE FROM FACE ──────────────────────────────────────────────────────
-// Plain vector shapes (not the pixel-block style above) — a dashed square
-// (the face being sketched on) with an arrow pulling its boundary out into a
-// solid closed loop (the imported sketch geometry).
-export function IconIncludeFace({ active }) {
-  const c = active ? '#FFFF00' : '#4FC3F7'
-  return (
-    <I label="INCLUDE" active={active}>
-      <rect x="4" y="10" width="16" height="16" rx="2" fill="none" stroke={c} strokeWidth="2" strokeDasharray="3 2"/>
-      <path d="M22 18 L32 18" stroke={c} strokeWidth="2.5" strokeLinecap="round"/>
-      <path d="M28 13 L34 18 L28 23" fill="none" stroke={c} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
-      <circle cx="37" cy="30" r="7" fill="none" stroke={c} strokeWidth="2.5"/>
-    </I>
-  )
-}
-
 // ── INCLUDE EDGE ────────────────────────────────────────────────────────────
 // A picked 3D edge (solid diagonal line, endpoint dots) pulled by an arrow
 // into a dashed line — the construction-line result. Sticky tool: stays
-// active for repeated picks, unlike Include From Face's one-shot button.
+// active for repeated picks.
 export function IconIncludeEdge({ active }) {
   const c = active ? '#FFFF00' : '#4FC3F7'
   return (

@@ -462,7 +462,7 @@ function fitCircleCentroid(pts) {
 // fitCircleCentroid's plain average, this is correct even for just 3-4
 // points covering a small arc slice. Returns null if the points are
 // (near-)colinear (no unique circle).
-function fitCircleLeastSquares(pts) {
+export function fitCircleLeastSquares(pts) {
   const n = pts.length
   let sx=0, sy=0, sxx=0, syy=0, sxy=0, sxz=0, syz=0, sz=0
   for (const p of pts) {
@@ -495,7 +495,7 @@ function fitCircleIfRound(loop, facePlane, tolerance = 0.03, minPoints = 5) {
 
 // Perpendicular distance from p to the infinite line through a,b (0 if a,b
 // coincide, falling back to plain distance-to-point).
-function distToLine(p, a, b) {
+export function distToLine(p, a, b) {
   const len = Math.hypot(b.x-a.x, b.y-a.y)
   if (len < 1e-9) return Math.hypot(p.x-a.x, p.y-a.y)
   return Math.abs((b.x-a.x)*(a.y-p.y) - (a.x-p.x)*(b.y-a.y)) / len
@@ -701,7 +701,7 @@ function segmentLoopIntoPrimitives(loop, facePlane, opts = {}) {
 // which way the arc actually goes" approach emitArc/threePointsArcTo
 // already use elsewhere in this codebase for the identical start/end
 // ambiguity a bare pair of endpoint angles can't resolve on its own.
-function fitArcToRun(runPts) {
+export function fitArcToRun(runPts) {
   const fit = fitCircleLeastSquares(runPts)
   if (!fit || !(fit.r > 1e-6)) return null
   const { cx, cy, r } = fit

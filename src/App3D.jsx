@@ -3,7 +3,7 @@ import * as THREE from 'three'
 import viewOpIconSheet from './assets/view-op-icons.png'
 import Viewport3D from './Viewport3D.jsx'
 import { planeColor, planeAxisLabels, sketchToWorld, worldToSketch } from './SketchPlane.js'
-import { FacePlane } from './FacePlane.js'
+import { FacePlane, fitCircleLeastSquares, fitArcToRun, distToLine } from './FacePlane.js'
 import { pxToMm, mmToPx, ALIGN_SNAP_DIST, ACQUIRE_DIST, SELECT_DIST, LINE_SNAP_DIST, norm2pi, zoomRef } from './constants.js'
 import { angleOnArc, computeAllIntersections, circleCircleIntersect } from './geometry/intersections.js'
 import { getGeoSnap, getAllSnapPoints, checkAngle, getAngleSnap, applyTracking, computeLiveAngle, getTanPtsOnCircle, getExternalTangentPairs, nearestPt, nearestOnSegment } from './geometry/snap.js'
@@ -44,7 +44,7 @@ import {
   IconLine, IconCircle, IconTrim, IconDelete, IconExtend, IconOffset,
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
   IconUndo, IconRedo, IconFitView, IconReframe, IconNew, IconSave, IconLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
-  IconIncludeFace, IconIncludeEdge,
+  IconIncludeEdge,
   IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D,
 } from './draw/ToolIcons.jsx'
 import { glowStroke, glowFill } from './draw/vectorTheme.js'
@@ -1279,6 +1279,14 @@ const App3D = forwardRef(function App3D(props, ref) {
   useEffect(() => { if (!sketchMode) setGuideOpen(false) }, [sketchMode])
   const [saveAsOpen,setSaveAsOpen]=useState(false)  // false | 'sketch' | 'project' — which save flow the SaveAsPanel fallback modal is for
   const [gridVisible,setGridVisible]=useState(true)
+  // Extrude/Cutout step 1 (pick a work plane or face) only — work planes have
+  // no depth occlusion against solids beyond the nearer-hit-wins raycast
+  // resolution (see Viewport3D's handleMouseMoveInternal), so a face sitting
+  // BEHIND a plane genuinely can't be picked without this: the plane really
+  // is nearer at that pixel. Reset on every fresh activation rather than
+  // persisting indefinitely — a stale "planes off" from a previous session
+  // would otherwise silently make plane-picking impossible next time too.
+  const [hidePlanesForExtrude,setHidePlanesForExtrude]=useState(false)
   const [gridSnap,setGridSnap]=useState(true)
   const [gridSizeMm,setGridSizeMm]=useState(10)
   const [textInsertPt,setTextInsertPt]=useState(null)
@@ -3062,45 +3070,15 @@ const App3D = forwardRef(function App3D(props, ref) {
     return { plane: 'face', facePlane: ap }
   }
 
-  // ── Include From Face ────────────────────────────────────────────────────
-  // General sketch tool (works while sketching on any solid face — extrude,
-  // cutout, or a loft profile): copies the CURRENT face's own boundary into
-  // this sketch as real, editable geometry, so it can be traced/reused as a
-  // profile instead of redrawn by hand. Sources from activePlane.refSegments/
-  // refCircles/refArcs — already computed in sketch-space by FacePlane.js's
-  // faceHitToPlane() when the face was picked (the same data that already
-  // powers edge-snapping while sketching on a face), so this needs no new
-  // geometry extraction. A whole circular loop (a cylinder's rim) becomes one
-  // real circle, a mixed loop's curved runs (a slot's rounded ends) become
-  // real arcs, and only the genuinely straight parts fall back to lines —
-  // see FacePlane.js's segmentLoopIntoPrimitives for how those are told apart.
-  function includeFaceGeometry() {
-    const ap = activePlaneRef.current
-    if (!ap || typeof ap !== 'object') return
-    const hasGeom = (ap.refSegments?.length || ap.refCircles?.length || ap.refArcs?.length)
-    if (!hasGeom) return
-    const tag = planeTag()
-    const newLines = (ap.refSegments||[]).map(seg => ({
-      x1: seg.x1, y1: seg.y1, x2: seg.x2, y2: seg.y2, ...tag,
-    }))
-    const newCircles = (ap.refCircles||[]).map(c => ({ cx: c.cx, cy: c.cy, r: c.r, ...tag }))
-    const newArcs = (ap.refArcs||[]).map(a => ({
-      cx: a.cx, cy: a.cy, r: a.r, startAngle: a.startAngle, endAngle: a.endAngle, ...tag,
-    }))
-    commit(snapshot())
-    setLines(prev => [...prev, ...newLines])
-    setCircles(prev => [...prev, ...newCircles])
-    setArcs(prev => [...prev, ...newArcs])
-  }
-
   // ── Include Edge ─────────────────────────────────────────────────────────
   // Projects one solid edge (by stable solidId+edgeId identity) into the
   // current sketch plane. Curved edges come back from replicad as several
   // short tessellated segments rather than one true arc — each becomes its
   // own straight sketch-space segment, so a curved include renders as a
-  // faceted polyline, not a smooth arc (acceptable for a reference/snap
-  // target; not worth the extra curve-fitting work FacePlane.js's own
-  // boundary classification does, unless that turns out to matter later).
+  // faceted polyline, not a smooth arc. Used only for the live yellow
+  // preview (a quick visual cue that doesn't need to match the final
+  // classified shape) — see edgeToSketchGeometry below for what actually
+  // gets committed.
   // Returns an array of {x1,y1,x2,y2} in sketch space, or null if the edge
   // can no longer be found (e.g. the solid was rebuilt/deleted since).
   function edgeToSketchSegments(solidId, edgeId) {
@@ -3121,6 +3099,111 @@ const App3D = forwardRef(function App3D(props, ref) {
     return segs
   }
 
+  // Classifies one solid edge into the single sketch primitive it actually
+  // is — a straight line, a full circle, or an open arc — instead of always
+  // emitting a faceted polyline. Unlike a face's boundary LOOP (which chains
+  // together many different OCC edges of mixed types, needing
+  // FacePlane.js's segmentLoopIntoPrimitives to walk and split them apart),
+  // Include Edge deals with exactly ONE OCC edge at a time — inherently a
+  // single primitive already, so there's nothing to segment, just "which
+  // one primitive is this." Reuses the same fit helpers FacePlane.js's face-
+  // boundary classification already relies on. Returns {lines,circles,arcs}
+  // (exactly one populated with one entry, unless the edge is some other
+  // curve type — ellipse, spline, etc. — that fits neither cleanly, in
+  // which case `lines` holds the same faceted-polyline fallback
+  // edgeToSketchSegments would produce). Returns null if the edge can no
+  // longer be found.
+  function edgeToSketchGeometry(solidId, edgeId) {
+    const vp = viewport3dRef.current; if (!vp) return null
+    const poly = vp.getEdgePolyline(solidId, edgeId)
+    if (!poly?.points?.length) return null
+    const ap = activePlaneRef.current
+    if (!ap) return null
+    const toSketch = worldVec => (typeof ap === 'object' ? ap.worldToSketch(worldVec) : worldToSketch(worldVec, ap))
+    const { points, matrixWorld } = poly
+    // `points` is consecutive independent segment-pairs (6 floats each), not
+    // a shared-vertex chain (see cadMesh.js's own comment on this format) —
+    // reconstruct the ordered, deduplicated point chain by taking each
+    // segment's first point, plus the very last segment's second point.
+    const pts = []
+    for (let i = 0; i + 5 < points.length; i += 6) {
+      const p = new THREE.Vector3(points[i], points[i+1], points[i+2]).applyMatrix4(matrixWorld)
+      pts.push(toSketch(p))
+    }
+    const lastI = points.length - 6
+    if (lastI >= 0) {
+      const p = new THREE.Vector3(points[lastI+3], points[lastI+4], points[lastI+5]).applyMatrix4(matrixWorld)
+      pts.push(toSketch(p))
+    }
+    if (pts.length < 2) return null
+    const empty = { lines: [], circles: [], arcs: [] }
+    const fallback = () => {
+      const segs = []
+      for (let i = 0; i < pts.length - 1; i++) segs.push({ x1:pts[i].x, y1:pts[i].y, x2:pts[i+1].x, y2:pts[i+1].y })
+      return { ...empty, lines: segs }
+    }
+
+    const first = pts[0], last = pts[pts.length-1]
+    const closed = Math.hypot(last.x-first.x, last.y-first.y) < 0.5
+
+    // Collinearity check FIRST, regardless of open/closed — a genuinely
+    // round edge that happens to lie in (or near) a plane perpendicular to
+    // the CURRENT sketch plane projects nearly edge-on, collapsing to a
+    // thin degenerate sliver rather than a circle/ellipse. That's still a
+    // "closed" loop by the first≈last test above, but fitCircleLeastSquares
+    // will happily fit some wildly wrong huge circle THROUGH a near-
+    // collinear point set (the classic near-degenerate-fit failure mode —
+    // see FacePlane.js's own tryExtend comment on the identical issue), and
+    // a same-fit self-consistency check alone doesn't catch that. Test
+    // against the two most mutually distant points (not just first/last,
+    // which degenerate to the same point for a closed loop) via a cheap
+    // centroid-then-farthest two-pass approximation — good enough to find a
+    // robust "long axis" without an O(n²) all-pairs scan.
+    const centroid = pts.reduce((s,p)=>({x:s.x+p.x,y:s.y+p.y}), {x:0,y:0})
+    centroid.x /= pts.length; centroid.y /= pts.length
+    let pA = pts[0], dA = -1
+    for (const p of pts) { const d = Math.hypot(p.x-centroid.x, p.y-centroid.y); if (d > dA) { dA = d; pA = p } }
+    let pB = pts[0], dB = -1
+    for (const p of pts) { const d = Math.hypot(p.x-pA.x, p.y-pA.y); if (d > dB) { dB = d; pB = p } }
+    const span = Math.hypot(pB.x-pA.x, pB.y-pA.y)
+    if (span < 0.5) {
+      // The whole edge projects to (essentially) one point in the CURRENT
+      // sketch plane — e.g. a straight edge running exactly along the
+      // sketch's own depth axis, viewed end-on. There's no valid 2D
+      // representation at all in that case, not even a degenerate fallback
+      // polyline (every segment in it would be zero-length too) — include
+      // nothing rather than leaving an invisible, permanently-stuck
+      // zero-length line behind (same "stuck sliver" bug class
+      // trimDelete.js's own guards exist to prevent).
+      return null
+    }
+    {
+      const tol = Math.max(0.5, span*0.01)
+      if (pts.every(p => distToLine(p, pA, pB) < tol)) {
+        // Genuinely straight open edge → one clean line spanning its real
+        // endpoints. A "closed" loop that's collinear is a degenerate
+        // projection artifact (see above), not a real closed line loop —
+        // fall back to the polyline rather than guessing at a shape.
+        return closed ? fallback() : { ...empty, lines: [{ x1:first.x, y1:first.y, x2:last.x, y2:last.y }] }
+      }
+    }
+
+    // Circular? (closed = full circle, open = arc) — same 3% radius
+    // tolerance FacePlane.js's fitCircleIfRound already uses for this exact
+    // kind of tessellated-edge data.
+    const fit = fitCircleLeastSquares(pts)
+    if (fit && fit.r > 1e-6 && pts.every(p => Math.abs(Math.hypot(p.x-fit.cx,p.y-fit.cy)-fit.r)/fit.r < 0.03)) {
+      if (closed) return { ...empty, circles: [{ cx:fit.cx, cy:fit.cy, r:fit.r }] }
+      const arc = fitArcToRun(pts)
+      if (arc) return { ...empty, arcs: [{ cx:arc.cx, cy:arc.cy, r:arc.r, startAngle:arc.startAngle, endAngle:arc.endAngle }] }
+    }
+
+    // Neither — an ellipse, spline, or other curve type: fall back to the
+    // original faceted-polyline behavior rather than distorting it into a
+    // wrong circle/line.
+    return fallback()
+  }
+
   function resetIncludeEdge() {
     setIncludeEdgeHover(null)
     setIncludeEdgeSel([])
@@ -3136,19 +3219,23 @@ const App3D = forwardRef(function App3D(props, ref) {
     setIncludeEdgeHover(vp.raycastSolidEdges(e.clientX, e.clientY))
   }
 
-  // Click while hovering an edge — commit it as a construction line and stay
-  // armed for the next pick. Re-clicking an already-included edge is a no-op
+  // Click while hovering an edge — commit it as construction geometry (a
+  // true circle/arc when the edge fits one, a single line when straight,
+  // otherwise a faceted polyline — see edgeToSketchGeometry) and stay armed
+  // for the next pick. Re-clicking an already-included edge is a no-op
   // (each edge only needs to be included once).
   function handleIncludeEdgeClick(e) {
     if (tool !== 'includeedge' || !includeEdgeHover) return false
     const hit = includeEdgeHover
     const already = includeEdgeSel.some(s => s.solidId===hit.solidId && s.edgeId===hit.edgeId)
     if (already) return true
-    const segs = edgeToSketchSegments(hit.solidId, hit.edgeId)
-    if (!segs?.length) return true
+    const geo = edgeToSketchGeometry(hit.solidId, hit.edgeId)
+    if (!geo || (!geo.lines.length && !geo.circles.length && !geo.arcs.length)) return true
     const tag = planeTag()
     commit(snapshot())
-    setLines(prev => [...prev, ...segs.map(s => ({ ...s, style:'construction', ...tag }))])
+    if (geo.lines.length)   setLines  (prev => [...prev, ...geo.lines  .map(s => ({ ...s, style:'construction', ...tag }))])
+    if (geo.circles.length) setCircles(prev => [...prev, ...geo.circles.map(s => ({ ...s, style:'construction', ...tag }))])
+    if (geo.arcs.length)    setArcs   (prev => [...prev, ...geo.arcs   .map(s => ({ ...s, style:'construction', ...tag }))])
     setIncludeEdgeSel(prev => [...prev, { solidId: hit.solidId, edgeId: hit.edgeId }])
     return true
   }
@@ -3609,6 +3696,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     setExtrudeState(null)
     setExtrudeHandlePos(null)
     setEditingFeatureId(null)
+    setHidePlanesForExtrude(false)
     // Fresh canvas for the integrated sketch (step 2)
     setLines([]); setCircles([]); setArcs([]); setSplines([])
     setCachedProfiles([])
@@ -3867,8 +3955,8 @@ const App3D = forwardRef(function App3D(props, ref) {
   // square face-plane indicator those tools get for free (Viewport3D.jsx's
   // animate() loop). Pulls each face's real OCC boundary (outer loop + every
   // hole, via cadWorker.js's exportFaceDXF) and writes it to a .dxf file —
-  // unlike "Include From Face" this never goes through the tessellated
-  // render mesh, so cutout holes come through intact.
+  // never goes through the tessellated render mesh, so cutout holes come
+  // through intact.
   //
   // Multiple faces accumulate before exporting (same click-to-toggle,
   // Enter-to-commit shape as Export STL's exportSTLSel) rather than
@@ -8434,28 +8522,6 @@ const App3D = forwardRef(function App3D(props, ref) {
                 </button>
               ))}
 
-              {/* Include From Face — only meaningful when sketching on an
-                  actual solid face (a FacePlane), which is the only case
-                  with a boundary to copy; hidden on plain work-plane
-                  sketches (XY/XZ/YZ, activePlane is a string there). */}
-              {activePlane && typeof activePlane === 'object' && (
-                <>
-                  <div style={{width:1,height:48,background:'#2a2a4a',margin:'0 4px'}}/>
-                  <span style={{color:'#555',fontFamily:'monospace',fontSize:9,
-                    textTransform:'uppercase',letterSpacing:'0.1em',marginRight:2}}>Face</span>
-                  <button
-                    onClick={includeFaceGeometry}
-                    title="Include From Face — copy this face's boundary into the sketch"
-                    disabled={!faceRefSegments.length}
-                    style={{...btnBase,background:'transparent',
-                      outline:'1px dashed #4FC3F755',outlineOffset:'-2px',
-                      opacity:faceRefSegments.length?1:0.4,
-                      cursor:faceRefSegments.length?'pointer':'not-allowed'}}>
-                    <IconIncludeFace active={false}/>
-                  </button>
-                </>
-              )}
-
               <div style={{width:1,height:48,background:'#2a2a4a',margin:'0 4px'}}/>
 
               {/* Modify tools */}
@@ -8649,7 +8715,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             dxfPickMode={tool==='exportfacedxf'}
             dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : []}
             extrudeArmed={!!extrudeState || (!!loftState && !sketchMode)}
-            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='color' && tool!=='join3d' && !(tool==='mirror3d' && !mirror3dSelectionDone)}
+            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='color' && tool!=='join3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hidePlanesForExtrude && (tool==='extrude' || tool==='cutout'))}
             activePlane={activePlane}
             sketchMode={sketchMode}
             gridVisible={gridVisible}
@@ -8692,6 +8758,12 @@ const App3D = forwardRef(function App3D(props, ref) {
               sketchMode    ? 2 : 1
             }
             color={extrudeTool === 'cutout' ? '#e05a4e' : '#3a7bd5'}
+            action={
+              (!extrudeState && !sketchMode)
+                ? { label: hidePlanesForExtrude ? '◻ Show Planes' : '◻ Hide Planes', enabled:true,
+                    onClick: () => setHidePlanesForExtrude(p => !p) }
+                : null
+            }
             onStepBack={step => {
               if (step === 2) {
                 // Back from Set Depth → restore sketch on same plane

@@ -160,7 +160,9 @@ export function createWorkPlanes(scene) {
 
 /**
  * Hit-test a raycaster against all plane fill meshes.
- * Returns { id, point } of the nearest hit, or null.
+ * Returns { id, point, distance } of the nearest hit, or null. `distance` lets
+ * callers compare this hit against a solid-face raycast to resolve which is
+ * actually nearer to the camera (see Viewport3D.jsx's handleMouseMoveInternal).
  */
 export function hitTestPlanes(raycaster, planes) {
   const meshes = Object.values(planes).map(p => p.mesh)
@@ -168,7 +170,7 @@ export function hitTestPlanes(raycaster, planes) {
   if (!hits.length) return null
   const hit = hits[0]
   const entry = Object.values(planes).find(p => p.mesh === hit.object)
-  return entry ? { id: entry.def.id, point: hit.point, def: entry.def } : null
+  return entry ? { id: entry.def.id, point: hit.point, def: entry.def, distance: hit.distance } : null
 }
 
 /**

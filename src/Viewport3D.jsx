@@ -1115,14 +1115,31 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     )
     s.raycaster.setFromCamera(ndc, s.camera)
 
-    // ── Face hover (only when SKETCH tool is armed) ──
-    if (sketchArmedRef.current && s.solidsGroup && !s.tween?.active) {
-      const hits = s.raycaster.intersectObjects(s.solidsGroup.children, true)
+    // ── Face hit + work-plane hit are both computed here, BEFORE either one's
+    // hover state is applied below, so the two can be compared by depth —
+    // see faceWins. Previously each was independent and the face block
+    // (checked first, further down) always won regardless of which was
+    // actually nearer to the camera — a work plane passing in FRONT of a
+    // solid could never be hovered/clicked wherever the solid was also hit
+    // (Mirror's Pick Plane step is the clearest case). Their own outer gates
+    // (sketchArmed/solidsGroup/tween for the face, extrudeArmed/workPlanes/
+    // showWorkPlanes/tween for the plane) are kept exactly as before so
+    // every no-ambiguity case — only one candidate, or neither — behaves
+    // identically to today. ──
+    const faceMeshHit = (sketchArmedRef.current && s.solidsGroup && !s.tween?.active)
       // Solid-edge overlays (LineSegments2) also report isMesh===true and now
       // raycast (for the fillet tool's edge picking) — exclude them here so
       // they can't shadow the real face mesh underneath during face-pick sketching.
-      const meshHit = hits.find(h => h.object.isMesh && !h.object.userData?.isSolidEdge)
-      const hitMesh = meshHit ? meshHit.object : null
+      ? (s.raycaster.intersectObjects(s.solidsGroup.children, true).find(h => h.object.isMesh && !h.object.userData?.isSolidEdge) || null)
+      : null
+    const planeHit = (!extrudeArmedRef.current && s.workPlanes && showWorkPlanesRef.current && !s.tween?.active)
+      ? hitTestPlanes(s.raycaster, s.workPlanes)
+      : null
+    const faceWins = !!faceMeshHit && (!planeHit || faceMeshHit.distance < planeHit.distance)
+
+    // ── Face hover (only when SKETCH tool is armed) ──
+    if (sketchArmedRef.current && s.solidsGroup && !s.tween?.active) {
+      const hitMesh = faceWins ? faceMeshHit.object : null
       if (hitMesh) {
         // A solid's faces all live on ONE Mesh (see cadMesh.js) — refresh the
         // stored hit every move so it tracks the current face/point even while
@@ -1138,7 +1155,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
         if (mirrorPlanePickArmedRef.current && hoveredFaceRef.current?.mesh !== hitMesh) {
           hoverSolidByRef(findOwningSolidId(hitMesh))
         }
-        hoveredFaceRef.current = { mesh: hitMesh, hit: meshHit }
+        hoveredFaceRef.current = { mesh: hitMesh, hit: faceMeshHit }
       } else if (hoveredFaceRef.current) {
         if (mirrorPlanePickArmedRef.current) clearSolidHoverByRef()
         clearFaceHover()
@@ -1157,9 +1174,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     // the click handler below — even when the cursor is visually over the
     // solid, not a plane. ──
     if (!extrudeArmedRef.current && s.workPlanes && showWorkPlanesRef.current && !s.tween?.active) {
-      s.raycaster.setFromCamera(ndc, s.camera)
-      const hit   = hitTestPlanes(s.raycaster, s.workPlanes)
-      const newId = hit ? hit.id : null
+      const newId = (planeHit && !faceWins) ? planeHit.id : null
       if (newId !== hoveredPlaneRef.current) {
         hoveredPlaneRef.current = newId
         setPlaneHover(s.workPlanes, newId, mirrorPlanePickArmedRef.current ? 0xff9800 : undefined)

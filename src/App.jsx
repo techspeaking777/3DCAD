@@ -63,8 +63,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   const [trimPreview,setTrimPreview]=useState(null)
   const [deletePreview,setDeletePreview]=useState(null)
   const [offsetEntity,setOffsetEntity]=useState(null)    // locked entity after click
-  const [offsetDistInput,setOffsetDistInput]=useState('')
-  const [offsetDistLocked,setOffsetDistLocked]=useState(false)
+  const [offsetDistInput,setOffsetDistInput]=useState('')   // non-empty = locked/fixed distance, empty = live mouse-follow
   const [offsetPreview,setOffsetPreview]=useState(null)
   const [offsetHover,setOffsetHover]=useState(null)
   const [mirrorSel,setMirrorSel]=useState([])
@@ -456,7 +455,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   }
   function resetOffset(){
     setOffsetEntity(null)
-    setOffsetDistInput('');setOffsetDistLocked(false)
+    setOffsetDistInput('')
     setOffsetPreview(null);setOffsetHover(null)
   }
   function resetMirror(){
@@ -711,11 +710,11 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     if (offsetEntity.kind==='arc')    entity=arcs[offsetEntity.idx]
     if (offsetEntity.kind==='spline') entity=splines[offsetEntity.idx]
     if (!entity){setOffsetPreview(null);return}
-    const distPx=offsetDistLocked
+    const distPx=offsetDistInput
       ? mmToPx(parseFloat(offsetDistInput)||1)
       : distToEntity(mousePos,entity,offsetEntity.kind)
     setOffsetPreview(computeOffsetPreview(entity,offsetEntity.kind,distPx,mousePos))
-  },[tool,mousePos,offsetEntity,offsetDistInput,offsetDistLocked,lines,circles,arcs,splines])
+  },[tool,mousePos,offsetEntity,offsetDistInput,lines,circles,arcs,splines])
 
   useEffect(()=>{
     if (tool!=='offset'||!mousePos){setOffsetHover(null);return}
@@ -1232,13 +1231,13 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         ctx.beginPath();ctx.moveTo(s2[0].x,s2[0].y);s2.slice(1).forEach(pt=>ctx.lineTo(pt.x,pt.y));ctx.stroke()
       }
       ctx.setLineDash([]);ctx.restore()
-      const distMm=offsetDistLocked?parseFloat(offsetDistInput)||0:
+      const distMm=offsetDistInput?parseFloat(offsetDistInput)||0:
         (offsetEntity&&mousePos?pxToMm(distToEntity(mousePos,
           offsetEntity.kind==='line'?drawLines[offsetEntity.idx]:
           offsetEntity.kind==='circle'?drawCircles[offsetEntity.idx]:
           offsetEntity.kind==='arc'?drawArcs[offsetEntity.idx]:drawSplines[offsetEntity.idx],
           offsetEntity.kind)):0)
-      drawLabel(ctx,(offsetDistLocked?'🔒 ':'')+distMm.toFixed(1)+' mm · click to place',mousePos.x,mousePos.y-24/sc,'#4CAF50',sc)
+      drawLabel(ctx,(offsetDistInput?'🔒 ':'')+distMm.toFixed(1)+' mm · click to place',mousePos.x,mousePos.y-24/sc,'#4CAF50',sc)
     }
 
     // Mirror axis + preview
@@ -1951,7 +1950,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       if (geo) drawLineIndicator(ctx,geo.x,geo.y,geo.type,sc)
     }
 
-  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,deferredTangent,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetDistLocked,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,canvasSize,tKeyDown,pKeyDown,perpSourceLineIdx,drawStyle,intersectionPts,joinHover,joinFirstPt,pageConfig,dims,dimToolPreview,dimToolPts,gridVisible,gridSizeMm])
+  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,deferredTangent,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,canvasSize,tKeyDown,pKeyDown,perpSourceLineIdx,drawStyle,intersectionPts,joinHover,joinFirstPt,pageConfig,dims,dimToolPreview,dimToolPts,gridVisible,gridSizeMm])
 
   function handleMouseDown(e){
     if (e.button===1){e.preventDefault();isPanningRef.current=true;lastPanPosRef.current={x:e.clientX,y:e.clientY}}
@@ -2696,9 +2695,26 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     if (tool==='offset'){
       if (e.key==='Escape'){resetOffset();return}
       if (offsetEntity){
-        if (e.key==='Tab'){e.preventDefault();if(offsetDistInput&&parseFloat(offsetDistInput)>0)setOffsetDistLocked(p=>!p);return}
-        if (e.key==='Backspace'){setOffsetDistInput(p=>p.slice(0,-1));setOffsetDistLocked(false);return}
-        if (/^[0-9.]$/.test(e.key)){setOffsetDistLocked(false);setOffsetDistInput(p=>p+e.key);return}
+        // Typing only sets the distance — placing still requires a canvas
+        // click, since the click position is what picks which side to offset
+        // toward (see OffsetDistPanel.jsx).
+        if (e.key==='Backspace'){setOffsetDistInput(p=>p.slice(0,-1));return}
+        if (/^[0-9.]$/.test(e.key)){setOffsetDistInput(p=>p+e.key);return}
+        // Fallback for when the panel's own input isn't focused (its onKeyDown
+        // handles this directly, see OffsetDistPanel.jsx's commitDistance).
+        // Locks in the live mouse-follow distance as a real number if nothing
+        // was typed yet — previously Tab only toggled a separate
+        // offsetDistLocked flag that was unreachable from here in practice
+        // (the panel's auto-focused input swallows Tab via stopPropagation),
+        // so pressing Tab visibly did nothing no matter how many times.
+        if (e.key==='Tab'){
+          e.preventDefault()
+          if (!offsetDistInput && mousePos){
+            const entity=offsetEntity.kind==='line'?lines[offsetEntity.idx]:offsetEntity.kind==='circle'?circles[offsetEntity.idx]:offsetEntity.kind==='arc'?arcs[offsetEntity.idx]:splines[offsetEntity.idx]
+            setOffsetDistInput(pxToMm(distToEntity(mousePos,entity,offsetEntity.kind)).toFixed(1))
+          }
+          return
+        }
       }
       return
     }
@@ -2877,7 +2893,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       if (!offsetEntity) return { step:1, total:3, color:c,
         action: offsetHover ? `Click to select ${offsetHover.kind}` : 'Hover entity to select',
         hints:[] }
-      const d = offsetDistLocked ? parseFloat(offsetDistInput)||0
+      const d = offsetDistInput ? parseFloat(offsetDistInput)||0
         : (mousePos ? pxToMm(distToEntity(mousePos,
             offsetEntity.kind==='line'?lines[offsetEntity.idx]:
             offsetEntity.kind==='circle'?circles[offsetEntity.idx]:
@@ -2885,9 +2901,9 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
             offsetEntity.kind)) : 0)
       return { step:'2+3', total:3, color:c,
         action:`Move to side · ${d.toFixed(1)} mm`,
-        hints: offsetDistLocked
-          ? [K('Tab','unlock dist'), K('click','place'), K('Esc')]
-          : [K('type + Enter','lock dist'), K('click','place'), K('Esc')] }
+        hints: offsetDistInput
+          ? [K('Backspace','clear dist'), K('click','place'), K('Esc')]
+          : [K('type or Tab','lock dist'), K('click','place'), K('Esc')] }
     }
 
     if (tool==='dim') {
@@ -3337,7 +3353,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
             // draw tools
             startPoint, circleCenter, splinePoints,
             // single-action tools
-            offsetEntity, offsetDistLocked, offsetPreview,
+            offsetEntity, offsetDistInput, offsetPreview,
             trimPreview, extendPreview, deletePreview,
             joinFirstPt,
             // dim tool

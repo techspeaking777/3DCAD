@@ -7694,6 +7694,18 @@ const App3D = forwardRef(function App3D(props, ref) {
         // toward (see OffsetDistPanel.jsx).
         if (e.key==='Backspace'){setOffsetDistInput(p=>p.slice(0,-1));return}
         if (/^[0-9.]$/.test(e.key)){setOffsetDistInput(p=>p+e.key);return}
+        // Fallback for when the panel's own input isn't focused (its onKeyDown
+        // handles this directly, see OffsetDistPanel.jsx's commitDistance) —
+        // matches every sibling tool's Tab-to-accept pattern. Locks in the
+        // live mouse-follow distance as a real number if nothing was typed.
+        if (e.key==='Tab'){
+          e.preventDefault()
+          if (!offsetDistInput && mousePos){
+            const entity=offsetEntity.kind==='line'?lines[offsetEntity.idx]:offsetEntity.kind==='circle'?circles[offsetEntity.idx]:offsetEntity.kind==='arc'?arcs[offsetEntity.idx]:splines[offsetEntity.idx]
+            setOffsetDistInput(pxToMm(distToEntity(mousePos,entity,offsetEntity.kind)).toFixed(1))
+          }
+          return
+        }
       }
       return
     }

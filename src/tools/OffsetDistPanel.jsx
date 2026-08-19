@@ -15,6 +15,16 @@ export default function OffsetDistPanel({ toolColor, value, onChange, liveValueM
   const showingLive = !value
   const displayMm = value || (liveValueMm!=null ? liveValueMm.toFixed(1) : '0.0')
 
+  // Enter/Tab/the button all mean "lock in whatever number I'm looking at" —
+  // if nothing's been typed yet, that's the live mouse-follow value, so write
+  // it into `value` before blurring. Previously all three just blurred an
+  // empty input, silently discarding the live value with no way to fix it
+  // as a number (only manual digit-by-digit typing worked).
+  function commitDistance(){
+    if (showingLive && liveValueMm!=null) onChange(liveValueMm.toFixed(1))
+    inputRef.current?.blur()
+  }
+
   return (
     <div ref={panelRef} style={{
       position:'absolute',top:0,left:'100%',marginLeft:10,
@@ -36,7 +46,8 @@ export default function OffsetDistPanel({ toolColor, value, onChange, liveValueM
           onChange={e=>{ if(/^[0-9.]*$/.test(e.target.value)) onChange(e.target.value) }}
           onKeyDown={e=>{
             if (e.key!=='Escape'&&!e.ctrlKey&&!e.metaKey) e.stopPropagation()
-            if (e.key==='Enter') e.target.blur()
+            if (e.key==='Enter') commitDistance()
+            if (e.key==='Tab'){ e.preventDefault(); commitDistance() }
           }}
           placeholder={showingLive?displayMm:'0'}
           style={{
@@ -51,7 +62,7 @@ export default function OffsetDistPanel({ toolColor, value, onChange, liveValueM
       {showingLive && <div style={{marginTop:6,textAlign:'center',fontSize:9,color:'#666'}}>following your mouse</div>}
 
       <button
-        onClick={()=>inputRef.current?.blur()}
+        onClick={commitDistance}
         disabled={!canApply}
         style={{
           marginTop:8,width:'100%',padding:'6px 0',borderRadius:6,border:'none',

@@ -90,11 +90,24 @@ export function performTrim(preview,lines,circles,arcs) {
   if (!preview) return {lines,circles,arcs}
   let nl=[...lines],nc=[...circles],na=[...arcs]
   if (preview.kind==='line') {
-    const l=lines[preview.idx],dx=l.x2-l.x1,dy=l.y2-l.y1
+    const l=lines[preview.idx],dx=l.x2-l.x1,dy=l.y2-l.y1,len=Math.hypot(dx,dy)
     nl=lines.filter((_,i)=>i!==preview.idx)
-    // Spread l to preserve plane, style, and any other metadata
-    if (preview.tStart>1e-8) nl.push({...l,x1:l.x1,y1:l.y1,x2:l.x1+preview.tStart*dx,y2:l.y1+preview.tStart*dy})
-    if (preview.tEnd<1-1e-8) nl.push({...l,x1:l.x1+preview.tEnd*dx,y1:l.y1+preview.tEnd*dy,x2:l.x2,y2:l.y2})
+    // Same tangent-point floating-point noise as the circle/arc branches below
+    // (two intersection formulas — e.g. lineIntersections' direct arc-endpoint
+    // check vs. its segCircleIntersect crossing check — rounding the SAME
+    // point slightly differently) can leave tStart/tEnd a hair's-breadth from
+    // 0/1 instead of exactly there. The old `>1e-8`/`<1-1e-8` checks are a
+    // check on the RATIO, not the actual on-screen size, so on any line
+    // longer than ~1px they let through a "kept" piece that's really just a
+    // few thousandths of a pixel — invisible, permanently stuck (unselectable/
+    // undeletable, see angleOnArc's own comment on the arc-side version of
+    // this), and worse: its endpoint then reads as a real point to anything
+    // that later grazes it (see arcIntersectionAngles' line-endpoint check),
+    // silently corrupting unrelated trims on other entities nearby. Spread l
+    // to preserve plane, style, and any other metadata.
+    const minLen = Math.max(0.02, len*1e-4)
+    if (preview.tStart*len > minLen) nl.push({...l,x1:l.x1,y1:l.y1,x2:l.x1+preview.tStart*dx,y2:l.y1+preview.tStart*dy})
+    if ((1-preview.tEnd)*len > minLen) nl.push({...l,x1:l.x1+preview.tEnd*dx,y1:l.y1+preview.tEnd*dy,x2:l.x2,y2:l.y2})
   }
   if (preview.kind==='circle') {
     const {cx,cy,r,arcStart,arcEnd,allAngles}=preview

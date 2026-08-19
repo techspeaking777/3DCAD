@@ -75,9 +75,22 @@ export function computeTrimPreview(mouse,lines,circles,arcs,splines=[]) {
     const start=norm2pi(arc.startAngle)
     const travelOf=a=>norm2pi(a-start)
     const totalTravel=travelOf(arc.endAngle)||2*Math.PI
-    const splitAngles=[0,...intAngles.map(travelOf),totalTravel]
-      .sort((a,b)=>a-b)
-      .map(t=>norm2pi(start+t))
+    // Dedupe adjacent travel values before pairing them into segments — a
+    // real intersection can legitimately land exactly ON the arc's own
+    // (not-yet-trimmed) start/end, e.g. a straight leg line spanning from
+    // the innermost to outermost of several concentric arcs crosses every
+    // arc in between at that same angle. arcIntersectionAngles already
+    // dedupes ITS OWN entries, but the 0/totalTravel boundary values added
+    // here are not run through that pass, so a coincidence like that used
+    // to survive as an explicit [start,start] duplicate pair. angleOnArc
+    // treats a near-zero-width pair as "matches everywhere" (its own,
+    // different, legitimate case — see its comment) — so that degenerate
+    // pair always won the segment search below regardless of where the
+    // user clicked, and the arc could never be trimmed at all.
+    const rawTravels=[0,...intAngles.map(travelOf),totalTravel].sort((a,b)=>a-b)
+    const travels=[]
+    rawTravels.forEach(t=>{ if(!travels.length||t-travels[travels.length-1]>1e-4) travels.push(t) })
+    const splitAngles=travels.map(t=>norm2pi(start+t))
     const θ=norm2pi(Math.atan2(mouse.y-arc.cy,mouse.x-arc.cx))
     let arcS=splitAngles[0],arcE=splitAngles[1]
     for (let i=0;i<splitAngles.length-1;i++){if(angleOnArc(θ,splitAngles[i],splitAngles[i+1])){arcS=splitAngles[i];arcE=splitAngles[i+1];break}}

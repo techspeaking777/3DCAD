@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react'
 import { pxToMm, mmToPx, ALIGN_SNAP_DIST, ACQUIRE_DIST, SELECT_DIST, LINE_SNAP_DIST, norm2pi, zoomRef } from './constants.js'
 import { angleOnArc, computeAllIntersections, circleCircleIntersect } from './geometry/intersections.js'
-import { getGeoSnap, getAllSnapPoints, checkAngle, getAngleSnap, applyTracking, computeLiveAngle, getTanPtsOnCircle, getExternalTangentPairs, nearestPt, nearestOnSegment } from './geometry/snap.js'
+import { getGeoSnap, getAllSnapPoints, checkAngle, checkAngleTight, getAngleSnap, applyTracking, computeLiveAngle, getTanPtsOnCircle, getExternalTangentPairs, nearestPt, nearestOnSegment } from './geometry/snap.js'
 import { computeTrimPreview, performTrim, computeDeletePreview, distToSeg } from './tools/trimDelete.js'
 import { nearestOffsetEntity, computeOffsetPreview, distToEntity } from './tools/offsetMath.js'
 import { nearestMirrorEntity, buildMirror } from './tools/mirrorMath.js'
@@ -304,8 +304,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   }
 
   const { commit, undo, redo, canUndo, canRedo } = useHistory()
-  const snapshot = () => ({ lines, circles, arcs, splines })
-  const restore = (snap) => { setLines(snap.lines); setCircles(snap.circles); setArcs(snap.arcs); setSplines(snap.splines||[]) }
+  const snapshot = () => ({ lines, circles, arcs, splines, dims })
+  const restore = (snap) => { setLines(snap.lines); setCircles(snap.circles); setArcs(snap.arcs); setSplines(snap.splines||[]); setDims(snap.dims||[]) }
 
   const trackedPtsRef=useRef([])
   const splinePointsRef=useRef([])
@@ -600,16 +600,51 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       // would always fire first and VERT/HORIZ would show but never snap.
       const ad=ALIGN_SNAP_DIST/zoomRef.scale
       const activeTp=tracked.find(tp=>Math.abs(raw.y-tp.y)<ad||Math.abs(raw.x-tp.x)<ad)
-      if (geo&&geo.type==='online'&&activeTp){
-        const isVertical=Math.abs(raw.x-activeTp.x)<ad
-        const hit=intersectTrackWithLine(activeTp,isVertical,raw,lines)
-        // Snap exactly onto where the guide crosses the edge. If there's no
-        // valid crossing (parallel, or the guide misses the segment), fall
-        // through to plain tracking below rather than reusing the raw
-        // online point — that's what caused the desnap symptom originally.
-        if (hit) return{x:hit.x,y:hit.y,snapType:'online',angleSnap:checkAngle(start,hit),tracks:[]}
+      if (geo&&geo.type==='online'){
+        // checkAngle uses an ANGLE tolerance (SNAP_ANGLE, widens in pixels the
+        // farther geo is from start) to decide the HORIZ/VERT indicator label,
+        // but activeTp above uses a small fixed-pixel DISTANCE tolerance
+        // (ALIGN_SNAP_DIST) to decide whether the cursor is actually riding a
+        // guide line closely enough to force the snap. A far-away online
+        // point can pass the angle check (indicator shows HORIZ/VERT) while
+        // failing the distance check (activeTp is null) — the label lies and
+        // the endpoint never actually lands on the H/V line. `start` is
+        // checked BEFORE activeTp (not as its fallback) — `tracked` can hold
+        // some unrelated point the cursor merely brushed past earlier
+        // (updateTracking auto-acquires anything within ACQUIRE_DIST), which
+        // lingers as "active" for as long as the cursor's x OR y keeps
+        // matching it (e.g. dragging straight down a vertical edge keeps any
+        // earlier point at that same x "active" indefinitely). If that stale
+        // point were preferred, it can hijack the wrong axis — a vertical
+        // guide against a vertical edge has no crossing, silently falling
+        // back to the unforced raw point while still claiming the label.
+        // `start` is always the actually-relevant reference for this line, so
+        // its own H/V reading against geo wins whenever it applies.
+        const angleFromStart=checkAngle(start,geo)
+        const guideTp=(angleFromStart?start:null)||activeTp
+        if (guideTp){
+          const isVertical=guideTp===start?angleFromStart==='vertical':Math.abs(raw.x-guideTp.x)<ad
+          const hit=intersectTrackWithLine(guideTp,isVertical,raw,lines)
+          // Snap exactly onto where the guide crosses the edge. If there's no
+          // valid crossing (parallel, or the guide misses the segment), fall
+          // through to plain tracking below rather than reusing the raw
+          // online point — that's what caused the desnap symptom originally.
+          if (hit) return{x:hit.x,y:hit.y,snapType:'online',angleSnap:checkAngle(start,hit),tracks:[]}
+        }
+        return{x:geo.x,y:geo.y,snapType:geo.type,angleSnap:angleFromStart,tracks:[]}
       } else if (geo&&geo.type!=='tan'){
-        return{x:geo.x,y:geo.y,snapType:geo.type,angleSnap:checkAngle(start,geo),tracks:[]}
+        // Point-type snaps (endpoint/midpoint/center/quadrant) can't slide
+        // like 'online' can — it's one fixed point. So "close enough to call
+        // it horizontal" can't just be a label with no effect (that's the
+        // exact bug above, in point form): if checkAngleTight says it's
+        // genuinely close, actually snap that one axis onto start's line —
+        // trading a few px of point precision for an honest indicator,
+        // consistent with how the online branch above behaves. If it's not
+        // close, don't show the indicator at all (no partial promises).
+        const angleTight=checkAngleTight(start,geo)
+        if (angleTight==='horizontal') return{x:geo.x,y:start.y,snapType:geo.type,angleSnap:angleTight,tracks:[]}
+        if (angleTight==='vertical') return{x:start.x,y:geo.y,snapType:geo.type,angleSnap:angleTight,tracks:[]}
+        return{x:geo.x,y:geo.y,snapType:geo.type,angleSnap:null,tracks:[]}
       }
     }
     const{snapped,tracks}=applyTracking(raw,tracked)
@@ -1393,9 +1428,11 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
 
     // Draw committed dimensions
     dims.forEach((dim,di)=>{
+      const isDelTarget=deletePreview?.kind==='dim'&&deletePreview.idx===di
+      const dimColor=isDelTarget?'#F44336':'#222'
       ctx.save()
-      ctx.strokeStyle='#222';ctx.fillStyle='#222'
-      const LW=0.8/sc, ARR=6/sc, FS=11/sc
+      ctx.strokeStyle=dimColor;ctx.fillStyle=dimColor
+      const LW=(isDelTarget?2:0.8)/sc, ARR=6/sc, FS=11/sc
       ctx.lineWidth=LW
       if (dim.kind==='linear'){
         const dx=dim.x2-dim.x1,dy=dim.y2-dim.y1,len=Math.hypot(dx,dy)
@@ -1430,7 +1467,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         if(ang>Math.PI/2||ang<-Math.PI/2) ang+=Math.PI
         ctx.rotate(ang)
         ctx.font=`${FS*sc}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='bottom'
-        ctx.fillStyle='#222';ctx.fillText(txt,0,-3)
+        ctx.fillStyle=dimColor;ctx.fillText(txt,0,-3)
         ctx.restore()
       } else if (dim.kind==='diameter'){
         const {cx,cy,r,angle}=dim
@@ -2716,6 +2753,11 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           return
         }
       }
+      return
+    }
+
+    if (tool==='dim'){
+      if (e.key==='Escape'){resetDim();return}
       return
     }
 

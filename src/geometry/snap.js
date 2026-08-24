@@ -197,6 +197,23 @@ export function checkAngle(from,to) {
   return null
 }
 
+// Like checkAngle, but for labeling a POINT-type geo-snap (endpoint/midpoint/
+// center/quadrant) that can't be nudged onto the H/V line the way an 'online'
+// snap can (see computeEnd's online branch, which actually forces the point)
+// — a fixed point either already IS at `from`'s x/y or it isn't, there's no
+// sliding it into place without abandoning the point snap. checkAngle's
+// degree-based tolerance widens in pixels the farther `to` is from `from`
+// (10° at 200px away is ~35px of slop), so using it here would label a point
+// HORIZ/VERT well before it's actually anywhere near flat — this uses the
+// same small fixed-pixel tolerance (ALIGN_SNAP_DIST) the real forcing logic
+// elsewhere already snaps to, so the label only shows when it's honestly true.
+export function checkAngleTight(from,to) {
+  const ad=ALIGN_SNAP_DIST/zoomRef.scale
+  if (Math.abs(to.y-from.y)<ad) return 'horizontal'
+  if (Math.abs(to.x-from.x)<ad) return 'vertical'
+  return null
+}
+
 export function getAngleSnap(start,end) {
   const snap=checkAngle(start,end)
   if (snap==='horizontal') return {x:end.x,y:start.y,angleSnap:'horizontal'}

@@ -6,7 +6,7 @@ import { planeColor, planeAxisLabels, sketchToWorld, worldToSketch } from './Ske
 import { FacePlane, fitCircleLeastSquares, fitArcToRun, distToLine } from './FacePlane.js'
 import { pxToMm, mmToPx, ALIGN_SNAP_DIST, ACQUIRE_DIST, SELECT_DIST, LINE_SNAP_DIST, norm2pi, zoomRef } from './constants.js'
 import { angleOnArc, computeAllIntersections, circleCircleIntersect } from './geometry/intersections.js'
-import { getGeoSnap, getAllSnapPoints, checkAngle, getAngleSnap, applyTracking, computeLiveAngle, getTanPtsOnCircle, getExternalTangentPairs, nearestPt, nearestOnSegment } from './geometry/snap.js'
+import { getGeoSnap, getAllSnapPoints, checkAngle, checkAngleTight, getAngleSnap, applyTracking, computeLiveAngle, getTanPtsOnCircle, getExternalTangentPairs, nearestPt, nearestOnSegment } from './geometry/snap.js'
 import { computeTrimPreview, performTrim, computeDeletePreview, distToSeg } from './tools/trimDelete.js'
 import { nearestOffsetEntity, computeOffsetPreview, distToEntity } from './tools/offsetMath.js'
 import { nearestMirrorEntity, buildMirror } from './tools/mirrorMath.js'
@@ -1907,16 +1907,51 @@ const App3D = forwardRef(function App3D(props, ref) {
       // would always fire first and VERT/HORIZ would show but never snap.
       const ad=ALIGN_SNAP_DIST/zoomRef.scale
       const activeTp=tracked.find(tp=>Math.abs(raw.y-tp.y)<ad||Math.abs(raw.x-tp.x)<ad)
-      if (geo&&geo.type==='online'&&activeTp){
-        const isVertical=Math.abs(raw.x-activeTp.x)<ad
-        const hit=intersectTrackWithLine(activeTp,isVertical,raw,snapLines)
-        // Snap exactly onto where the guide crosses the edge. If there's no
-        // valid crossing (parallel, or the guide misses the segment), fall
-        // through to plain tracking below rather than reusing the raw
-        // online point — that's what caused the desnap symptom originally.
-        if (hit) return{x:hit.x,y:hit.y,snapType:'online',angleSnap:checkAngle(start,hit),tracks:[]}
+      if (geo&&geo.type==='online'){
+        // checkAngle uses an ANGLE tolerance (SNAP_ANGLE, widens in pixels the
+        // farther geo is from start) to decide the HORIZ/VERT indicator label,
+        // but activeTp above uses a small fixed-pixel DISTANCE tolerance
+        // (ALIGN_SNAP_DIST) to decide whether the cursor is actually riding a
+        // guide line closely enough to force the snap. A far-away online
+        // point can pass the angle check (indicator shows HORIZ/VERT) while
+        // failing the distance check (activeTp is null) — the label lies and
+        // the endpoint never actually lands on the H/V line. `start` is
+        // checked BEFORE activeTp (not as its fallback) — `tracked` can hold
+        // some unrelated point the cursor merely brushed past earlier
+        // (updateTracking auto-acquires anything within ACQUIRE_DIST), which
+        // lingers as "active" for as long as the cursor's x OR y keeps
+        // matching it (e.g. dragging straight down a vertical edge keeps any
+        // earlier point at that same x "active" indefinitely). If that stale
+        // point were preferred, it can hijack the wrong axis — a vertical
+        // guide against a vertical edge has no crossing, silently falling
+        // back to the unforced raw point while still claiming the label.
+        // `start` is always the actually-relevant reference for this line, so
+        // its own H/V reading against geo wins whenever it applies.
+        const angleFromStart=checkAngle(start,geo)
+        const guideTp=(angleFromStart?start:null)||activeTp
+        if (guideTp){
+          const isVertical=guideTp===start?angleFromStart==='vertical':Math.abs(raw.x-guideTp.x)<ad
+          const hit=intersectTrackWithLine(guideTp,isVertical,raw,snapLines)
+          // Snap exactly onto where the guide crosses the edge. If there's no
+          // valid crossing (parallel, or the guide misses the segment), fall
+          // through to plain tracking below rather than reusing the raw
+          // online point — that's what caused the desnap symptom originally.
+          if (hit) return{x:hit.x,y:hit.y,snapType:'online',angleSnap:checkAngle(start,hit),tracks:[]}
+        }
+        return{x:geo.x,y:geo.y,snapType:geo.type,angleSnap:angleFromStart,tracks:[]}
       } else if (geo&&geo.type!=='tan'){
-        return{x:geo.x,y:geo.y,snapType:geo.type,angleSnap:checkAngle(start,geo),tracks:[]}
+        // Point-type snaps (endpoint/midpoint/center/quadrant) can't slide
+        // like 'online' can — it's one fixed point. So "close enough to call
+        // it horizontal" can't just be a label with no effect (that's the
+        // exact bug above, in point form): if checkAngleTight says it's
+        // genuinely close, actually snap that one axis onto start's line —
+        // trading a few px of point precision for an honest indicator,
+        // consistent with how the online branch above behaves. If it's not
+        // close, don't show the indicator at all (no partial promises).
+        const angleTight=checkAngleTight(start,geo)
+        if (angleTight==='horizontal') return{x:geo.x,y:start.y,snapType:geo.type,angleSnap:angleTight,tracks:[]}
+        if (angleTight==='vertical') return{x:start.x,y:geo.y,snapType:geo.type,angleSnap:angleTight,tracks:[]}
+        return{x:geo.x,y:geo.y,snapType:geo.type,angleSnap:null,tracks:[]}
       }
     }
     const{snapped,tracks}=applyTracking(raw,tracked)
@@ -2921,6 +2956,53 @@ const App3D = forwardRef(function App3D(props, ref) {
       ctx.restore()
     })
 
+    // ── Dim tool live preview (rubber-band while placing) ──
+    if (tool==='dim'&&dimToolPreview&&mousePos){
+      ctx.save();ctx.strokeStyle='#E91E63';ctx.fillStyle='#E91E63';ctx.lineWidth=0.8/sc;ctx.setLineDash([4/sc,2/sc])
+      const ARR=6/sc,FS=11/sc
+      const p=dimToolPreview
+      if (p.kind==='linear'){
+        const dx=p.x2-p.x1,dy=p.y2-p.y1,len=Math.hypot(dx,dy)
+        if(len>1){
+          const ux=dx/len,uy=dy/len,nx=-uy,ny=ux,off=p.offset
+          ctx.beginPath()
+          ctx.moveTo(p.x1,p.y1);ctx.lineTo(p.x1+nx*(off+Math.sign(off||1)*ARR*1.5),p.y1+ny*(off+Math.sign(off||1)*ARR*1.5))
+          ctx.moveTo(p.x2,p.y2);ctx.lineTo(p.x2+nx*(off+Math.sign(off||1)*ARR*1.5),p.y2+ny*(off+Math.sign(off||1)*ARR*1.5))
+          ctx.moveTo(p.x1+nx*off,p.y1+ny*off);ctx.lineTo(p.x2+nx*off,p.y2+ny*off)
+          ctx.stroke()
+          const txt=pxToMm(len).toFixed(2)+' mm'
+          const mx=(p.x1+p.x2)/2+nx*off,my=(p.y1+p.y2)/2+ny*off
+          ctx.save();ctx.translate(mx,my);ctx.scale(1/sc,1/sc)
+          let a=Math.atan2(uy,ux);if(a>Math.PI/2||a<-Math.PI/2) a+=Math.PI
+          ctx.rotate(a);ctx.setLineDash([]);ctx.font=`${FS*sc}px sans-serif`
+          ctx.textAlign='center';ctx.textBaseline='bottom';ctx.fillText(txt,0,-3)
+          ctx.restore()
+        }
+      } else if (p.kind==='diameter'){
+        const cos=Math.cos(p.angle),sin=Math.sin(p.angle)
+        ctx.beginPath();ctx.moveTo(p.cx-p.r*cos,p.cy-p.r*sin);ctx.lineTo(p.cx+p.r*cos,p.cy+p.r*sin);ctx.stroke()
+        ctx.setLineDash([]);ctx.save();ctx.translate(p.cx,p.cy);ctx.scale(1/sc,1/sc)
+        ctx.font=`${FS*sc}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='bottom'
+        ctx.fillText('⌀'+pxToMm(p.r*2).toFixed(2)+' mm',0,-3)
+        ctx.restore()
+      } else if (p.kind==='radius'){
+        const ex=p.cx+p.r*Math.cos(p.angle),ey=p.cy+p.r*Math.sin(p.angle)
+        ctx.beginPath();ctx.moveTo(p.cx,p.cy);ctx.lineTo(ex,ey);ctx.stroke()
+        ctx.setLineDash([]);ctx.save();ctx.translate(ex,ey);ctx.scale(1/sc,1/sc)
+        ctx.font=`${FS*sc}px sans-serif`;ctx.textAlign='left';ctx.textBaseline='bottom'
+        ctx.fillText('R'+pxToMm(p.r).toFixed(2)+' mm',4,-3)
+        ctx.restore()
+      }
+      // First/second clicked point dots
+      if (dimToolPts.length>0){
+        ctx.setLineDash([]);ctx.beginPath();ctx.arc(dimToolPts[0].x,dimToolPts[0].y,4/sc,0,Math.PI*2);ctx.fill()
+      }
+      if (dimToolPts.length>1){
+        ctx.beginPath();ctx.arc(dimToolPts[1].x,dimToolPts[1].y,4/sc,0,Math.PI*2);ctx.fill()
+      }
+      ctx.restore()
+    }
+
     if (!mousePos) return
 
     // ── Line tool rubber-band ──
@@ -3081,7 +3163,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (segs) for (const s of segs) drawPreviewLine(ctx,s.x1,s.y1,s.x2,s.y2,'#FFEB3B',1,sc)
     }
 
-  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover])
+  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover])
 
 
   // ── Phase 2 Step 3: plane tagging ────────────────────────────────────────

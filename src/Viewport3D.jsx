@@ -114,10 +114,10 @@ const ISO_VIEW = {
 // Fixed camera half-height (world units, 1mm = 2 units) used when actually
 // entering a sketch — 400 gives a 400mm default view, comfortable framing for
 // a ~300mm print-bed-sized part without inheriting whatever zoom level the
-// general 3D orbit view happens to be at (which can be zoomed out much
-// further, e.g. its own default of 900 — see the camera setup below — making
-// mouse drags in the 2D sketch profile correspond to huge, unusable mm
-// distances if the sketch view just reused it unchanged).
+// general 3D orbit view happens to be at (which the user can zoom out from
+// freely — see the camera setup below — making mouse drags in the 2D sketch
+// profile correspond to huge, unusable mm distances if the sketch view just
+// reused it unchanged).
 const SKETCH_FRUST_H = 400
 
 const TWEEN_MS = 420   // animation duration in milliseconds
@@ -474,12 +474,12 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
 
     const scene  = new THREE.Scene()
     // frustH is the camera's half-height in world units (1mm = 2 units, same
-    // scale cadMesh.js uses for solids) — 900 gives a 900mm total default
-    // vertical view, comfortable padding around the 300mm work planes so they
-    // don't dominate the screen before any part is modeled (zoomToFit ignores
-    // the work planes entirely and only frames actual geometry, so an empty
-    // scene always shows this default, unadjusted).
-    const aspect = width/height, frustH=900
+    // scale cadMesh.js uses for solids) — 250 gives a 250mm total default
+    // vertical view, framing the 150mm-half-size work planes closer up so
+    // they're clearly visible as the very first thing shown (zoomToFit
+    // ignores the work planes entirely and only frames actual geometry, so
+    // an empty scene always shows this default, unadjusted).
+    const aspect = width/height, frustH=250
     const camera = new THREE.OrthographicCamera(
       -frustH*aspect, frustH*aspect, frustH, -frustH, -10000, 10000
     )

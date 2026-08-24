@@ -30,7 +30,7 @@ import * as THREE from 'three'
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
-const PLANE_SIZE = 300   // half-size of each plane rectangle in world units
+const PLANE_SIZE = 150   // half-size of each plane rectangle in world units
 
 export const PLANES = {
   XY: {

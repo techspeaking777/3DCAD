@@ -3340,9 +3340,13 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (!geo || (!geo.lines.length && !geo.circles.length && !geo.arcs.length)) return true
     const tag = planeTag()
     commit(snapshot())
-    if (geo.lines.length)   setLines  (prev => [...prev, ...geo.lines  .map(s => ({ ...s, style:'construction', ...tag }))])
-    if (geo.circles.length) setCircles(prev => [...prev, ...geo.circles.map(s => ({ ...s, style:'construction', ...tag }))])
-    if (geo.arcs.length)    setArcs   (prev => [...prev, ...geo.arcs   .map(s => ({ ...s, style:'construction', ...tag }))])
+    // includedEdge:true (alongside style:'construction') lets detectProfiles
+    // still treat this as a real boundary segment — see its own comment —
+    // while the construction styling keeps it visually distinct from
+    // geometry actually drawn in this sketch.
+    if (geo.lines.length)   setLines  (prev => [...prev, ...geo.lines  .map(s => ({ ...s, style:'construction', includedEdge:true, ...tag }))])
+    if (geo.circles.length) setCircles(prev => [...prev, ...geo.circles.map(s => ({ ...s, style:'construction', includedEdge:true, ...tag }))])
+    if (geo.arcs.length)    setArcs   (prev => [...prev, ...geo.arcs   .map(s => ({ ...s, style:'construction', includedEdge:true, ...tag }))])
     setIncludeEdgeSel(prev => [...prev, { solidId: hit.solidId, edgeId: hit.edgeId }])
     return true
   }

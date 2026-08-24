@@ -35,8 +35,15 @@ export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
   // never for the extruded/cut solid itself, so it's excluded here rather
   // than at each call site (every caller wants this, unlike e.g. ghostRef
   // exclusion which is specific to the loft-profile-editing flow and stays
-  // filtered at that call site in App3D.jsx).
-  const notConstruction = e => e.style !== 'construction'
+  // filtered at that call site in App3D.jsx). Include Edge also tags its own
+  // output style:'construction' (so a projected edge still reads visually
+  // distinct from geometry you actually drew) but marks it includedEdge:true
+  // too — unlike a user's own reference/layout lines, the whole point of
+  // Include Edge is reusing an existing edge as one side of a NEW profile
+  // (matching "Convert/Project Entities" in other CAD tools), so it must
+  // still count as a real boundary segment here or a profile that traces
+  // along an included edge can never close.
+  const notConstruction = e => e.style !== 'construction' || e.includedEdge
   // Filter to this plane only
   const planeLines   = lines  .filter(l => (l.plane || 'XY') === planeId && notConstruction(l))
   const planeArcs    = arcs   .filter(a => (a.plane || 'XY') === planeId && notConstruction(a))

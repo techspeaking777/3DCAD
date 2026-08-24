@@ -498,6 +498,13 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.screenSpacePanning=true; controls.enableDamping=true; controls.dampingFactor=0.12
     controls.zoomSpeed=1.2; controls.rotateSpeed=0.6
+    // Without this, scroll-wheel zoom dollies toward the orbit TARGET (screen
+    // center) no matter where the cursor is — disorienting once you're zoomed
+    // in on one corner of a part and want to zoom further without re-panning
+    // back to center first. zoomToCursor keeps whatever point is under the
+    // mouse fixed on screen as you zoom, same as every other CAD/DCC tool's
+    // scroll-zoom. Works for OrthographicCamera too (this app's camera type).
+    controls.zoomToCursor=true
     // LEFT is left unbound (null) deliberately — it used to be PAN, but since
     // OrbitControls listens on the same canvas element sketch tools draw over,
     // a left-drag triggered camera pan AND the tool's own drag logic (e.g.

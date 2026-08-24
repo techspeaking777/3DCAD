@@ -5237,8 +5237,16 @@ const App3D = forwardRef(function App3D(props, ref) {
     setExtrudeState(prev => {
       if (!prev?.armed) return prev
       const nextDir = prev.direction === 'both' ? 'both' : (proj >= 0 ? 'front' : 'back')
-      if (prev.depthInput === mmStr && prev.direction === nextDir) return prev
-      return { ...prev, depthInput: mmStr, direction: nextDir }
+      // depthLocked (set when the user types into the depth box directly —
+      // see its onChange) means they typed an exact value on purpose; the
+      // mouse should still flip which side it's on (that's the whole point
+      // of "hover either side of the plane to flip direction"), but must NOT
+      // silently overwrite the number they typed the instant the mouse
+      // drifts back over the canvas, which is what happened before this —
+      // any typed value got clobbered by the very next mousemove.
+      const nextDepth = prev.depthLocked ? prev.depthInput : mmStr
+      if (prev.depthInput === nextDepth && prev.direction === nextDir) return prev
+      return { ...prev, depthInput: nextDepth, direction: nextDir }
     })
   }
 
@@ -9423,7 +9431,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                   <input
                     autoFocus
                     value={extrudeState.depthInput}
-                    onChange={e=>setExtrudeState(prev=>({...prev,depthInput:e.target.value}))}
+                    onChange={e=>setExtrudeState(prev=>({...prev,depthInput:e.target.value,depthLocked:true}))}
                     onKeyDown={e=>{ e.stopPropagation(); handleExtrudeDepthKey(e) }}
                     style={{
                       width:70, background:'#1e1e38',
@@ -9650,7 +9658,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                   <input
                     autoFocus
                     value={extrudeState.depthInput}
-                    onChange={e=>setExtrudeState(prev=>({...prev,depthInput:e.target.value}))}
+                    onChange={e=>setExtrudeState(prev=>({...prev,depthInput:e.target.value,depthLocked:true}))}
                     onKeyDown={e=>{ e.stopPropagation(); handleExtrudeDepthKey(e) }}
                     style={{
                       background:'none', border:'none', outline:'none',
@@ -9784,7 +9792,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                     autoFocus={extrudeState.extentMode==='value'}
                     value={extrudeState.extentMode==='through' ? '∞' : extrudeState.depthInput}
                     readOnly={extrudeState.extentMode==='through'}
-                    onChange={e=> extrudeState.extentMode!=='through' && setExtrudeState(prev=>({...prev,depthInput:e.target.value}))}
+                    onChange={e=> extrudeState.extentMode!=='through' && setExtrudeState(prev=>({...prev,depthInput:e.target.value,depthLocked:true}))}
                     onKeyDown={e=>{ e.stopPropagation(); if(extrudeState.extentMode!=='through') handleExtrudeDepthKey(e) }}
                     style={{
                       background:'none', border:'none', outline:'none',

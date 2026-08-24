@@ -1379,6 +1379,31 @@ const App3D = forwardRef(function App3D(props, ref) {
   const snapshot = () => ({ lines, circles, arcs, splines, dims })
   const restore = (snap) => { setLines(snap.lines); setCircles(snap.circles); setArcs(snap.arcs); setSplines(snap.splines||[]); setDims(snap.dims||[]) }
 
+  // Separate history for the 3D feature tree — deliberately not unified with
+  // the 2D sketch history above: different granularity (one committed
+  // feature vs. every pixel-level edit) and different speed (async full-tree
+  // rebuild through the OCC worker vs. instant array assignment). `commit`
+  // here only ever needs the plain, serializable `features` array — restore
+  // replays it from scratch via rebuildProjectFromFeatures (the exact same
+  // path Open Project already uses), which is what lets this stay ignorant
+  // of every commit function's own setSolids/rebuildDependentMirrors/
+  // rebuildSolidChain internals rather than trying to hand-reverse them.
+  const feat3d = useHistory()
+  const [feat3dBusy, setFeat3DBusy] = useState(false)
+  const restore3D = async (snap) => {
+    setFeat3DBusy(true)
+    try {
+      const rebuilt = await rebuildProjectFromFeatures(snap)
+      setFeatures(snap)
+      setSolids(rebuilt)
+    } catch (err) {
+      setCadError('Undo/redo rebuild failed: ' + err.message)
+      setTimeout(() => setCadError(null), 6000)
+    } finally {
+      setFeat3DBusy(false)
+    }
+  }
+
   const trackedPtsRef=useRef([])
   const splinePointsRef=useRef([])
   const linesRef=useRef([])
@@ -4248,6 +4273,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     const memberFeats = selIds.map(id => features.find(f => f.id === id)).filter(Boolean)
     const memberSolids = memberFeats.map(f => solids.find(s => s.id === f.solidId)).filter(Boolean)
     if (memberSolids.length < 2) return
+    feat3d.commit(features)
     try {
       const newSolidId = Date.now()
       const members = memberSolids.map(s => ({
@@ -4516,6 +4542,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     const basis = st.basis
     const ruled = !!st.ruled
     const isLoftCutout = loftTool === 'loftcutout'
+    feat3d.commit(features)
     resetLoft3D()
     setTool('select')
     setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
@@ -4631,6 +4658,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // rebuildDependentMirrors' own loop below).
   async function commitMirror3DBatch(pick) {
     const picked = [...mirror3dSel]
+    if (picked.length) feat3d.commit(features)
     resetMirror3D()
     setTool('select')
     for (const { featureId } of picked) {
@@ -5032,6 +5060,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     const targetSolid = solids.find(s => s.id === solidId)
     if (!targetSolid) { resetFillet3D(); return }
     const editingId = editingFeatureId
+    feat3d.commit(features)
     resetFillet3D()
     try {
       const meshData = editingId
@@ -5793,6 +5822,7 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     // Capture all state before clearing (setExtrudeState(null) makes extrudeState stale)
     const editingId = editingFeatureId
+    feat3d.commit(features)
     hiddenEditSolidRef.current = null   // committed — new solid replaces the hidden one
     setExtrudeState(null)
     setExtrudeTool(null)
@@ -6439,6 +6469,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   async function handleDeleteFeature(featureId) {
     const feat = features.find(f => f.id === featureId)
     if (!feat) return
+    feat3d.commit(features)
 
     if (feat.operation === 'join') {
       // Un-join: restore each member to its own independent, editable solid,
@@ -7554,8 +7585,18 @@ const App3D = forwardRef(function App3D(props, ref) {
       }
       return
     }
-    if (e.ctrlKey&&e.key==='z'){e.preventDefault();undo(snapshot(),restore);return}
-    if (e.ctrlKey&&e.key==='y'){e.preventDefault();redo(snapshot(),restore);return}
+    if (e.ctrlKey&&e.key==='z'){
+      e.preventDefault()
+      if (sketchMode) undo(snapshot(),restore)
+      else if (!feat3dBusy) feat3d.undo(features,restore3D)
+      return
+    }
+    if (e.ctrlKey&&e.key==='y'){
+      e.preventDefault()
+      if (sketchMode) redo(snapshot(),restore)
+      else if (!feat3dBusy) feat3d.redo(features,restore3D)
+      return
+    }
     if (e.ctrlKey&&e.key==='s'){e.preventDefault();sketchMode?handleSave():handleSaveProject();return}
     if ((e.key==='f'||e.key==='F')&&!e.ctrlKey){zoomToFit();return}
     // Escape in sketch mode: cancel whatever 2D tool is mid-interaction only
@@ -9006,6 +9047,25 @@ const App3D = forwardRef(function App3D(props, ref) {
               </label>
               <button onClick={()=>exportDXF(lines,circles,arcs,splines)} title="Export DXF" style={{...btnBase,background:'transparent',border:'none'}}>
                 <IconDXF/>
+              </button>
+              <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
+            </>
+          )}
+          {/* 3D feature-tree Undo/Redo — separate history from the 2D sketch
+              buffer above (see feat3d), so a different button pair rather
+              than reusing canUndo/canRedo. Disabled while feat3dBusy: the
+              restore is an async full-tree rebuild through the OCC worker,
+              not an instant array assignment, so a rapid second click could
+              otherwise fire against a stale features closure mid-rebuild. */}
+          {!sketchMode && (
+            <>
+              <button onClick={()=>feat3d.undo(features,restore3D)} title="Undo (Ctrl+Z)" disabled={!feat3d.canUndo||feat3dBusy}
+                style={{...btnBase,opacity:(feat3d.canUndo&&!feat3dBusy)?1:0.3,background:'transparent',border:'none',cursor:(feat3d.canUndo&&!feat3dBusy)?'pointer':'default'}}>
+                <IconUndo active={feat3d.canUndo&&!feat3dBusy}/>
+              </button>
+              <button onClick={()=>feat3d.redo(features,restore3D)} title="Redo (Ctrl+Y)" disabled={!feat3d.canRedo||feat3dBusy}
+                style={{...btnBase,opacity:(feat3d.canRedo&&!feat3dBusy)?1:0.3,background:'transparent',border:'none',cursor:(feat3d.canRedo&&!feat3dBusy)?'pointer':'default'}}>
+                <IconRedo active={feat3d.canRedo&&!feat3dBusy}/>
               </button>
               <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
             </>

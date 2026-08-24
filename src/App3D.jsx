@@ -1517,7 +1517,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   function resetAllToolState(){
     resetDrawState(); resetSelection(); resetSpline(); resetOffset(); resetMirror(); resetCenter()
     resetMoveCopy(); resetRotateCopy(); resetResize(); resetFillet(); resetTrace(); resetDim(); resetJoin(); resetText(); resetIncludeEdge()
-    resetMeasure(); resetMirror3D(); resetJoin3D(); resetLoft3D(); resetFillet3D(); resetExportSTL()
+    resetMeasure(); resetMirror3D(); resetJoin3D(); resetLoft3D(); resetFillet3D(); resetExportSTL(); resetExportSTEP()
     setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
     setTool('select')
     setLines([]); setCircles([]); setArcs([]); setSplines([])
@@ -4095,8 +4095,8 @@ const App3D = forwardRef(function App3D(props, ref) {
   // (the extrude/revolve/loft/join/mirror row — never a cutout/fillet, which
   // modify an existing body rather than creating one) — same predicate
   // FeatureTree's own isBodyOwner already uses to decide which rows can be
-  // hidden. A solid whose owner is itself a mirror is rejected by callers
-  // (can't re-mirror a mirror), same rule the old feature-tree-based picker enforced.
+  // hidden. Mirror and Join can both be picked as a Mirror3D source (mirror-
+  // of-mirror, mirror-of-join) — see commitMirrorSolid/rebuildDependentMirrors.
   function baseFeatureForSolid(solidId) {
     return features.find(f => f.type==='extrude' && !f.joinedInto && f.solidId===solidId &&
       ['extrude','revolve','loft','mirror','join'].includes(f.operation || 'extrude'))
@@ -4143,7 +4143,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
     if (!hit || hit.solidId==null) return
     const feat = baseFeatureForSolid(hit.solidId)
-    if (!feat || feat.operation==='mirror') return
+    if (!feat) return
     setMirror3dSel(prev => prev.some(s=>s.solidId===hit.solidId)
       ? prev.filter(s=>s.solidId!==hit.solidId)
       : [...prev, {solidId:hit.solidId, featureId:feat.id}])
@@ -4759,11 +4759,16 @@ const App3D = forwardRef(function App3D(props, ref) {
         }
       : { kind: 'workplane', planeId: pick.planeId }
 
+    // buildBaseWorkerParams returns null for a join/mirror source (no flat
+    // pts/depth/plane rebuild description exists for those) — the worker
+    // falls back to reading sourceSolid.id straight out of its shapeStore in
+    // that case (see cadWorker.js's mirrorShape handler), which is safe here
+    // since that solid's shapeStore entry was set at its own creation time.
     const base = buildBaseWorkerParams(sourceSolid)
     const ops = buildSolidOpsForWorker(sourceSolid, features)
 
     const newSolidId = Date.now()
-    const meshData = await cadEngine.mirrorShape({ solidId: newSolidId, base, ops, plane: planeParams })
+    const meshData = await cadEngine.mirrorShape({ solidId: newSolidId, sourceSolidId: sourceSolid.id, base, ops, plane: planeParams })
     const group = replicadMeshToThree(meshData, sourceSolid.color, newSolidId)
 
     setSolids(prev => [...prev, {
@@ -4785,20 +4790,24 @@ const App3D = forwardRef(function App3D(props, ref) {
   // the solid object directly (not just an id) so callers pass the FRESHLY
   // updated object they just built — reading `solids` state here would be
   // stale until the setSolids call that triggered this actually lands
-  // (React batches state updates). Scoped ONE level deep only — a mirror's
-  // own source can never itself be a mirror (enforced by excluding
-  // operation==='mirror' rows from Feature-Tree pick eligibility), so no
-  // recursion guard is needed.
+  // (React batches state updates). Mirror-of-mirror chains are now allowed
+  // (see baseFeatureForSolid), so this recurses after each dependent rebuild
+  // to cascade to ITS dependents in turn — always terminates without a cycle
+  // guard because a mirror's sourceSolidId always points at a solid created
+  // earlier, so the dependency graph can't loop back on itself.
   async function rebuildDependentMirrors(solid) {
     const dependents = features.filter(f => f.operation === 'mirror' && f.sourceSolidId === solid.id)
     if (dependents.length === 0) return
+    // buildBaseWorkerParams returns null for a join/mirror source — see
+    // commitMirrorSolid's comment; the worker falls back to sourceSolidId.
     const base = buildBaseWorkerParams(solid)
     const ops = buildSolidOpsForWorker(solid, features)
     for (const mirrorFeat of dependents) {
       try {
-        const meshData = await cadEngine.mirrorShape({ solidId: mirrorFeat.solidId, base, ops, plane: mirrorFeat.mirrorPlane })
+        const meshData = await cadEngine.mirrorShape({ solidId: mirrorFeat.solidId, sourceSolidId: solid.id, base, ops, plane: mirrorFeat.mirrorPlane })
         const group = replicadMeshToThree(meshData, mirrorFeat.color, mirrorFeat.solidId)
         setSolids(prev => prev.map(s => s.id === mirrorFeat.solidId ? { ...s, group } : s))
+        await rebuildDependentMirrors({ id: mirrorFeat.solidId, operation: 'mirror' })
       } catch (err) {
         console.error('Dependent mirror rebuild failed:', err)
       }
@@ -4836,7 +4845,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (!sourceSolid) throw new Error('Mirror source solid not found')
       const base = buildBaseWorkerParams(sourceSolid)
       const ops = buildSolidOpsForWorker(sourceSolid, feats)
-      return cadEngine.mirrorShape({ solidId: feat.solidId, base, ops, plane: feat.mirrorPlane })
+      return cadEngine.mirrorShape({ solidId: feat.solidId, sourceSolidId: sourceSolid.id, base, ops, plane: feat.mirrorPlane })
     }
     // rebuildSolidChain also transparently replays this member's OWN
     // cutouts/fillets — untouched by the join, still in `feats` keyed to
@@ -4876,7 +4885,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         if (!sourceSolid) throw new Error('Mirror source solid not found (join member)')
         const base = buildBaseWorkerParams(sourceSolid)
         const ops = buildSolidOpsForWorker(sourceSolid, feats)
-        await cadEngine.mirrorShape({ solidId: mf.solidId, base, ops, plane: mf.mirrorPlane })
+        await cadEngine.mirrorShape({ solidId: mf.solidId, sourceSolidId: sourceSolid.id, base, ops, plane: mf.mirrorPlane })
         members.push({ solidId: mf.solidId, base: null, ops: [] })
       } else {
         const tempSolid = featureToTempSolid(mf)
@@ -6679,6 +6688,91 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }
 
+  // ── Export STEP (selectable bodies) ───────────────────────────────────────
+  // Exact mirror of Export STL above, just writing a real B-rep STEP file
+  // instead of a triangle mesh — same body-click selection, same highlight,
+  // same "empty selection = export everything" default, same multi-solid
+  // fuse-at-export-time behavior (see commitExportSTEP's own comment on why
+  // not a compound).
+  const [exportSTEPSel, setExportSTEPSel] = useState([])
+  const [exportSTEPBusy, setExportSTEPBusy] = useState(false)
+
+  function activateExportSTEPTool() {
+    resetSelection()
+    resetDrawState()
+    restoreHiddenEditSolid()
+    if (sketchModeRef.current) {
+      setSketchMode(false)
+      setActivePlane(null)
+      setActiveSketchId(null)
+      activePlaneRef.current = null
+      viewport3dRef.current?.restoreSavedView()
+    }
+    setTool('exportstep')
+    setExtrudeTool(null)
+    setExtrudeState(null)
+    setEditingFeatureId(null)
+    setExportSTEPSel([])
+  }
+
+  function resetExportSTEP() {
+    setExportSTEPSel([])
+  }
+
+  function handleExportSTEPClick(e) {
+    if (tool !== 'exportstep') return
+    const vp = viewport3dRef.current; if (!vp) return
+    const hit = vp.raycastSolidFace(e.clientX, e.clientY)
+    if (!hit || hit.solidId == null) return
+    setExportSTEPSel(prev =>
+      prev.includes(hit.solidId) ? prev.filter(id => id !== hit.solidId) : [...prev, hit.solidId])
+  }
+
+  useEffect(() => {
+    if (tool !== 'exportstep') { viewport3dRef.current?.clearJoinHighlight(); return }
+    viewport3dRef.current?.highlightJoinMembers(exportSTEPSel)
+  }, [exportSTEPSel, tool])
+
+  // Multiple selected solids get welded with the same fuseTolerant Export
+  // STL uses, not replicad's makeCompound — makeCompound deletes its input
+  // shapes, and these come straight from the worker's live shapeStore cache;
+  // compounding them would free cache entries out from under the app (see
+  // cadWorker.js's exportSTL/exportSTEP handler for the full reasoning).
+  // That means a multi-solid STEP still comes out as one fused body rather
+  // than several separate ones — same tradeoff Export STL already made,
+  // consistent with this app's own "no multi-body assembly" scope.
+  async function commitExportSTEP() {
+    if (exportSTEPBusy) return
+    const targetIds = exportSTEPSel.length > 0 ? exportSTEPSel : solids.map(s => s.id)
+    const targetSolids = solids.filter(s => targetIds.includes(s.id))
+    if (targetSolids.length === 0) {
+      setCadError('Nothing to export — add at least one solid first.')
+      setTimeout(() => setCadError(null), 5000)
+      return
+    }
+    setExportSTEPBusy(true)
+    try {
+      const solidsForExport = targetSolids.map(solid => {
+        const base = buildBaseWorkerParams(solid)
+        const ops = features
+          .filter(f => f.solidId === solid.id && (f.operation === 'cutout' || f.type === 'fillet'))
+          .map(f => f.type === 'fillet'
+            ? { type: 'fillet', radius: f.radius, edgePoints: f.edgePoints }
+            : { type: 'cut', params: buildCutWorkerParams(f) })
+        return { solidId: solid.id, base, ops }
+      })
+
+      const { stepBlob } = await cadEngine.exportSTEP({ solids: solidsForExport })
+      await saveBlobAs(stepBlob, 'model.step', 'STEP model', { 'application/step': ['.step', '.stp'] })
+    } catch (err) {
+      console.error('STEP export failed:', err)
+      setCadError(`STEP export failed: ${err.message || String(err)}`)
+      setTimeout(() => setCadError(null), 8000)
+    } finally {
+      setExportSTEPBusy(false)
+    }
+  }
+
   // ── Body color (selectable bodies) ────────────────────────────────────────
   // Click bodies directly in the 3D view to multi-select (toggle) which
   // solids get recolored — same click/highlight plumbing as Export STL
@@ -6894,6 +6988,11 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     if (tool==='exportstl') {
       handleExportSTLClick(e)
+      return
+    }
+
+    if (tool==='exportstep') {
+      handleExportSTEPClick(e)
       return
     }
 
@@ -7686,6 +7785,15 @@ const App3D = forwardRef(function App3D(props, ref) {
       e.preventDefault()
       commitExportSTL()
       return
+    }
+    if (e.key==='Enter'&&tool==='exportstep'){
+      e.preventDefault()
+      commitExportSTEP()
+      return
+    }
+    if (e.key==='Escape'&&tool==='exportstep'){
+      if (exportSTEPSel.length>0) { resetExportSTEP(); return }
+      resetExportSTEP(); setTool('select'); return
     }
     if (e.key==='Escape'&&tool==='exportstl'){
       if (exportSTLSel.length>0) { resetExportSTL(); return }
@@ -8756,7 +8864,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             dxfPickMode={tool==='exportfacedxf'}
             dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : []}
             extrudeArmed={!!extrudeState || (!!loftState && !sketchMode)}
-            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='color' && tool!=='join3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hidePlanesForExtrude && (tool==='extrude' || tool==='cutout'))}
+            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hidePlanesForExtrude && (tool==='extrude' || tool==='cutout'))}
             activePlane={activePlane}
             sketchMode={sketchMode}
             gridVisible={gridVisible}
@@ -8836,16 +8944,18 @@ const App3D = forwardRef(function App3D(props, ref) {
             }}
           />
 
-          {/* ── SmartStep bar: overlays bottom of viewport during Export STL ── */}
+          {/* ── SmartStep bar: overlays bottom of viewport during Export STL/STEP —
+              shared between the two exactly like Loft/Loft Cutout share one bar,
+              since the selection/hint/action shape is identical either way. ── */}
           <SmartStepBar
-            op={tool==='exportstl' ? 'STL' : null}
+            op={tool==='exportstl' ? 'STL' : tool==='exportstep' ? 'STEP' : null}
             steps={[{ id:1, label:'Select Bodies' }]}
             currentStep={1}
-            color="#4CAF50"
-            hint={exportSTLSel.length>0
-              ? `${exportSTLSel.length} selected`
+            color={tool==='exportstep' ? '#4FC3F7' : '#4CAF50'}
+            hint={(tool==='exportstep' ? exportSTEPSel : exportSTLSel).length>0
+              ? `${(tool==='exportstep' ? exportSTEPSel : exportSTLSel).length} selected`
               : 'Click bodies to choose (none = export all)'}
-            action={{label:'✓ Export', enabled:true, onClick:commitExportSTL}}
+            action={{label:'✓ Export', enabled:true, onClick: tool==='exportstep' ? commitExportSTEP : commitExportSTL}}
             onStepBack={()=>{}}
           />
 
@@ -9092,6 +9202,17 @@ const App3D = forwardRef(function App3D(props, ref) {
                   <text x="4.5" y="19.5" fontSize="5" fill="#4CAF50" fontFamily="monospace" fontWeight="bold">STL</text>
                 </svg>
                 <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>STL</span>
+              </button>
+              <button onClick={activateExportSTEPTool}
+                title="Export STEP — click bodies in the 3D view to choose which ones to export (none selected = export all)"
+                style={{...btnBase, flexDirection:'column', gap:2, background: tool==='exportstep' ? '#4FC3F733' : 'transparent',
+                  border: tool==='exportstep' ? '1px solid #4FC3F7' : 'none'}}>
+                <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                  <path d="M11 2l8 4.5v9L11 20l-8-4.5v-9L11 2z" stroke="#aaa" strokeWidth="1.5" strokeLinejoin="round"/>
+                  <path d="M3 6.5L11 11l8-4.5M11 11v9" stroke="#aaa" strokeWidth="1.2"/>
+                  <text x="2.5" y="19.5" fontSize="5" fill="#4FC3F7" fontFamily="monospace" fontWeight="bold">STEP</text>
+                </svg>
+                <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>STEP</span>
               </button>
               <button onClick={activateColorTool}
                 title="Body Color — click bodies in the 3D view, then pick a color to apply"

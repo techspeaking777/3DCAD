@@ -32,6 +32,36 @@ function fuseTolerant(a, b) {
   return result
 }
 
+// Shared by exportSTL/exportSTEP: each entry in `solidsParams` is one
+// top-level solid (its cutouts/fillets already baked in). Prefer the
+// shapeStore's current cached shape (fast, and reflects the live state
+// exactly); rebuild from base+ops only if the cache doesn't have it — e.g.
+// after a fresh load with no edits yet. Multiple solids get welded into one
+// with fuseTolerant (see the exportSTL/exportSTEP handler's own comment on
+// why not makeCompound).
+function gatherAndFuseExportSolids(solidsParams) {
+  const shapes = solidsParams.map(({ solidId, base, ops }) => {
+    let shape = shapeStore.get(solidId)
+    if (!shape) {
+      shape = buildBase(base)
+      for (const op of ops) {
+        if (op.type === 'fillet') {
+          shape = shape.fillet(op.radius, e => e.either(
+            op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
+          ))
+        } else {
+          shape = cutTolerant(shape, buildCutShape(clampCutDepth(op.params, base)))
+        }
+      }
+    }
+    return shape
+  })
+  if (shapes.length === 0) throw new Error('No solids to export')
+  let fused = shapes[0]
+  for (let i = 1; i < shapes.length; i++) fused = fuseTolerant(fused, shapes[i])
+  return fused
+}
+
 // Cut with the same fuzzy tolerance as fuseTolerant above — a cut tool
 // ending exactly flush with an existing boundary (e.g. one band of a
 // multi-band grille pattern sitting right at the edge of an earlier cut)
@@ -333,34 +363,28 @@ self.onmessage = async function(e) {
   }
   const { type, id, params } = e.data
   try {
-    if (type==='exportSTL') {
-      // Each entry in params.solids is one top-level solid (its cutouts/fillets
-      // already baked in). Prefer the shapeStore's current cached shape (fast,
-      // and reflects the live state exactly); rebuild from base+ops only if
-      // the cache doesn't have it — e.g. after a fresh load with no edits yet.
-      const shapes = params.solids.map(({ solidId, base, ops }) => {
-        let shape = shapeStore.get(solidId)
-        if (!shape) {
-          shape = buildBase(base)
-          for (const op of ops) {
-            if (op.type === 'fillet') {
-              shape = shape.fillet(op.radius, e => e.either(
-                op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
-              ))
-            } else {
-              shape = cutTolerant(shape, buildCutShape(clampCutDepth(op.params, base)))
-            }
-          }
-        }
-        return shape
-      })
-      if (shapes.length === 0) throw new Error('No solids to export')
-      let fused = shapes[0]
-      for (let i = 1; i < shapes.length; i++) fused = fuseTolerant(fused, shapes[i])
-      // Same tolerances used for the on-screen render mesh elsewhere in this
-      // file, so the printed geometry matches what was previewed.
-      const blob = fused.blobSTL({ tolerance:0.05, angularTolerance:30, binary: true })
-      self.postMessage({ type:'result', id, stlBlob: blob })
+    if (type==='exportSTL' || type==='exportSTEP') {
+      // Shared by both export formats — see gatherAndFuseExportSolids below.
+      // Deliberately NOT using replicad's makeCompound (which would keep
+      // multiple selected solids as separate bodies in the STEP file,
+      // STEP's real advantage over STL) — makeCompound calls .delete() on
+      // every input shape, and these shapes come straight from the live
+      // shapeStore cache below, reused unmodified. Compounding them would
+      // free cache entries out from under the app: the next unrelated
+      // operation touching that solid would throw on an already-deleted
+      // WASM object instead of cleanly cache-missing. fuseTolerant only
+      // reads .wrapped, never deletes its operands, so it's safe here —
+      // same reasoning Join/exportSTL's own multi-solid fuse already rely on.
+      const fused = gatherAndFuseExportSolids(params.solids)
+      if (type==='exportSTL') {
+        // Same tolerances used for the on-screen render mesh elsewhere in
+        // this file, so the printed geometry matches what was previewed.
+        const blob = fused.blobSTL({ tolerance:0.05, angularTolerance:30, binary: true })
+        self.postMessage({ type:'result', id, stlBlob: blob })
+      } else {
+        const blob = fused.blobSTEP()
+        self.postMessage({ type:'result', id, stepBlob: blob })
+      }
       return
     }
 
@@ -536,12 +560,28 @@ self.onmessage = async function(e) {
       // cross-solid dependency (a mirror-solid depends on its SOURCE solid's
       // current shape) — nothing guarantees shapeStore[sourceSolidId] is
       // fresh at rebuild time (fresh page load, or a dependent-mirror
-      // rebuild that didn't just touch the source), so always cold-rebuild
-      // the source's full chain from params rather than trusting the cache —
-      // the same safety fallback buildBase already provides on a fillet3d/
-      // subtract cache MISS, just made unconditional here since there's no
-      // "hot path" to prefer in the first place.
-      let base = buildBase(params.base)
+      // rebuild that didn't just touch the source), so cold-rebuild the
+      // source's full chain from params whenever a flat rebuild description
+      // is available — the same safety fallback buildBase already provides
+      // on a fillet3d/subtract cache MISS.
+      // A join or a mirror source has no such flat description (see
+      // buildBaseWorkerParams' own comment — join/mirror solids aren't
+      // rebuildable from pts/depth/plane, only via joinShapes()/mirrorShape()
+      // themselves) — params.base is null for these, and the caller passes
+      // params.sourceSolidId instead so the ALREADY-built shape can be read
+      // straight out of shapeStore. This is safe (not the "trusting a stale
+      // cache" risk the comment above guards against) because App3D.jsx only
+      // ever reaches this branch once the source's own shapeStore entry has
+      // already been freshly set — at creation time for live editing, or by
+      // an earlier, awaited replay step for a project reload (see
+      // rebuildProjectFromFeatures' ordering guarantee).
+      let base
+      if (params.base) {
+        base = buildBase(params.base)
+      } else {
+        base = shapeStore.get(params.sourceSolidId)
+        if (!base) throw new Error('Mirror source shape not found in cache (join/mirror source not yet built)')
+      }
       for (const op of params.ops || []) {
         if (op.type === 'fillet') {
           base = base.fillet(op.radius, e => e.either(

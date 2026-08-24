@@ -30,7 +30,7 @@ class CadEngine {
       )
 
       this._worker.onmessage = (e) => {
-        const { type, id, faces, edges, stlBlob, dxfData, orthoViews, message } = e.data
+        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, message } = e.data
 
         if (type === 'ready') {
           this._ready = true
@@ -57,6 +57,7 @@ class CadEngine {
           // geometry — pass through whichever fields are actually present.
           pending.resolve(
             stlBlob ? { stlBlob } :
+            stepBlob ? { stepBlob } :
             dxfData ? { dxfData } :
             orthoViews ? { orthoViews } :
             { faces, edges }
@@ -148,6 +149,15 @@ class CadEngine {
    */
   async exportSTL(params) {
     return this._send('exportSTL', params)
+  }
+
+  /**
+   * Same params shape as exportSTL — export the selected solids fused into
+   * one real B-rep STEP file instead of a triangle mesh (keeps exact
+   * curves/fillets, unlike STL).
+   */
+  async exportSTEP(params) {
+    return this._send('exportSTEP', params)
   }
 
   /**

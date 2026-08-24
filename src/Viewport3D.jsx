@@ -38,20 +38,27 @@ import { SKETCH_PLANES } from './SketchPlane.js'
 import { faceHitToPlane, previewBottomEdge, faceBoundarySegments, facePickBoundaryLoops } from './FacePlane.js'
 import { mmToPx } from './constants.js'
 
-// Averages the 3 vertex normals of a hovered face's hit triangle, world-space —
-// same convention faceHitToPlane uses, factored out so both the per-frame
-// highlight and the keyboard-driven Tab cycling (which runs outside animate())
-// compute the exact same normal for a given hover state.
+// The hit triangle's own geometric normal (from its vertex POSITIONS via
+// THREE's raycaster, not the mesh's stored per-vertex normal ATTRIBUTES) —
+// the same value faceHitToPlane itself uses at actual click/commit time.
+// This used to average the 3 vertex normal-attribute values instead, which
+// looked equivalent for a plain flat face (all three are identical there)
+// but silently diverged near geometrically busy regions — a small face
+// bordered by steps/notches/fillets on multiple sides can have per-vertex
+// normals that aren't perfectly identical even within one flat triangle, and
+// averaging three slightly-different values produces a FOURTH value that
+// may not exactly dot-product to 1.0 against ANY of the mesh's stored
+// per-vertex normals. extractFaceBoundaryLoops3D's coplanarity test (see
+// FacePlane.js) needs an exact match to find that face's own triangles at
+// all — a near-miss there doesn't degrade gracefully, it finds ZERO
+// boundary edges, which is exactly why the live green bottom-edge preview
+// (and Tab-cycling through edges) could silently fail to appear on some
+// faces/edges while the SAME face still sketched fine on click (click
+// commits through faceHitToPlane, which was never affected by this).
 function getHoveredFaceNormal(hf) {
-  const geo = hf.mesh.geometry
   const face = hf.hit.face
-  const normals = geo?.attributes?.normal
   if (!face) return null
-  if (!normals) return face.normal.clone().transformDirection(hf.mesh.matrixWorld).normalize()
-  const na = new THREE.Vector3(normals.getX(face.a), normals.getY(face.a), normals.getZ(face.a))
-  const nb = new THREE.Vector3(normals.getX(face.b), normals.getY(face.b), normals.getZ(face.b))
-  const nc = new THREE.Vector3(normals.getX(face.c), normals.getY(face.c), normals.getZ(face.c))
-  return na.add(nb).add(nc).divideScalar(3).transformDirection(hf.mesh.matrixWorld).normalize()
+  return face.normal.clone().transformDirection(hf.mesh.matrixWorld).normalize()
 }
 
 // solidId lives on the per-solid GROUP's userData (see cadMesh.js), not on the

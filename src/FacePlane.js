@@ -129,12 +129,21 @@ export function faceHitToPlane(hit, overrideEdge = null) {
     }
   }
 
+  // Left un-nudged along normal (an earlier version pushed this 0.5 units
+  // outward "so sketch sits on surface, not inside solid") — origin isn't
+  // just a rendering reference, it's ALSO the literal base-plane origin every
+  // face-sketched extrude/cutout/revolve sends straight to the CAD worker
+  // (App3D.jsx's facePlaneParams, pxToMm'd but otherwise untouched). That
+  // nudge landed every feature built on a face 0.25mm off the real surface —
+  // a boss floats 0.25mm above the face it was sketched on instead of
+  // sitting flush (confirmed by building one and measuring its base against
+  // the source face's own vertices). The hover-preview square has its own,
+  // separate 0.5-unit render-only nudge (Viewport3D.jsx's facePlaneIndicator)
+  // that was never affected by this and still avoids any z-fighting concern
+  // for that indicator on its own.
   const origin = coplanarVerts.length > 0
     ? coplanarVerts.reduce((s,v)=>s.add(v), new THREE.Vector3()).multiplyScalar(1/coplanarVerts.length)
     : hit.point.clone()
-
-  // Nudge slightly outward so sketch sits on surface, not inside solid
-  origin.addScaledVector(normal, 0.5)
 
   // Orient the sketch from the CLICKED edge, not a geometric guess. Four
   // rounds of "derive up/horizontal from face proportions alone" (Gram-Schmidt

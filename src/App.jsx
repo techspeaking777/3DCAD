@@ -999,7 +999,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   function applyEntityStyle(ctx, entity, sc, baseColor, baseLineWidth) {
     const s = entity?.style
     if (s==='construction') {
-      ctx.strokeStyle = baseColor==='#222' ? '#aaa' : baseColor
+      ctx.strokeStyle = '#ff9800'
       ctx.lineWidth = Math.min(baseLineWidth, 0.8/sc)
       ctx.setLineDash([])
     } else if (s==='dashed') {

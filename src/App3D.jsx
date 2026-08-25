@@ -10203,7 +10203,20 @@ const App3D = forwardRef(function App3D(props, ref) {
             const data=await loadJSON(file)
             if (data.dims) setDims(data.dims)
             commit(snapshot())
-            setLines(data.lines);setCircles(data.circles);setArcs(data.arcs);setSplines(data.splines||[])
+            // Imported coordinates are meant to land in THIS sketch's local
+            // frame — stamp the active plane/facePlane onto every entity
+            // (planeTag(), same tagging every draw tool uses) rather than
+            // keeping whatever plane info (or lack of it) the source file
+            // had. Without this, importing into a face sketch left entities
+            // with no facePlane, so pt2three() fell through to rendering
+            // them on the flat world plane instead of the actual face —
+            // right where the selection overlay still showed them, but
+            // nowhere near where the Three.js geometry actually drew.
+            const pt = planeTag()
+            setLines(data.lines.map(l=>({...l,...pt})))
+            setCircles(data.circles.map(c=>({...c,...pt})))
+            setArcs(data.arcs.map(a=>({...a,...pt})))
+            setSplines((data.splines||[]).map(s=>({...s,...pt})))
             resetDrawState()
           } catch(err) {setLoadError(err.message);setTimeout(()=>setLoadError(null),3000)}
         }}

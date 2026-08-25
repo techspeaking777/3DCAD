@@ -174,7 +174,7 @@ function makeHaloLine(pts, color, style) {
   // alternating dash-dot pattern — 'axis' just uses a distinct dark color +
   // dashing instead of fighting the shader for an exact centerline look.
   const isDashed = style === 'dashed' || style === 'axis'
-  const coreColor = style === 'construction' ? 0x888888 : style === 'axis' ? 0x222222 : color
+  const coreColor = style === 'construction' ? 0xff9800 : style === 'axis' ? 0x222222 : color
 
   const haloGeo = new LineGeometry(); haloGeo.setPositions(positions)
   const haloMat = new LineMaterial({

@@ -103,30 +103,71 @@ export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
   const usedSegs = new Set()
   const profiles = []
 
+  function otherNode(si, node) {
+    const [na, nb] = segNodes[si]
+    return na === node ? nb : na
+  }
+
   function walkLoop(startSeg) {
     const path = [startSeg]
     usedSegs.add(startSeg)
+    let prevNode = segNodes[startSeg][0]
     let curNode = segNodes[startSeg][1]   // move forward from p2
-    const startNode = segNodes[startSeg][0]
+    const startNode = prevNode
 
     for (let steps = 0; steps < segs.length; steps++) {
       if (curNode === startNode) {
         // closed loop found
         return path
       }
-      // Find next unused segment connected to curNode
-      const next = adj[curNode].find(si => !usedSegs.has(si))
-      if (next === undefined) return null   // dead end — open profile
+      // Segments still unused that touch curNode
+      const candidates = adj[curNode].filter(si => !usedSegs.has(si))
+      if (candidates.length === 0) return null   // dead end — open profile
+
+      let next = candidates[0]
+      if (candidates.length > 1) {
+        // Multiple unused segments meet at this node — a real junction, or
+        // (far more likely in practice) stray Include-Edge geometry whose
+        // endpoint happened to land within CLOSE_TOL of an existing corner.
+        // Blindly taking the first array match can silently stitch a long
+        // spurious "shortcut" into the profile instead of the true boundary.
+        // Disambiguate the way contour tracers normally do: prefer whichever
+        // candidate continues most nearly straight ahead from the direction
+        // we arrived on, since the real boundary rarely doubles back sharply
+        // while a stray included edge cutting across the sketch usually does.
+        const inDir = { x: nodes[curNode].x - nodes[prevNode].x, y: nodes[curNode].y - nodes[prevNode].y }
+        const inLen = Math.hypot(inDir.x, inDir.y) || 1
+        let bestScore = -Infinity
+        for (const si of candidates) {
+          const other = otherNode(si, curNode)
+          const outDir = { x: nodes[other].x - nodes[curNode].x, y: nodes[other].y - nodes[curNode].y }
+          const outLen = Math.hypot(outDir.x, outDir.y) || 1
+          const score = (inDir.x*outDir.x + inDir.y*outDir.y) / (inLen*outLen)
+          if (score > bestScore) { bestScore = score; next = si }
+        }
+      }
+
       usedSegs.add(next)
       path.push(next)
       // Advance to the other end of this segment
-      const [na, nb] = segNodes[next]
-      curNode = (na === curNode) ? nb : na
+      prevNode = curNode
+      curNode = otherNode(next, curNode)
     }
     return null
   }
 
-  for (let si = 0; si < segs.length; si++) {
+  // Prefer starting a loop walk from genuinely-drawn geometry over
+  // Include-Edge-sourced segments — an included edge is meant to supply a
+  // missing SIDE of a profile the user is actually drawing, not to seed the
+  // loop itself. Starting the walk there risks accepting a shortcut straight
+  // across the sketch as if it were the real boundary before the real
+  // geometry gets a chance to close its own loop first. Stable sort keeps
+  // plain-geometry sketches (no included edges) walking in original order.
+  const startOrder = segs
+    .map((_, i) => i)
+    .sort((a, b) => (segs[a].ref.includedEdge ? 1 : 0) - (segs[b].ref.includedEdge ? 1 : 0))
+
+  for (const si of startOrder) {
     if (usedSegs.has(si)) continue
     const loop = walkLoop(si)
     if (!loop) continue

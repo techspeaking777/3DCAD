@@ -510,15 +510,16 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     // a left-drag triggered camera pan AND the tool's own drag logic (e.g.
     // Select's drag-select/drag-handle) at the same time, and the camera pan
     // visually won. Freeing LEFT entirely is what actually fixes drag-select.
-    // MIDDLE is ROTATE, which OrbitControls itself automatically swaps to PAN
-    // when Shift (or Ctrl/Meta) is held during mousedown — built into its own
+    // MIDDLE is PAN (Fusion 360 convention — scroll-wheel press to pan),
+    // which OrbitControls itself automatically swaps to ROTATE when Shift
+    // (or Ctrl/Meta) is held during mousedown — built into its own
     // onMouseDown switch, no extra listeners needed (and adding our own would
     // double-apply the shiftKey check and invert the result). RIGHT stays
-    // ROTATE too, harmless alongside every tool's right-click-to-accept (a
+    // ROTATE, harmless alongside every tool's right-click-to-accept (a
     // plain click doesn't drag, so no camera movement happens before the
     // app's own contextmenu handler fires). Scroll wheel already dollies by
     // default, independent of this mapping.
-    controls.mouseButtons={ LEFT:null, MIDDLE:THREE.MOUSE.ROTATE, RIGHT:THREE.MOUSE.ROTATE }
+    controls.mouseButtons={ LEFT:null, MIDDLE:THREE.MOUSE.PAN, RIGHT:THREE.MOUSE.ROTATE }
 
     const grid = buildGrid()
     grid.visible = false   // hidden by default — white background, no grid

@@ -1136,6 +1136,20 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   const viewport3dRef=useRef(null)
   const [tool,setTool]=useState(null)
+  // Sketch-only tools' toolbar buttons only render while sketchMode is true,
+  // but `tool` itself isn't reset just because sketchMode ends (most exit
+  // paths — cancelFeature, finishing a feature, etc. — only clear sketchMode/
+  // activePlane, not tool). Left alone, whatever sketch tool was active stays
+  // selected, and handleClick's per-tool branches don't gate on sketchMode
+  // (they don't need to while genuinely mid-sketch), so a stray left-click in
+  // the plain 3D viewport would still, say, start drawing a line in sketch
+  // space that doesn't belong to any visible sketch. Snapping back to
+  // 'select' the moment sketchMode goes false closes that off in one place
+  // instead of guarding every sketch tool's click handler individually.
+  const ALWAYS_AVAILABLE_TOOLS = useRef(new Set(['select','extrude','cutout','fillet3d','measure','exportfacedxf','exportstl','exportstep','color','join3d','mirror3d','loft3d'])).current
+  useEffect(() => {
+    if (!sketchMode && tool && !ALWAYS_AVAILABLE_TOOLS.has(tool)) setTool('select')
+  }, [sketchMode])
   const [lines,setLines]=useState([])
   // Face-plane sketching: snap onto the underlying solid's own edges/corners too,
   // not just onto other sketch geometry. activePlane.refSegments (set by

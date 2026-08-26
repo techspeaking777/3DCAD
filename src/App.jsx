@@ -309,6 +309,9 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
 
   const trackedPtsRef=useRef([])
   const splinePointsRef=useRef([])
+  // Chain-line tracking — see the matching comment in App3D.jsx.
+  const chainOriginRef=useRef(null)
+  const chainStartLenRef=useRef(0)
   const linesRef=useRef([])
   const circlesRef=useRef([])
   const arcsRef=useRef([])
@@ -2430,7 +2433,9 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     }
 
     if (tool==='line'){
+      if (e.detail > 1) return  // ignore 2nd click of a dblclick — handled by handleDoubleClick
       if (!startPoint&&!deferredTangent){
+        chainOriginRef.current=null;chainStartLenRef.current=linesRef.current.length
         if (pKeyDown) {
           // PERP: start at foot on nearest line, store its index to exclude later
           const hit=findNearestLineForPerp(raw,lines,null)
@@ -2442,10 +2447,13 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           return
         }
         const geo=getGeoSnap(raw,lines,circles,arcs,null,tKeyDown,splines,intersectionPts)
+        let startPt
         if (geo?.type==='tan'){
           const circData=geo.circleIdx!==undefined?{...circles[geo.circleIdx],circleIdx:geo.circleIdx}:{cx:geo.cx,cy:geo.cy,r:geo.r,arcIdx:geo.arcIdx}
-          setDeferredTangent(circData);setStartPoint({x:geo.x,y:geo.y})
-        } else setStartPoint(geo?{x:geo.x,y:geo.y}:raw)
+          startPt={x:geo.x,y:geo.y}
+          setDeferredTangent(circData);setStartPoint(startPt)
+        } else { startPt=geo?{x:geo.x,y:geo.y}:raw; setStartPoint(startPt) }
+        chainOriginRef.current=startPt
         setDimInput('');setDimLocked(false);setAngleInput('');setAngleLocked(false);setFocusField('dim')
         setTrackedPts([]);trackedPtsRef.current=[]
       } else if (deferredTangent){
@@ -2490,11 +2498,27 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           const tanPts=getTanPtsOnCircle(startPoint.x,startPoint.y,c.cx,c.cy,c.r)
           const best=nearestPt(tanPts,raw)
           if(best){commit(snapshot());setLines(p=>[...p,{x1:startPoint.x,y1:startPoint.y,x2:best.x,y2:best.y}])}
+          resetDrawState()
         } else {
           const end=computeEnd(startPoint,raw,trackedPts)
-          commit(snapshot());setLines(p=>[...p,{x1:startPoint.x,y1:startPoint.y,x2:end.x,y2:end.y,...(drawStyle?{style:drawStyle}:{})}])
+          // Chain: click back near the chain's own first point (once it's
+          // at least a triangle — 2 segments already placed) to close the
+          // loop instead of continuing, same convention every other
+          // polyline tool uses.
+          const segsSoFar=linesRef.current.length-chainStartLenRef.current
+          const nearOrigin=chainOriginRef.current&&segsSoFar>=2&&
+            Math.hypot(end.x-chainOriginRef.current.x,end.y-chainOriginRef.current.y)<SNAP_DIST/zoomRef.scale
+          const finalEnd=nearOrigin?chainOriginRef.current:end
+          commit(snapshot())
+          setLines(p=>[...p,{x1:startPoint.x,y1:startPoint.y,x2:finalEnd.x,y2:finalEnd.y,...(drawStyle?{style:drawStyle}:{})}])
+          if (nearOrigin){
+            resetDrawState()
+          } else {
+            setStartPoint(finalEnd)
+            setDimInput('');setDimLocked(false);setAngleInput('');setAngleLocked(false);setFocusField('dim')
+            setTrackedPts([]);trackedPtsRef.current=[]
+          }
         }
-        resetDrawState()
       }
     } else if (tool==='circle'){
       if (circleTanA&&!circleTanB){
@@ -2569,6 +2593,19 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   }
 
   function handleDoubleClick(e){
+    if (tool==='line'&&startPoint){
+      e.preventDefault()
+      const segsSoFar=linesRef.current.length-chainStartLenRef.current
+      if (segsSoFar>0){
+        // The 2nd click of this dblclick already fired a normal click just
+        // before this event — since the mouse hasn't moved, that committed
+        // a near-zero-length segment onto the end of the chain. Undo it.
+        const last=linesRef.current[linesRef.current.length-1]
+        if (last&&Math.hypot(last.x2-last.x1,last.y2-last.y1)<2/zoomRef.scale) undo(snapshot(),restore)
+      }
+      resetDrawState()
+      return
+    }
     if (tool!=='spline') return
     e.preventDefault()
     // Get current points directly from ref to avoid StrictMode double-call issue
@@ -2871,6 +2908,21 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     }
 
     if (!startPoint&&!circleCenter&&!deferredTangent&&!circleTanA) return
+    if (tool==='line'&&startPoint){
+      if (e.key==='Escape'){
+        // Cancel the WHOLE chain — see the matching comment in App3D.jsx.
+        const segsSoFar=linesRef.current.length-chainStartLenRef.current
+        if (segsSoFar>0){
+          commit(snapshot())
+          setLines(p=>p.slice(0,chainStartLenRef.current))
+        }
+        resetDrawState()
+        return
+      }
+      if (e.key==='Enter'||e.key==='Return'){
+        e.preventDefault();resetDrawState();return
+      }
+    }
     if (e.key==='Escape'){resetDrawState();return}
     if (e.key==='Tab'){
       e.preventDefault()

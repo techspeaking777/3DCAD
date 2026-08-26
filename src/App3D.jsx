@@ -1406,6 +1406,14 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   const trackedPtsRef=useRef([])
   const splinePointsRef=useRef([])
+  // Chain-line tracking: the Line tool keeps going from each placed
+  // endpoint instead of stopping after one segment (see the tool==='line'
+  // click handler). chainOriginRef is the chain's very first point, used to
+  // detect "clicked back near where I started" and auto-close the loop;
+  // chainStartLenRef is lines.length from just before the chain's first
+  // segment, used by Escape to know how many trailing segments to discard.
+  const chainOriginRef=useRef(null)
+  const chainStartLenRef=useRef(0)
   const linesRef=useRef([])
   const circlesRef=useRef([])
   const arcsRef=useRef([])
@@ -7534,7 +7542,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
 
     if (tool==='line'){
+      if (e.detail > 1) return  // ignore 2nd click of a dblclick — handled by handleDoubleClick
       if (!startPoint&&!deferredTangent){
+        chainOriginRef.current=null;chainStartLenRef.current=linesRef.current.length
         if (pKeyDown) {
           // PERP: start at foot on nearest line, store its index to exclude later
           const hit=findNearestLineForPerp(raw,lines,null)
@@ -7558,6 +7568,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           startPt={x:geo.x,y:geo.y}
           setDeferredTangent(circData);setStartPoint(startPt)
         } else { startPt=geo?{x:geo.x,y:geo.y}:raw; setStartPoint(startPt) }
+        chainOriginRef.current=startPt
         setDimInput('');setDimLocked(false);setAngleInput('');setAngleLocked(false);setFocusField('dim')
         setTrackedPts([{...startPt,sticky:true}]);trackedPtsRef.current=[{...startPt,sticky:true}]
       } else if (deferredTangent){
@@ -7602,11 +7613,30 @@ const App3D = forwardRef(function App3D(props, ref) {
           const tanPts=getTanPtsOnCircle(startPoint.x,startPoint.y,c.cx,c.cy,c.r)
           const best=nearestPt(tanPts,raw)
           if(best){commit(snapshot());setLines(p=>[...p,{x1:startPoint.x,y1:startPoint.y,x2:best.x,y2:best.y,...planeTag()}])}
+          resetDrawState()
         } else {
           const end=computeEnd(startPoint,raw,trackedPts)
-          commit(snapshot());setLines(p=>[...p,{x1:startPoint.x,y1:startPoint.y,x2:end.x,y2:end.y,...(drawStyle?{style:drawStyle}:{}),...planeTag()}])
+          // Chain: click back near the chain's own first point (once it's
+          // at least a triangle — 2 segments already placed) to close the
+          // loop instead of continuing, same convention every other
+          // polyline tool uses. Below that segment count, closing would
+          // just double back on the one segment you have, which isn't a
+          // real shape.
+          const segsSoFar=linesRef.current.length-chainStartLenRef.current
+          const nearOrigin=chainOriginRef.current&&segsSoFar>=2&&
+            Math.hypot(end.x-chainOriginRef.current.x,end.y-chainOriginRef.current.y)<SNAP_DIST/zoomRef.scale
+          const finalEnd=nearOrigin?chainOriginRef.current:end
+          commit(snapshot())
+          setLines(p=>[...p,{x1:startPoint.x,y1:startPoint.y,x2:finalEnd.x,y2:finalEnd.y,...(drawStyle?{style:drawStyle}:{}),...planeTag()}])
+          if (nearOrigin){
+            resetDrawState()
+          } else {
+            // Keep going — next segment starts where this one ended.
+            setStartPoint(finalEnd)
+            setDimInput('');setDimLocked(false);setAngleInput('');setAngleLocked(false);setFocusField('dim')
+            setTrackedPts([{...finalEnd,sticky:true}]);trackedPtsRef.current=[{...finalEnd,sticky:true}]
+          }
         }
-        resetDrawState()
       }
     } else if (tool==='circle'){
       if (circleTanA&&!circleTanB){
@@ -7686,6 +7716,21 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   function handleDoubleClick(e){
+    if (tool==='line'&&startPoint){
+      e.preventDefault()
+      const segsSoFar=linesRef.current.length-chainStartLenRef.current
+      if (segsSoFar>0){
+        // The 2nd click of this dblclick gesture already fired a normal
+        // click just before this event — since the mouse hasn't moved,
+        // that committed a near-zero-length segment onto the end of the
+        // chain. Undo it so the chain ends at the point before it, not a
+        // degenerate stub segment.
+        const last=linesRef.current[linesRef.current.length-1]
+        if (last&&Math.hypot(last.x2-last.x1,last.y2-last.y1)<2/zoomRef.scale) undo(snapshot(),restore)
+      }
+      resetDrawState()
+      return
+    }
     if (tool!=='spline') return
     e.preventDefault()
     // Get current points directly from ref to avoid StrictMode double-call issue
@@ -7828,6 +7873,25 @@ const App3D = forwardRef(function App3D(props, ref) {
     // or cancels the feature. That's now the dedicated Cancel button next to
     // Finish Sketch (see cancelFeature), so Escape is safe to hit repeatedly
     // while drawing without losing the whole Cut/Extrude/Loft in progress.
+    if (e.key==='Escape'&&tool==='line'&&startPoint){
+      // Cancel the WHOLE chain, not just the in-progress segment — each
+      // placed segment already got its own undo-history entry (see the
+      // click handler), so make canceling itself one more undoable commit
+      // rather than trying to unwind several history entries at once
+      // (useHistory's undo() closes over `past` from the last render —
+      // calling it more than once in the same synchronous handler would
+      // still see the pre-batch array, not a real multi-step undo). Must
+      // run BEFORE the generic sketchMode Escape catch-all below, which
+      // would otherwise reach resetDrawState() first and wipe startPoint
+      // before this ever got a chance to see it.
+      const segsSoFar=linesRef.current.length-chainStartLenRef.current
+      if (segsSoFar>0){
+        commit(snapshot())
+        setLines(p=>p.slice(0,chainStartLenRef.current))
+      }
+      resetDrawState()
+      return
+    }
     if (e.key==='Escape'&&sketchMode){
       resetDrawState();resetSpline();resetOffset();resetMirror();resetCenter();resetMoveCopy()
       resetRotateCopy();resetResize();resetFillet();resetText();resetSelection()
@@ -8168,6 +8232,14 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
 
     if (!startPoint&&!circleCenter&&!deferredTangent&&!circleTanA) return
+    if (tool==='line'&&startPoint){
+      if (e.key==='Enter'||e.key==='Return'){
+        // Finish the chain where it stands — every segment placed so far
+        // stays, just stop extending it. Nothing to commit here: each
+        // segment was already committed as it was placed.
+        e.preventDefault();resetDrawState();return
+      }
+    }
     if (e.key==='Escape'){resetDrawState();return}
     if (e.key==='Tab'){
       e.preventDefault()

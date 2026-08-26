@@ -1071,6 +1071,8 @@ const App3D = forwardRef(function App3D(props, ref) {
   // initialized yet at this point in the component body.
 
   const [cadError, setCadError] = useState(null)
+  const [saveToast, setSaveToast] = useState(null)
+  function flashSaved(){ setSaveToast('Saved'); setTimeout(() => setSaveToast(null), 2000) }
 
   // ── CAD engine (replicad + OpenCascade) ──
   const [occReady, setOccReady] = useState(false)
@@ -1481,7 +1483,10 @@ const App3D = forwardRef(function App3D(props, ref) {
   // Save button / Ctrl+S: Chromium browsers get a native folder+filename dialog;
   // others fall back to a small filename prompt (still downloads to Downloads).
   async function handleSave(){
-    if (canPickSaveLocation()) await saveProjectAs(lines,circles,arcs,splines,dims)
+    if (canPickSaveLocation()) {
+      const status = await saveProjectAs(lines,circles,arcs,splines,dims)
+      if (status==='saved'||status==='downloaded') flashSaved()
+    }
     else setSaveAsOpen('sketch')
   }
 
@@ -1493,8 +1498,9 @@ const App3D = forwardRef(function App3D(props, ref) {
   async function handleSaveProject(){
     if (canPickSaveLocation()) {
       try {
-        const { handle } = await saveProjectFileAs(features, solids, 'drawing.trc', projectFileHandleRef.current, props.getSheetData?.())
+        const { status, handle } = await saveProjectFileAs(features, solids, 'drawing.trc', projectFileHandleRef.current, props.getSheetData?.())
         if (handle) projectFileHandleRef.current = handle
+        if (status==='saved'||status==='downloaded') flashSaved()
       } catch (err) {
         setCadError('Save failed: ' + (err.message || String(err)))
         setTimeout(() => setCadError(null), 6000)
@@ -8652,6 +8658,15 @@ const App3D = forwardRef(function App3D(props, ref) {
           zIndex:9999,fontFamily:'monospace',fontSize:13,maxWidth:'80vw',
           boxShadow:'0 4px 12px rgba(0,0,0,0.5)'}}>
           {cadError}
+        </div>
+      )}
+
+      {saveToast && (
+        <div style={{position:'fixed',top:16,left:'50%',transform:'translateX(-50%)',
+          background:'#2e7d32',color:'#fff',padding:'10px 20px',borderRadius:8,
+          zIndex:9999,fontFamily:'monospace',fontSize:13,pointerEvents:'none',
+          boxShadow:'0 4px 12px rgba(0,0,0,0.5)'}}>
+          ✓ {saveToast}
         </div>
       )}
 

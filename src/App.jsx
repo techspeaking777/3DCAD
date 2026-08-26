@@ -299,7 +299,10 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   // Save button / Ctrl+S: Chromium browsers get a native folder+filename dialog;
   // others fall back to a small filename prompt (still downloads to Downloads).
   async function handleSave(){
-    if (canPickSaveLocation()) await saveProjectAs(lines,circles,arcs,splines)
+    if (canPickSaveLocation()) {
+      const status = await saveProjectAs(lines,circles,arcs,splines)
+      if (status==='saved'||status==='downloaded') flashSaved()
+    }
     else setSaveAsOpen(true)
   }
 
@@ -318,6 +321,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   const splinesRef=useRef([])
   const loadFileRef=useRef(null)
   const [loadError,setLoadError]=useState(null)
+  const [saveToast,setSaveToast]=useState(null)
+  function flashSaved(){ setSaveToast('Saved'); setTimeout(() => setSaveToast(null), 2000) }
   useEffect(()=>{trackedPtsRef.current=trackedPts},[trackedPts])
   useEffect(()=>{splinePointsRef.current=splinePoints},[splinePoints])
   useEffect(()=>{linesRef.current=lines},[lines])
@@ -3675,6 +3680,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         }}
       />
       {loadError&&<div style={{position:'fixed',top:10,left:'50%',transform:'translateX(-50%)',background:'#b71c1c',color:'white',padding:'6px 16px',borderRadius:4,fontFamily:'monospace',fontSize:12,pointerEvents:'none'}}>⚠ {loadError}</div>}
+      {saveToast&&<div style={{position:'fixed',top:10,left:'50%',transform:'translateX(-50%)',background:'#2e7d32',color:'white',padding:'6px 16px',borderRadius:4,fontFamily:'monospace',fontSize:12,pointerEvents:'none'}}>✓ {saveToast}</div>}
       {tKeyDown&&(tool==='line'||tool==='circle')&&<div style={{position:'fixed',top:10,right:10,background:'#E91E6399',color:'white',padding:'3px 10px',borderRadius:4,fontFamily:'monospace',fontSize:11,fontWeight:'bold',pointerEvents:'none'}}>TAN</div>}
       {pKeyDown&&tool==='line'&&<div style={{position:'fixed',top:10,right:60,background:'#00BCD499',color:'white',padding:'3px 10px',borderRadius:4,fontFamily:'monospace',fontSize:11,fontWeight:'bold',pointerEvents:'none'}}>PERP</div>}
 

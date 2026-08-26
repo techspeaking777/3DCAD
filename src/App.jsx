@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react'
-import { pxToMm, mmToPx, ALIGN_SNAP_DIST, ACQUIRE_DIST, SELECT_DIST, LINE_SNAP_DIST, norm2pi, zoomRef } from './constants.js'
+import { pxToMm, mmToPx, ALIGN_SNAP_DIST, ACQUIRE_DIST, SELECT_DIST, LINE_SNAP_DIST, SNAP_DIST, norm2pi, zoomRef, trackingDist } from './constants.js'
 import { angleOnArc, computeAllIntersections, circleCircleIntersect } from './geometry/intersections.js'
 import { getGeoSnap, getAllSnapPoints, checkAngle, checkAngleTight, getAngleSnap, applyTracking, computeLiveAngle, getTanPtsOnCircle, getExternalTangentPairs, nearestPt, nearestOnSegment } from './geometry/snap.js'
 import { computeTrimPreview, performTrim, computeDeletePreview, distToSeg } from './tools/trimDelete.js'
@@ -621,7 +621,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       // cursor is within LINE_SNAP_DIST of the edge (triggering online) well
       // before it's off the tracked vertical/horizontal line, so online
       // would always fire first and VERT/HORIZ would show but never snap.
-      const ad=ALIGN_SNAP_DIST/zoomRef.scale
+      const ad=trackingDist(ALIGN_SNAP_DIST,zoomRef.scale)
       const activeTp=tracked.find(tp=>Math.abs(raw.y-tp.y)<ad||Math.abs(raw.x-tp.x)<ad)
       if (geo&&geo.type==='online'){
         // checkAngle uses an ANGLE tolerance (SNAP_ANGLE, widens in pixels the
@@ -643,7 +643,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         // back to the unforced raw point while still claiming the label.
         // `start` is always the actually-relevant reference for this line, so
         // its own H/V reading against geo wins whenever it applies.
-        const angleFromStart=checkAngle(start,geo)
+        const angleFromStart=checkAngleTight(start,geo)
         const guideTp=(angleFromStart?start:null)||activeTp
         if (guideTp){
           const isVertical=guideTp===start?angleFromStart==='vertical':Math.abs(raw.x-guideTp.x)<ad
@@ -693,13 +693,14 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     const allPts=getAllSnapPoints(linesRef.current,circlesRef.current,arcsRef.current,splinesRef.current)
     const current=trackedPtsRef.current
     for (const p of allPts){
-      if (Math.hypot(pos.x-p.x,pos.y-p.y)<ACQUIRE_DIST/sc){
+      if (Math.hypot(pos.x-p.x,pos.y-p.y)<trackingDist(ACQUIRE_DIST,sc)){
         const already=current.some(tp=>Math.hypot(tp.x-p.x,tp.y-p.y)<2/sc)
         if (!already){const next=[...current,p];trackedPtsRef.current=next;setTrackedPts(next)}
         return
       }
     }
-    const onAnyTrack=current.some(tp=>Math.abs(pos.y-tp.y)<ALIGN_SNAP_DIST/sc||Math.abs(pos.x-tp.x)<ALIGN_SNAP_DIST/sc)
+    const decayD=trackingDist(ALIGN_SNAP_DIST,sc)
+    const onAnyTrack=current.some(tp=>Math.abs(pos.y-tp.y)<decayD||Math.abs(pos.x-tp.x)<decayD)
     if (!onAnyTrack&&current.length>0){trackedPtsRef.current=[];setTrackedPts([])}
   },[])
 
@@ -2108,7 +2109,15 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   function snapToGrid(pt){
     if (!gridSnap) return pt
     const gPx=mmToPx(gridSizeMm)
-    return {x:Math.round(pt.x/gPx)*gPx, y:Math.round(pt.y/gPx)*gPx}
+    const snapped={x:Math.round(pt.x/gPx)*gPx, y:Math.round(pt.y/gPx)*gPx}
+    // Unlike every other snap type, grid snap had no distance cutoff — it
+    // always rounded to the nearest grid line, however far away that was.
+    // Harmless at a grid size much smaller than what you're drawing, but a
+    // grid size at or above the part's own size (e.g. the 10mm default on a
+    // 10mm part) meant the ENTIRE part sat inside one grid cell, so every
+    // point in it rounded to the same corner regardless of where the cursor
+    // actually was. Same SNAP_DIST tolerance every geometric snap already uses.
+    return Math.hypot(pt.x-snapped.x,pt.y-snapped.y)<SNAP_DIST/zoomRef.scale ? snapped : pt
   }
 
   function handleClick(e){

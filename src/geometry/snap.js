@@ -1,4 +1,4 @@
-import { SNAP_DIST, LINE_SNAP_DIST, ALIGN_SNAP_DIST, SNAP_ANGLE, ACQUIRE_DIST, norm2pi, zoomRef } from '../constants.js'
+import { SNAP_DIST, LINE_SNAP_DIST, ALIGN_SNAP_DIST, SNAP_ANGLE, ACQUIRE_DIST, norm2pi, zoomRef, trackingDist } from '../constants.js'
 import { angleOnArc } from './intersections.js'
 
 export function nearestOnSegment(px,py,x1,y1,x2,y2) {
@@ -208,7 +208,7 @@ export function checkAngle(from,to) {
 // same small fixed-pixel tolerance (ALIGN_SNAP_DIST) the real forcing logic
 // elsewhere already snaps to, so the label only shows when it's honestly true.
 export function checkAngleTight(from,to) {
-  const ad=ALIGN_SNAP_DIST/zoomRef.scale
+  const ad=trackingDist(ALIGN_SNAP_DIST,zoomRef.scale)
   if (Math.abs(to.y-from.y)<ad) return 'horizontal'
   if (Math.abs(to.x-from.x)<ad) return 'vertical'
   return null
@@ -222,7 +222,7 @@ export function getAngleSnap(start,end) {
 }
 
 export function applyTracking(raw,trackedPts) {
-  const ad=ALIGN_SNAP_DIST/zoomRef.scale
+  const ad=trackingDist(ALIGN_SNAP_DIST,zoomRef.scale)
   let snappedX=raw.x,snappedY=raw.y
   const activeH=[],activeV=[]
   for (const tp of trackedPts) {

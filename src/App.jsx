@@ -351,6 +351,29 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     selectDragHandleRef.current=null;selectDragStartRef.current=null
     selectSnapshotRef.current=null;selectBBoxRef.current=null
   }
+  // Style of the current Select-tool selection, for highlighting which
+  // FIRM/DASH/CONST button is active in SelectDimPanel — just the first
+  // selected entity's style (mixed-style selections show whichever comes
+  // first, same convention the H/D-key toggles below already relied on).
+  function getSelectionStyle(sel){
+    for (const s of sel){
+      if (s.kind==='line') return lines[s.idx]?.style ?? null
+      if (s.kind==='circle') return circles[s.idx]?.style ?? null
+      if (s.kind==='arc') return arcs[s.idx]?.style ?? null
+      if (s.kind==='spline') return splines[s.idx]?.style ?? null
+    }
+    return null
+  }
+  // Shared by the H/D-key shortcuts and SelectDimPanel's FIRM/DASH/CONST
+  // buttons — sets (not toggles) every selected entity to the given style.
+  function applySelectionStyle(newStyle){
+    if (!(tool==='select'&&selection.length>0)) return
+    commit(snapshot())
+    setLines(p=>p.map((l,i)=>selection.some(s=>s.kind==='line'&&s.idx===i)?{...l,style:newStyle||undefined}:l))
+    setCircles(p=>p.map((c,i)=>selection.some(s=>s.kind==='circle'&&s.idx===i)?{...c,style:newStyle||undefined}:c))
+    setArcs(p=>p.map((a,i)=>selection.some(s=>s.kind==='arc'&&s.idx===i)?{...a,style:newStyle||undefined}:a))
+    setSplines(p=>p.map((sp,i)=>selection.some(s=>s.kind==='spline'&&s.idx===i)?{...sp,style:newStyle||undefined}:sp))
+  }
   // Shared by the blind Tab/Enter flow and the visible SelectDimPanel's Apply button.
   function applySelectDims(finalPending){
     commit(snapshot())
@@ -2609,26 +2632,14 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     if ((e.key==='p'||e.key==='P')&&!e.ctrlKey&&!e.shiftKey&&tool==='line'){setPKeyDown(p=>!p);return}
     if ((e.key==='h'||e.key==='H')&&!e.ctrlKey&&!e.shiftKey){
       if (tool==='select'&&selection.length>0){
-        // Toggle dashed on selected entities
-        const newStyle=(lines[selection.find(s=>s.kind==='line')?.idx]?.style==='dashed')?null:'dashed'
-        commit(snapshot())
-        setLines(p=>p.map((l,i)=>selection.some(s=>s.kind==='line'&&s.idx===i)?{...l,style:newStyle||undefined}:l))
-        setCircles(p=>p.map((c,i)=>selection.some(s=>s.kind==='circle'&&s.idx===i)?{...c,style:newStyle||undefined}:c))
-        setArcs(p=>p.map((a,i)=>selection.some(s=>s.kind==='arc'&&s.idx===i)?{...a,style:newStyle||undefined}:a))
-        setSplines(p=>p.map((sp,i)=>selection.some(s=>s.kind==='spline'&&s.idx===i)?{...sp,style:newStyle||undefined}:sp))
+        applySelectionStyle(getSelectionStyle(selection)==='dashed'?null:'dashed')
         return
       }
       else {setDrawStyle(p=>p==='dashed'?null:'dashed');return}
       }
     if ((e.key==='d'||e.key==='D')&&!e.ctrlKey&&!e.shiftKey){
       if (tool==='select'&&selection.length>0){
-        // Toggle construction on selected entities
-        const newStyle=(lines[selection.find(s=>s.kind==='line')?.idx]?.style==='construction')?null:'construction'
-        commit(snapshot())
-        setLines(p=>p.map((l,i)=>selection.some(s=>s.kind==='line'&&s.idx===i)?{...l,style:newStyle||undefined}:l))
-        setCircles(p=>p.map((c,i)=>selection.some(s=>s.kind==='circle'&&s.idx===i)?{...c,style:newStyle||undefined}:c))
-        setArcs(p=>p.map((a,i)=>selection.some(s=>s.kind==='arc'&&s.idx===i)?{...a,style:newStyle||undefined}:a))
-        setSplines(p=>p.map((sp,i)=>selection.some(s=>s.kind==='spline'&&s.idx===i)?{...sp,style:newStyle||undefined}:sp))
+        applySelectionStyle(getSelectionStyle(selection)==='construction'?null:'construction')
         return
       }
       else {setDrawStyle(p=>p==='construction'?null:'construction');return}
@@ -3206,6 +3217,13 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           pending={selectDimPending}
           onChangeField={(key,val)=>setSelectDimPending(p=>({...p,[key]:val}))}
           onApply={()=>applySelectDims(selectDimPending)}
+          styleOptions={[
+            {s:null,          label:'FIRM',  color:'#aaa'},
+            {s:'dashed',      label:'DASH',  color:'#64B5F6'},
+            {s:'construction',label:'CONST', color:'#FF9800'},
+          ]}
+          currentStyle={getSelectionStyle(selection)}
+          onSetStyle={applySelectionStyle}
         />
       )}
       <div style={{width:72,background:'#1e1e1e',display:'flex',flexDirection:'column',padding:'8px 4px',gap:4}}>

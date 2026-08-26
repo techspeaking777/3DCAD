@@ -8,13 +8,21 @@ const SCALE = 2
 // a neighboring edge. Shared by the fillet3d handler and STL export's fallback replay.
 const EDGE_PICK_TOL = 0.75
 // Fuzzy tolerance (mm) for boolean fuse — a face-sketched boss meant to sit
-// flush on another solid's face can end up a hair's-width off (0.01-0.5mm)
-// due to floating-point round-tripping through the sketch's mm<->px
-// conversions. Plain BRepAlgoAPI_Fuse treats that as "not touching" and
-// silently returns a Compound of two still-separate bodies instead of one
-// merged Solid — SetFuzzyValue tells OCC to treat gaps within this tolerance
-// as coincident, same intent as buildExtrude's cut-side OVH protrusion.
-const FUSE_FUZZY_TOL = 0.5
+// flush on another solid's face can end up a hair's-width off due to
+// floating-point round-tripping through the sketch's mm<->px conversions.
+// Plain BRepAlgoAPI_Fuse treats that as "not touching" and silently returns
+// a Compound of two still-separate bodies instead of one merged Solid —
+// SetFuzzyValue tells OCC to treat gaps within this tolerance as coincident,
+// same intent as buildExtrude's cut-side OVH protrusion.
+// Was 0.5 — comfortably covers rounding noise, but also silently swallowed
+// any intentionally-thin wall/gap at that scale: a cutout sketched to leave
+// a precise 0.5mm web of material would get treated as flush with the real
+// edge instead, corrupting the cut into a degenerate sliver rather than
+// preserving the thin wall. 0.05 is still 5x the low end of the original
+// "0.01-0.5mm" round-off estimate this was sized against, so it should still
+// absorb genuine floating-point/round-tripping noise — it just no longer
+// treats a deliberately-designed sub-0.5mm feature as noise too.
+const FUSE_FUZZY_TOL = 0.05
 
 // Fuse two shapes with a fuzzy tolerance so near-coincident (but not exactly
 // touching) faces still merge into one Solid instead of silently degrading to

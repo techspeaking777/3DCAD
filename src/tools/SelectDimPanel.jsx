@@ -7,7 +7,7 @@
 // unchanged by this panel — click a dot there, then type/Apply here.
 import { useDraggablePanel, DragHandle } from './useDraggablePanel.jsx'
 
-export default function SelectDimPanel({style, toolColor, fields, pending, liveValues, onChangeField, onApply}){
+export default function SelectDimPanel({style, toolColor, fields, pending, liveValues, onChangeField, onApply, styleOptions, currentStyle, onSetStyle}){
   const { panelRef, panelStyle, handleProps } = useDraggablePanel()
   return (
     <div ref={panelRef} style={{
@@ -18,6 +18,22 @@ export default function SelectDimPanel({style, toolColor, fields, pending, liveV
       transform:`${style?.transform||''} ${panelStyle.transform}`,
     }}>
       <DragHandle {...handleProps}>Edit</DragHandle>
+      {styleOptions && (
+        <div style={{display:'flex',gap:4,marginBottom:8}}>
+          {styleOptions.map(({s,label,color})=>(
+            <button key={s||'firm'} onClick={()=>onSetStyle(s)} title={label}
+              style={{
+                flex:1,padding:'4px 0',borderRadius:5,cursor:'pointer',
+                fontFamily:'monospace',fontSize:9,letterSpacing:'0.05em',fontWeight:'bold',
+                background: currentStyle===s?color+'33':'#0d0d1a',
+                border:`2px solid ${currentStyle===s?color:'#3a3a5a'}`,
+                color: currentStyle===s?color:'#666',
+              }}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
       <div style={{display:'flex',flexDirection:'column',gap:6}}>
         {fields.map(f=>(
           <label key={f.key} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:6}}>

@@ -1601,6 +1601,29 @@ const App3D = forwardRef(function App3D(props, ref) {
     selectDragHandleRef.current=null;selectDragStartRef.current=null
     selectSnapshotRef.current=null;selectBBoxRef.current=null
   }
+  // Style of the current Select-tool selection, for highlighting which
+  // FIRM/CONST button is active in SelectDimPanel — just the first selected
+  // entity's style (mixed-style selections show whichever comes first, same
+  // convention the D-key toggle below already relied on).
+  function getSelectionStyle(sel){
+    for (const s of sel){
+      if (s.kind==='line') return lines[s.idx]?.style ?? null
+      if (s.kind==='circle') return circles[s.idx]?.style ?? null
+      if (s.kind==='arc') return arcs[s.idx]?.style ?? null
+      if (s.kind==='spline') return splines[s.idx]?.style ?? null
+    }
+    return null
+  }
+  // Shared by the D-key shortcut and SelectDimPanel's FIRM/CONST buttons —
+  // sets (not toggles) every selected entity to the given style.
+  function applySelectionStyle(newStyle){
+    if (!(tool==='select'&&selection.length>0)) return
+    commit(snapshot())
+    setLines(p=>p.map((l,i)=>selection.some(s=>s.kind==='line'&&s.idx===i)?{...l,style:newStyle||undefined}:l))
+    setCircles(p=>p.map((c,i)=>selection.some(s=>s.kind==='circle'&&s.idx===i)?{...c,style:newStyle||undefined}:c))
+    setArcs(p=>p.map((a,i)=>selection.some(s=>s.kind==='arc'&&s.idx===i)?{...a,style:newStyle||undefined}:a))
+    setSplines(p=>p.map((sp,i)=>selection.some(s=>s.kind==='spline'&&s.idx===i)?{...sp,style:newStyle||undefined}:sp))
+  }
   // Shared by the blind Tab/Enter flow and the visible SelectDimPanel's Apply
   // button (see SelectDimPanel.jsx) — applies whichever dimension fields were
   // typed (Length/Angle for a line, Radius for a circle, Radius/Angle for an
@@ -3340,13 +3363,15 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (!geo || (!geo.lines.length && !geo.circles.length && !geo.arcs.length)) return true
     const tag = planeTag()
     commit(snapshot())
-    // includedEdge:true (alongside style:'construction') lets detectProfiles
-    // still treat this as a real boundary segment — see its own comment —
-    // while the construction styling keeps it visually distinct from
-    // geometry actually drawn in this sketch.
-    if (geo.lines.length)   setLines  (prev => [...prev, ...geo.lines  .map(s => ({ ...s, style:'construction', includedEdge:true, ...tag }))])
-    if (geo.circles.length) setCircles(prev => [...prev, ...geo.circles.map(s => ({ ...s, style:'construction', includedEdge:true, ...tag }))])
-    if (geo.arcs.length)    setArcs   (prev => [...prev, ...geo.arcs   .map(s => ({ ...s, style:'construction', includedEdge:true, ...tag }))])
+    // includedEdge:true lets detectProfiles still treat this as a real
+    // boundary segment (see its own comment) and lets its junction
+    // disambiguation deprioritize it as a loop-start candidate. Style is
+    // left firm (not construction) — an included edge is usually meant to
+    // BE part of the new profile's actual boundary, not reference-only
+    // geometry, so it should look the same as geometry drawn by hand.
+    if (geo.lines.length)   setLines  (prev => [...prev, ...geo.lines  .map(s => ({ ...s, includedEdge:true, ...tag }))])
+    if (geo.circles.length) setCircles(prev => [...prev, ...geo.circles.map(s => ({ ...s, includedEdge:true, ...tag }))])
+    if (geo.arcs.length)    setArcs   (prev => [...prev, ...geo.arcs   .map(s => ({ ...s, includedEdge:true, ...tag }))])
     setIncludeEdgeSel(prev => [...prev, { solidId: hit.solidId, edgeId: hit.edgeId }])
     return true
   }
@@ -7753,13 +7778,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if ((e.key==='p'||e.key==='P')&&!e.ctrlKey&&!e.shiftKey&&tool==='line'){setPKeyDown(p=>!p);return}
     if ((e.key==='d'||e.key==='D')&&!e.ctrlKey&&!e.shiftKey){
       if (tool==='select'&&selection.length>0){
-        // Toggle construction on selected entities
-        const newStyle=(lines[selection.find(s=>s.kind==='line')?.idx]?.style==='construction')?null:'construction'
-        commit(snapshot())
-        setLines(p=>p.map((l,i)=>selection.some(s=>s.kind==='line'&&s.idx===i)?{...l,style:newStyle||undefined}:l))
-        setCircles(p=>p.map((c,i)=>selection.some(s=>s.kind==='circle'&&s.idx===i)?{...c,style:newStyle||undefined}:c))
-        setArcs(p=>p.map((a,i)=>selection.some(s=>s.kind==='arc'&&s.idx===i)?{...a,style:newStyle||undefined}:a))
-        setSplines(p=>p.map((sp,i)=>selection.some(s=>s.kind==='spline'&&s.idx===i)?{...sp,style:newStyle||undefined}:sp))
+        applySelectionStyle(getSelectionStyle(selection)==='construction'?null:'construction')
         return
       }
       else {setDrawStyle(p=>p==='construction'?null:'construction');return}
@@ -8581,6 +8600,12 @@ const App3D = forwardRef(function App3D(props, ref) {
           pending={selectDimPending}
           onChangeField={(key,val)=>setSelectDimPending(p=>({...p,[key]:val}))}
           onApply={()=>applySelectDims(selectDimPending)}
+          styleOptions={[
+            {s:null,          label:'FIRM',  color:'#aaa'},
+            {s:'construction',label:'CONST', color:'#FF9800'},
+          ]}
+          currentStyle={getSelectionStyle(selection)}
+          onSetStyle={applySelectionStyle}
         />
       )}
 

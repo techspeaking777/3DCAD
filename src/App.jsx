@@ -1130,7 +1130,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       applyEntityStyle(ctx,line,sc,color,baseLW)
       ctx.beginPath();ctx.moveTo(line.x1,line.y1);ctx.lineTo(line.x2,line.y2);ctx.stroke();ctx.setLineDash([])
       ;[{x:line.x1,y:line.y1},{x:line.x2,y:line.y2}].forEach(p=>{
-        ctx.beginPath();ctx.arc(p.x,p.y,1.5/sc,0,Math.PI*2);ctx.fillStyle=color;ctx.fill()
+        ctx.beginPath();ctx.arc(p.x,p.y,2/sc,0,Math.PI*2);ctx.fillStyle=color;ctx.fill()
       })
     })
 
@@ -1201,7 +1201,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       // Smooth splines: show control point dots
       if (!sp.polyline){
         sp.points.forEach(p=>{
-          ctx.beginPath();ctx.arc(p.x,p.y,1.5/sc,0,Math.PI*2)
+          ctx.beginPath();ctx.arc(p.x,p.y,2/sc,0,Math.PI*2)
           ctx.fillStyle=color==='#222'?'#888':color;ctx.fill()
         })
       }

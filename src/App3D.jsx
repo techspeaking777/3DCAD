@@ -2634,7 +2634,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     // connection points clearly (like Image 4 in the reference).
     if (sketchMode) {
       const dotColor = '#111111'
-      const dotR = 4/sc
+      const dotR = 2/sc
       const drawn = new Set()
       const dot = (x, y) => {
         const key = `${Math.round(x*10)},${Math.round(y*10)}`

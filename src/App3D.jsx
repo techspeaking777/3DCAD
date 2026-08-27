@@ -17,7 +17,7 @@ import { nearestFilletLine, computeFillet } from './tools/filletMath.js'
 import { computeExtendPreview } from './tools/extendMath.js'
 import { sampleSpline, nearestSpline, computeSplineTrimPreview, performSplineTrim, distToSpline } from './tools/splineMath.js'
 import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform } from './tools/selectMath.js'
-import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine } from './draw/drawHelpers.js'
+import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine, perpLabelOffset } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
 import { saveJSON, loadJSON, exportDXF, parseDXF, saveProjectAs, canPickSaveLocation, exportFaceDXF as writeFaceDXF, saveBlobAs, saveProjectFileAs, loadProjectFile } from './tools/saveLoad.js'
 import { detectProfiles, buildSolid, pickProfile } from './tools/extrudeMath.js'
@@ -3103,7 +3103,8 @@ const App3D = forwardRef(function App3D(props, ref) {
         }
         const lenMm=pxToMm(Math.hypot(endPt.x-startPoint.x,endPt.y-startPoint.y))
         const midX=(startPoint.x+endPt.x)/2,midY=(startPoint.y+endPt.y)/2
-        drawLabel(ctx,(dimLocked?'🔒 ':'')+lenMm.toFixed(1)+' mm',midX,midY-2/sc,'#00BCD4',sc)
+        const dimOff=perpLabelOffset(endPt.x-startPoint.x,endPt.y-startPoint.y,16/sc)
+        drawLabel(ctx,(dimLocked?'🔒 ':'')+lenMm.toFixed(1)+' mm',midX+dimOff.x,midY+dimOff.y,'#00BCD4',sc)
       } else {
       const hSnap=getGeoSnap(mousePos,snapLines,snapCircles,snapArcs,startPoint,tKeyDown,splines,intersectionPts)
       let endPt,isTanEnd=false
@@ -3124,8 +3125,16 @@ const App3D = forwardRef(function App3D(props, ref) {
       drawPreviewLine(ctx,startPoint.x,startPoint.y,endPt.x,endPt.y,sketchLineColor,1,sc)
       ctx.save();ctx.translate(startPoint.x,startPoint.y);ctx.scale(1/sc,1/sc);ctx.beginPath();ctx.arc(0,0,4,0,Math.PI*2)
       ctx.fillStyle=sketchLineColor;ctx.fill();ctx.lineWidth=1.5;ctx.strokeStyle='#ffffff';ctx.stroke();ctx.restore()
-      drawLabel(ctx,(dimLocked?'🔒 ':'')+(dimInput||lenMm.toFixed(1))+' mm',midX,midY-2/sc,dimLocked?'#FF9800':focusField==='dim'?'#1565C0':'#2196F3',sc)
-      if (!isTanEnd) drawLabel(ctx,(angleLocked?'🔒 ':'')+(angleInput||computeLiveAngle(startPoint,endPt).toFixed(1))+'°',midX,midY+22/sc,angleLocked?'#FF9800':focusField==='angle'?'#6A1B9A':'#9C27B0',sc)
+      const dimOff=perpLabelOffset(endPt.x-startPoint.x,endPt.y-startPoint.y,16/sc)
+      // Angle label stacks a fixed screen-vertical gap above the dim label
+      // rather than further out along the same perpendicular — for a
+      // near-vertical line the perpendicular is nearly horizontal, and
+      // pushing the angle label further along it just placed both pill
+      // labels side by side with barely a gap between them. A plain vertical
+      // offset keeps them stacked (never side-by-side) at any line angle.
+      const angOff={x:dimOff.x,y:dimOff.y-24/sc}
+      drawLabel(ctx,(dimLocked?'🔒 ':'')+(dimInput||lenMm.toFixed(1))+' mm',midX+dimOff.x,midY+dimOff.y,dimLocked?'#FF9800':focusField==='dim'?'#1565C0':'#2196F3',sc)
+      if (!isTanEnd) drawLabel(ctx,(angleLocked?'🔒 ':'')+(angleInput||computeLiveAngle(startPoint,endPt).toFixed(1))+'°',midX+angOff.x,midY+angOff.y,angleLocked?'#FF9800':focusField==='angle'?'#6A1B9A':'#9C27B0',sc)
       if (isTanEnd) drawLineIndicator(ctx,endPt.x,endPt.y,'tan',sc)
       } // end !pKeyDown
 

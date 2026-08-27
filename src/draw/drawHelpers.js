@@ -74,6 +74,20 @@ export function drawTracks(ctx, tracks, trackedPts, viewScale=1) {
   ctx.restore()
 }
 
+// Offsets a label perpendicular to a line's direction rather than by a fixed
+// screen-Y amount — a fixed vertical offset barely clears a near-horizontal
+// line (the label ends up hugging it), while a perpendicular offset stays
+// clear of the line at any angle. The sign is normalized (prefer py<0, or
+// px>0 in the degenerate horizontal-perp case for an exactly vertical line)
+// so the label lands on the same side regardless of which end the line was
+// dragged from — swapping dx/dy's sign would otherwise flip it.
+export function perpLabelOffset(dx, dy, dist) {
+  const len = Math.hypot(dx, dy) || 1
+  let px = -dy / len, py = dx / len
+  if (py > 0 || (py === 0 && px < 0)) { px = -px; py = -py }
+  return { x: px * dist, y: py * dist }
+}
+
 export function drawLabel(ctx, label, cx, cy, color, viewScale=1) {
   ctx.save()
   ctx.translate(cx, cy)

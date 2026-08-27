@@ -11,7 +11,7 @@ import { nearestScaleEntity, buildScaled } from './tools/scaleMath.js'
 import { nearestFilletLine, computeFillet } from './tools/filletMath.js'
 import { computeExtendPreview } from './tools/extendMath.js'
 import { sampleSpline, nearestSpline, computeSplineTrimPreview, performSplineTrim, distToSpline } from './tools/splineMath.js'
-import { selectionBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform } from './tools/selectMath.js'
+import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform } from './tools/selectMath.js'
 import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
 import { saveJSON, loadJSON, exportDXF, parseDXF, saveProjectAs, canPickSaveLocation } from './tools/saveLoad.js'
@@ -548,25 +548,29 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
            (tool==='fillet'&&!filletAccepted)
   }
 
-  // Execute a drag-window select: add all entities with any point inside rect to current tool's selection
+  // Execute a drag-window select: add entities fully enclosed by rect to current
+  // tool's selection — a window select shouldn't pick up geometry the box
+  // merely crosses. Compares each entity's own bounding box (entityBBox)
+  // against the rect rather than testing individual points.
   function executeDragSelect(rect){
     const minX=Math.min(rect.x1,rect.x2),maxX=Math.max(rect.x1,rect.x2)
     const minY=Math.min(rect.y1,rect.y2),maxY=Math.max(rect.y1,rect.y2)
-    const ptIn=(x,y)=>x>=minX&&x<=maxX&&y>=minY&&y<=maxY
+    const fullyIn=(kind,entity)=>{
+      const b=entityBBox(kind,entity)
+      return b.x1>=minX&&b.x2<=maxX&&b.y1>=minY&&b.y2<=maxY
+    }
     const hits=[]
     linesRef.current.forEach((l,idx)=>{
-      if(ptIn(l.x1,l.y1)||ptIn(l.x2,l.y2)) hits.push({kind:'line',idx})
+      if(fullyIn('line',l)) hits.push({kind:'line',idx})
     })
     circlesRef.current.forEach((c,idx)=>{
-      if(ptIn(c.cx,c.cy)||ptIn(c.cx+c.r,c.cy)||ptIn(c.cx-c.r,c.cy)) hits.push({kind:'circle',idx})
+      if(fullyIn('circle',c)) hits.push({kind:'circle',idx})
     })
     arcsRef.current.forEach((arc,idx)=>{
-      const p1x=arc.cx+arc.r*Math.cos(arc.startAngle),p1y=arc.cy+arc.r*Math.sin(arc.startAngle)
-      const p2x=arc.cx+arc.r*Math.cos(arc.endAngle),p2y=arc.cy+arc.r*Math.sin(arc.endAngle)
-      if(ptIn(arc.cx,arc.cy)||ptIn(p1x,p1y)||ptIn(p2x,p2y)) hits.push({kind:'arc',idx})
+      if(fullyIn('arc',arc)) hits.push({kind:'arc',idx})
     })
     splinesRef.current.forEach((sp,idx)=>{
-      if(sp.points.some(p=>ptIn(p.x,p.y))) hits.push({kind:'spline',idx})
+      if(fullyIn('spline',sp)) hits.push({kind:'spline',idx})
     })
     const merge=(prev)=>{
       const m=[...prev]
@@ -2090,16 +2094,22 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       if (dragStartRef.current){
         if (dragRectRef.current){
           if (tool==='select'){
-            // Select tool drag window — builds selection
+            // Select tool drag window — builds selection. Only entities fully
+            // enclosed by the rect count (entityBBox comparison), matching
+            // executeDragSelect's convention for the Move/Rotate/Scale tools —
+            // a window select shouldn't pick up geometry the box merely crosses.
             const rect=dragRectRef.current
             const minX=Math.min(rect.x1,rect.x2),maxX=Math.max(rect.x1,rect.x2)
             const minY=Math.min(rect.y1,rect.y2),maxY=Math.max(rect.y1,rect.y2)
-            const ptIn=(x,y)=>x>=minX&&x<=maxX&&y>=minY&&y<=maxY
+            const fullyIn=(kind,entity)=>{
+              const b=entityBBox(kind,entity)
+              return b.x1>=minX&&b.x2<=maxX&&b.y1>=minY&&b.y2<=maxY
+            }
             const hits=[]
-            linesRef.current.forEach((l,idx)=>{if(ptIn(l.x1,l.y1)||ptIn(l.x2,l.y2))hits.push({kind:'line',idx})})
-            circlesRef.current.forEach((c,idx)=>{if(ptIn(c.cx-c.r,c.cy)||ptIn(c.cx+c.r,c.cy)||ptIn(c.cx,c.cy-c.r)||ptIn(c.cx,c.cy+c.r))hits.push({kind:'circle',idx})})
-            arcsRef.current.forEach((arc,idx)=>{if(ptIn(arc.cx,arc.cy))hits.push({kind:'arc',idx})})
-            splinesRef.current.forEach((sp,idx)=>{if(sp.points.some(p=>ptIn(p.x,p.y)))hits.push({kind:'spline',idx})})
+            linesRef.current.forEach((l,idx)=>{if(fullyIn('line',l))hits.push({kind:'line',idx})})
+            circlesRef.current.forEach((c,idx)=>{if(fullyIn('circle',c))hits.push({kind:'circle',idx})})
+            arcsRef.current.forEach((arc,idx)=>{if(fullyIn('arc',arc))hits.push({kind:'arc',idx})})
+            splinesRef.current.forEach((sp,idx)=>{if(fullyIn('spline',sp))hits.push({kind:'spline',idx})})
             setSelection(hits)
             wasDragRef.current=true
           } else {

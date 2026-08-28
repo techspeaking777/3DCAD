@@ -119,13 +119,14 @@ const ISO_VIEW = {
 }
 
 // Fixed camera half-height (world units, 1mm = 2 units) used when actually
-// entering a sketch — 400 gives a 400mm default view, comfortable framing for
-// a ~300mm print-bed-sized part without inheriting whatever zoom level the
-// general 3D orbit view happens to be at (which the user can zoom out from
-// freely — see the camera setup below — making mouse drags in the 2D sketch
-// profile correspond to huge, unusable mm distances if the sketch view just
-// reused it unchanged).
-const SKETCH_FRUST_H = 400
+// entering a sketch — 267 gives a ~267mm default view, comfortable framing
+// for a ~200mm print-bed-sized part (same ~4:3 view-to-part ratio the
+// constant originally used for a 300mm bed) without inheriting whatever zoom
+// level the general 3D orbit view happens to be at (which the user can zoom
+// out from freely — see the camera setup below — making mouse drags in the
+// 2D sketch profile correspond to huge, unusable mm distances if the sketch
+// view just reused it unchanged).
+const SKETCH_FRUST_H = 267
 
 const TWEEN_MS = 420   // animation duration in milliseconds
 

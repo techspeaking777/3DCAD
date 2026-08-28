@@ -392,8 +392,44 @@ const EXTRUDE_STEPS = [
   { id: 3, label: 'Set Depth' },
 ]
 
+// Live offset-distance input, anchored (via the parent action button's own
+// position:relative wrapper in SmartStepBar — see the `popover` field on an
+// action) directly above whichever button currently represents "commit the
+// offset plane". Shared between Mirror3D and Extrude/Cutout so both tools'
+// offset-plane UI reads identically, not just their SmartStepBar buttons.
+// Deliberately has no onKeyDown of its own — Enter is handled by each
+// caller's own handleKeyDown block, relying on the keydown bubbling up
+// naturally, so adding a local handler here would risk double-committing.
+function OffsetDistancePopover({ color, value, onChange }) {
+  return (
+    <div style={{
+      position:'absolute', bottom:'calc(100% + 8px)', left:'50%', transform:'translateX(-50%)',
+      zIndex:200, background:'rgba(12,12,26,0.97)', border:`2px solid ${color}`,
+      borderRadius:8, padding:'10px 16px', display:'flex', alignItems:'center', gap:10, whiteSpace:'nowrap',
+    }}>
+      <span style={{fontFamily:'monospace',fontSize:11,fontWeight:'bold',color,letterSpacing:'0.08em'}}>OFFSET</span>
+      <input
+        type="number"
+        autoFocus
+        value={value}
+        onChange={e=>onChange(e.target.value)}
+        style={{width:70,textAlign:'center',fontFamily:'monospace',fontSize:14,fontWeight:'bold',
+          background:'#0d0d1a',color:'#fff',border:`2px solid ${color}`,borderRadius:6,padding:'4px 6px'}}
+      />
+      <span style={{fontFamily:'monospace',fontSize:11,color:'#888'}}>mm</span>
+    </div>
+  )
+}
+
 function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEPS, hint = null, action = null }) {
   if (!op) return null
+  // `action` accepts either a single {label,enabled,onClick} (every existing
+  // call site) or an array of them, for tools that need more than one
+  // independent button in the bar at once (e.g. Extrude's "Hide/Show Planes"
+  // alongside its own "+ Offset Plane" toggle — two genuinely unrelated
+  // concerns, unlike Mirror's single action slot which only ever needs to
+  // morph between one button's states).
+  const actions = action ? (Array.isArray(action) ? action : [action]) : []
 
   return (
     <div style={{
@@ -546,21 +582,30 @@ function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEP
       {/* Optional visible confirm button — the clickable equivalent of
           whatever Enter/Tab/right-click already does, so open-ended
           selection-count steps (Join3D, Export STL) don't require knowing
-          a hidden keyboard gesture. The keyboard shortcuts keep working. */}
-      {action && (
-        <button
-          onClick={action.onClick}
-          disabled={!action.enabled}
-          style={{
-            marginRight: 16, padding:'5px 14px', borderRadius: 20, border:'none',
-            background: action.enabled ? color : '#2a2a4a',
-            color: action.enabled ? '#0d0d1a' : '#666',
-            fontFamily:'monospace', fontWeight:'bold', fontSize: 11,
-            cursor: action.enabled ? 'pointer' : 'default',
-          }}>
-          {action.label}
-        </button>
-      )}
+          a hidden keyboard gesture. The keyboard shortcuts keep working.
+          Each action can also carry a `popover` node (e.g. Mirror/Extrude's
+          live offset-distance input) — wrapping the button in its own
+          position:relative box and anchoring the popover with pure CSS
+          (bottom:100%, centered) means it visually reads as belonging to
+          that exact button with no ref/getBoundingClientRect bookkeeping,
+          and it stays correctly placed even if the bar's layout shifts. */}
+      {actions.map((a, i) => (
+        <div key={i} style={{ position: 'relative', marginRight: 16 }}>
+          <button
+            onClick={a.onClick}
+            disabled={!a.enabled}
+            style={{
+              padding:'5px 14px', borderRadius: 20, border:'none',
+              background: a.enabled ? color : '#2a2a4a',
+              color: a.enabled ? '#0d0d1a' : '#666',
+              fontFamily:'monospace', fontWeight:'bold', fontSize: 11,
+              cursor: a.enabled ? 'pointer' : 'default',
+            }}>
+            {a.label}
+          </button>
+          {a.popover}
+        </div>
+      ))}
 
       {/* Esc hint */}
       <span style={{
@@ -1048,6 +1093,15 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [extrudeTool,setExtrudeTool]=useState(null)
   const [extrudeState,setExtrudeState]=useState(null)
   const [editingFeatureId,setEditingFeatureId]=useState(null)
+  // Offset (parallel) plane for Extrude/Cutout step 1 — same idea as
+  // Mirror3D's own offset-plane pick (mirror3dOffsetMode/Base/DistInput
+  // below), kept as a separate parallel implementation rather than shared
+  // state/functions since Loft's offset math (buildLoftFacePlane) is
+  // likewise its own independent copy — this stays additive-only with zero
+  // risk to Mirror's already-shipped behavior.
+  const [extrudeOffsetMode,setExtrudeOffsetMode]=useState(false)
+  const [extrudeOffsetBase,setExtrudeOffsetBase]=useState(null)
+  const [extrudeOffsetDistInput,setExtrudeOffsetDistInput]=useState('20')
   const extrudePanelDrag = useDraggablePanel()
   const cutoutPanelDrag = useDraggablePanel()
   const loftPanelDrag = useDraggablePanel()
@@ -3511,6 +3565,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (tool==='join3d') return
     if (tool==='loft3d' && !loftState) { startLoftProfile1({ kind:'face', facePlane }); return }
     if (tool==='exportfacedxf') { handleExportFaceDXFFaceClick(facePlane); return }
+    if (extrudeTool && extrudeOffsetMode) { handleExtrudeOffsetPlanePick({ kind:'face', facePlane }); return }
     if (extrudeState) return  // step 3 (depth): ignore stray face clicks
     enterSketch(facePlane)
     viewport3dRef.current?.snapToFace(facePlane)
@@ -3519,6 +3574,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   function handlePlaneClick({ id }) {
     if (tool==='mirror3d' && mirror3dSelectionDone) { handleMirror3DPlanePick({ kind:'workplane', planeId:id }); return }
     if (tool==='loft3d' && !loftState) { startLoftProfile1({ kind:'workplane', planeId:id }); return }
+    if (extrudeTool && extrudeOffsetMode) { handleExtrudeOffsetPlanePick({ kind:'workplane', planeId:id }); return }
     if (extrudeState) return  // step 3 (depth): ignore stray plane clicks
     // Work planes pass through/near the model with no occlusion check against
     // solids in front of them (see WorkPlanes.js's hitTestPlanes) — clicking an
@@ -3848,6 +3904,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     setLines([]); setCircles([]); setArcs([]); setSplines([])
     if (extrudeTool) {
       setExtrudeTool(null); setExtrudeState(null); setEditingFeatureId(null)
+      setExtrudeOffsetMode(false); setExtrudeOffsetBase(null); setExtrudeOffsetDistInput('20')
+      viewport3dRef.current?.hideOffsetPlanePreview()
     }
     if (loftState) {
       resetLoft3D()
@@ -3880,6 +3938,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     setExtrudeHandlePos(null)
     setEditingFeatureId(null)
     setHidePlanesForExtrude(false)
+    setExtrudeOffsetMode(false)
+    setExtrudeOffsetBase(null)
+    setExtrudeOffsetDistInput('20')
+    viewport3dRef.current?.hideOffsetPlanePreview()
     // Fresh canvas for the integrated sketch (step 2)
     setLines([]); setCircles([]); setArcs([]); setSplines([])
     setCachedProfiles([])
@@ -4899,6 +4961,72 @@ const App3D = forwardRef(function App3D(props, ref) {
     const fp = mirror3dOffsetFacePlane()
     if (fp) viewport3dRef.current?.showOffsetPlanePreview({ origin: fp.origin, normal: fp.normal, uAxis: fp.uAxis, vAxis: fp.vAxis })
   }, [tool, mirror3dOffsetBase, mirror3dOffsetDistInput])
+
+  // ── Extrude/Cutout step 1: offset (parallel) plane — same idea as Mirror's
+  // offset plane just above, kept as its own parallel implementation (see
+  // the extrudeOffsetMode state comment for why). ──
+  function extrudeOffsetFacePlane() {
+    if (!extrudeOffsetBase) return null
+    const basis = extrudeOffsetBase.kind === 'face'
+      ? extrudeOffsetBase.facePlane
+      : planeIdBasis(extrudeOffsetBase.planeId)
+    const distMm = parseFloat(extrudeOffsetDistInput) || 0
+    const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(distMm))
+    const vAxis = new THREE.Vector3().crossVectors(basis.normal, basis.uAxis).normalize()
+    return new FacePlane(origin, basis.normal, basis.uAxis, vAxis)
+  }
+
+  function handleExtrudeOffsetPlanePick(pick) {
+    if (!extrudeOffsetBase) setExtrudeOffsetBase(pick)
+    else commitExtrudeOffset()  // base already picked — any further click accepts the live distance
+  }
+
+  // Commits through the exact same enterSketch(facePlane) path a directly-
+  // picked face/plane already uses (handleFaceClick/handlePlaneClick) — no
+  // separate entry point, no worker changes. Resets the offset state back to
+  // defaults so stepping back to step 1 later (SmartStepBar onStepBack)
+  // doesn't show stale "offset mode on" UI.
+  function commitExtrudeOffset() {
+    const facePlane = extrudeOffsetFacePlane()
+    if (!facePlane) return
+    enterSketch(facePlane)
+    viewport3dRef.current?.snapToFace(facePlane)
+    setExtrudeOffsetMode(false)
+    setExtrudeOffsetBase(null)
+    viewport3dRef.current?.hideOffsetPlanePreview()
+  }
+
+  // Drag-to-set-distance — same projection math as handleMirror3DOffsetDragMove
+  // just above, gated on the extrude offset state instead of Mirror's.
+  function handleExtrudeOffsetDragMove(e) {
+    if (!extrudeTool || !extrudeOffsetBase) return
+    const vp = viewport3dRef.current
+    if (!vp) return
+    const basis = extrudeOffsetBase.kind === 'face' ? extrudeOffsetBase.facePlane : planeIdBasis(extrudeOffsetBase.planeId)
+    const p0 = vp.worldToScreen(basis.origin.x, basis.origin.y, basis.origin.z)
+    const p1 = vp.worldToScreen(
+      basis.origin.x + basis.normal.x * 2,
+      basis.origin.y + basis.normal.y * 2,
+      basis.origin.z + basis.normal.z * 2,
+    )
+    if (!p0 || !p1) return
+    const dx = p1.x - p0.x, dy = p1.y - p0.y
+    const pxPerMm = Math.hypot(dx, dy)
+    if (!pxPerMm) return
+    const vpRect = vp.getDomElement?.()?.parentElement?.getBoundingClientRect?.()
+    if (!vpRect) return
+    const mx = e.clientX - vpRect.left, my = e.clientY - vpRect.top
+    const proj = (mx - p0.x) * (dx / pxPerMm) + (my - p0.y) * (dy / pxPerMm)
+    let mm = proj / pxPerMm
+    if (gridSnap) mm = Math.round(mm / gridSizeMm) * gridSizeMm
+    setExtrudeOffsetDistInput(String(Math.round(mm * 100) / 100))
+  }
+
+  useEffect(() => {
+    if (!extrudeTool || !extrudeOffsetBase) { viewport3dRef.current?.hideOffsetPlanePreview(); return }
+    const fp = extrudeOffsetFacePlane()
+    if (fp) viewport3dRef.current?.showOffsetPlanePreview({ origin: fp.origin, normal: fp.normal, uAxis: fp.uAxis, vAxis: fp.vAxis })
+  }, [extrudeTool, extrudeOffsetBase, extrudeOffsetDistInput])
 
   // Mirroring an EXTRUDE/REVOLVE produces a completely separate new solid —
   // not fused with the source (a future "Union (Join)" tool handles merging
@@ -7140,6 +7268,18 @@ const App3D = forwardRef(function App3D(props, ref) {
       return
     }
 
+    // Extrude/Cutout step 1, offset-plane base already picked — accept the
+    // live drag distance on ANY canvas click, not just one that happens to
+    // land on a plane/face (those route through handleExtrudeOffsetPlanePick
+    // instead, via sketchArmed's onFaceClick/onPlaneClick). Must run before
+    // the extrudeTool interceptor just below — that one unconditionally
+    // returns for every step-1 click (handleExtrudeClick is a no-op with no
+    // profile drawn yet), so this would never be reached after it.
+    if (extrudeTool && extrudeOffsetBase) {
+      commitExtrudeOffset()
+      return
+    }
+
     // ── Extrude / Cutout tool: only intercept outside sketch mode ──
     // Step 2 (sketch mode): clicks belong to sketch tools, not extrude handler
     if (extrudeTool && !sketchMode) {
@@ -7939,6 +8079,22 @@ const App3D = forwardRef(function App3D(props, ref) {
       resetJoin();resetDim()
       return
     }
+    if (e.key==='Enter'&&extrudeTool&&extrudeOffsetBase){
+      // Confirm the live offset distance and commit — see the offset-plane
+      // popup, the only other place Enter means anything for this step.
+      e.preventDefault()
+      commitExtrudeOffset()
+      return
+    }
+    if (e.key==='Escape'&&extrudeTool&&extrudeOffsetMode){
+      // Backs out one level at a time, same convention as Mirror3D's own
+      // offset-plane Escape handling — must run before the catch-all
+      // Escape+extrudeTool block just below, which would otherwise cancel
+      // the whole tool first (same ordering pitfall the chain-line Escape
+      // handler hit earlier).
+      if (extrudeOffsetBase) { setExtrudeOffsetBase(null); return }
+      setExtrudeOffsetMode(false); return
+    }
     if (e.key==='Escape'&&extrudeTool){
       // Cancel from step 3 (depth) — restore any hidden solid
       restoreHiddenEditSolid()
@@ -8676,7 +8832,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   return (
     <div ref={rootDivRef} style={{display:'flex',height:'100%',outline:'none'}} tabIndex={0}
       onKeyDown={handleKeyDown}
-      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e); handleMirror3DOffsetDragMove(e) }}
+      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e); handleMirror3DOffsetDragMove(e); handleExtrudeOffsetDragMove(e) }}
       onMouseUp={e=>{ }}
     >
 
@@ -9160,10 +9316,28 @@ const App3D = forwardRef(function App3D(props, ref) {
               sketchMode    ? 2 : 1
             }
             color={extrudeTool === 'cutout' ? '#e05a4e' : '#3a7bd5'}
+            hint={(!extrudeState && !sketchMode)
+              ? (extrudeOffsetBase
+                  ? 'Move the mouse or type a distance, Enter to confirm'
+                  : extrudeOffsetMode
+                    ? 'Click a plane or face to offset from'
+                    : null)
+              : null}
             action={
               (!extrudeState && !sketchMode)
-                ? { label: hidePlanesForExtrude ? '◻ Show Planes' : '◻ Hide Planes', enabled:true,
-                    onClick: () => setHidePlanesForExtrude(p => !p) }
+                ? [
+                    { label: hidePlanesForExtrude ? '◻ Show Planes' : '◻ Hide Planes', enabled:true,
+                      onClick: () => setHidePlanesForExtrude(p => !p) },
+                    extrudeOffsetBase
+                      ? { label:'✓ Use Plane', enabled:true, onClick:commitExtrudeOffset,
+                          popover: <OffsetDistancePopover color={extrudeTool === 'cutout' ? '#e05a4e' : '#3a7bd5'}
+                            value={extrudeOffsetDistInput} onChange={setExtrudeOffsetDistInput}/> }
+                      : { label: extrudeOffsetMode ? '✕ Cancel Offset' : '+ Offset Plane', enabled:true,
+                          onClick:()=>{
+                            if (extrudeOffsetMode) { setExtrudeOffsetMode(false); setExtrudeOffsetBase(null) }
+                            else setExtrudeOffsetMode(true)
+                          }},
+                  ]
                 : null
             }
             onStepBack={step => {
@@ -9241,7 +9415,8 @@ const App3D = forwardRef(function App3D(props, ref) {
             action={!mirror3dSelectionDone
               ? {label:'✓ Next', enabled:mirror3dSel.length>0, onClick:()=>setMirror3dSelectionDone(true)}
               : mirror3dOffsetBase
-                ? {label:'✓ Use Plane', enabled:true, onClick:commitMirror3DOffset}
+                ? {label:'✓ Use Plane', enabled:true, onClick:commitMirror3DOffset,
+                    popover: <OffsetDistancePopover color="#8E65F3" value={mirror3dOffsetDistInput} onChange={setMirror3dOffsetDistInput}/>}
                 : {label: mirror3dOffsetMode ? '✕ Cancel Offset' : '+ Offset Plane', enabled:true,
                     onClick:()=>{
                       if (mirror3dOffsetMode) { setMirror3dOffsetMode(false); setMirror3dOffsetBase(null) }
@@ -9253,38 +9428,6 @@ const App3D = forwardRef(function App3D(props, ref) {
               if (step === 1) { setMirror3dSelectionDone(false); setMirror3dOffsetMode(false); setMirror3dOffsetBase(null) }
             }}
           />
-
-          {/* ── Mirror3D offset-plane distance popup — fixed, geometry-
-              independent dock above the SmartStepBar, same reasoning as the
-              Extrude "Set Depth" popup (extrudeHandlePos): a bottom-center
-              CSS dock never overlaps the canvas regardless of where the
-              picked base plane actually sits on screen. Enter is handled by
-              handleKeyDown's mirror3d block (this input has no onKeyDown of
-              its own — the keydown bubbles up naturally), so there's no risk
-              of double-committing. */}
-          {tool==='mirror3d' && mirror3dOffsetBase && (
-            <div style={{
-              position:'absolute', left:'50%', bottom:70, transform:'translateX(-50%)',
-              zIndex:200, background:'rgba(12,12,26,0.97)', border:'2px solid #8E65F3',
-              borderRadius:8, padding:'10px 16px', display:'flex', alignItems:'center', gap:10,
-            }}>
-              <span style={{fontFamily:'monospace',fontSize:11,fontWeight:'bold',color:'#8E65F3',letterSpacing:'0.08em'}}>OFFSET</span>
-              <input
-                type="number"
-                autoFocus
-                value={mirror3dOffsetDistInput}
-                onChange={e=>setMirror3dOffsetDistInput(e.target.value)}
-                style={{width:70,textAlign:'center',fontFamily:'monospace',fontSize:14,fontWeight:'bold',
-                  background:'#0d0d1a',color:'#fff',border:'2px solid #8E65F3',borderRadius:6,padding:'4px 6px'}}
-              />
-              <span style={{fontFamily:'monospace',fontSize:11,color:'#888'}}>mm</span>
-              <button onClick={commitMirror3DOffset}
-                style={{fontFamily:'monospace',fontSize:11,fontWeight:'bold',color:'#69F0AE',
-                  background:'#1a3a2a',border:'2px solid #69F0AE',borderRadius:4,padding:'5px 12px',cursor:'pointer'}}>
-                ✓ Use Plane
-              </button>
-            </div>
-          )}
 
           {/* ── SmartStep bar: overlays bottom of viewport during Join3D ── */}
           <SmartStepBar

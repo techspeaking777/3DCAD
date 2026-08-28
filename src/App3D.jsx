@@ -5181,6 +5181,16 @@ const App3D = forwardRef(function App3D(props, ref) {
         const ops = buildSolidOpsForWorker(sourceSolid, feats)
         await cadEngine.mirrorShape({ solidId: mf.solidId, sourceSolidId: sourceSolid.id, base, ops, plane: mf.mirrorPlane })
         members.push({ solidId: mf.solidId, base: null, ops: [] })
+      } else if (mf.operation === 'join') {
+        // Nested join member (join-of-join) — same "proactively rebuild,
+        // don't assume warm" reasoning as the mirror branch above: a join
+        // has no flat rebuild description of its own (buildBaseWorkerParams
+        // returns null for it, same as mirror), so on a cold worker
+        // (fresh page/project load, nothing built yet this session) its
+        // shapeStore entry doesn't exist until its OWN members are fused.
+        // Recurses to handle arbitrarily deep join-of-join-of-join chains.
+        await rebuildJoinBaseMesh({ id: mf.solidId }, feats, solidsLookup)
+        members.push({ solidId: mf.solidId, base: null, ops: [] })
       } else {
         const tempSolid = featureToTempSolid(mf)
         rebuiltSolids.push(tempSolid)

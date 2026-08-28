@@ -4444,7 +4444,15 @@ const App3D = forwardRef(function App3D(props, ref) {
     const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
     if (!hit || hit.solidId==null) return
     const feat = baseFeatureForSolid(hit.solidId)
-    if (!feat || feat.operation==='join') return   // can't join an already-joined solid into another join
+    // A join's own result is a valid Join3D member too (join-of-join) — same
+    // call baseFeatureForSolid already resolves for Mirror3D's join/mirror
+    // sources, and commitJoin already builds each member's worker params via
+    // the same buildBaseWorkerParams()/shapeStore-first path that already
+    // handles join-produced solids correctly (see its own comment on
+    // operation==='join' returning null — "no cold-rebuild fallback, relies
+    // on shapeStore already being warm", which always holds for a currently-
+    // rendered join result). There was no technical reason left to exclude it.
+    if (!feat) return
     const ids = feat.groupId ? features.filter(f => f.groupId === feat.groupId).map(f => f.id) : [feat.id]
     setJoinSel(prev => {
       const allSelected = ids.every(id => prev.includes(id))

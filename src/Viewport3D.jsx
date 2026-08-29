@@ -461,6 +461,14 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   // Built lazily on first use, repositioned in place on every call rather than
   // rebuilt — see showOffsetPlanePreview/hideOffsetPlanePreview.
   const offsetPlanePreviewRef = useRef(null)
+  // Move/Copy tool: a group of 3 draggable axis arrows shown on the selected
+  // solid, plus the base (pre-drag) position they're anchored to and which
+  // solid/group they currently belong to — see showMoveGizmo/hideMoveGizmo/
+  // raycastMoveGizmo/previewMoveSolid. Built lazily on first use, same
+  // reposition-in-place convention as offsetPlanePreviewRef above.
+  const moveGizmoRef = useRef(null)
+  const moveGizmoStateRef = useRef({ solidId: null, basePosition: null, group: null })
+  const moveGizmoMaterialsRef = useRef({})   // {x,y,z} -> shared MeshBasicMaterial, for hover/active recoloring
 
   // ── init ──────────────────────────────────────────────────────────────────
 
@@ -1732,6 +1740,199 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     },
 
     /**
+     * Move/Copy tool: shows 3 draggable axis arrows on the selected solid's
+     * bounding-box center. Colors follow this app's own plane-color
+     * convention (SketchPlane.js's planeColor) mapped from "the plane whose
+     * NORMAL is this axis" — X↔YZ-plane green, Y↔XZ-plane red, Z↔XY-plane
+     * blue — rather than the generic red/green/blue CAD convention, so it
+     * reads consistently with the work-plane colors already taught
+     * elsewhere in this app.
+     *
+     * Each arrow is a real cylinder (shaft) + cone (head) mesh pair, NOT
+     * THREE.ArrowHelper's built-in thin Line — confirmed via live testing
+     * that a thin Line is both hard to see (WebGL clamps line width to ~1
+     * physical pixel on most GPUs regardless of any requested width) and
+     * hard to click precisely. Real mesh geometry sidesteps both problems
+     * at once: it reads clearly at any zoom and raycasts like any other
+     * solid, no artificial hit-threshold fudge needed. Built lazily,
+     * repositioned in place on every call (Stage 1 has no rotation yet, so
+     * arrows always point along world axes — reorienting to a solid's own
+     * local axes is a Stage 2 concern once rotation exists).
+     */
+    showMoveGizmo(solidId) {
+      const s = stateRef.current; if (!s?.solidsGroup) return
+      const group = s.solidsGroup.children.find(g => g.userData?.solidId === solidId)
+      if (!group) return
+      const center = new THREE.Box3().setFromObject(group).getCenter(new THREE.Vector3())
+      let gizmo = moveGizmoRef.current
+      if (!gizmo) {
+        gizmo = new THREE.Group()
+        const AXES = [
+          { axis:'x', dir:new THREE.Vector3(1,0,0), color:0x22cc55 },
+          { axis:'y', dir:new THREE.Vector3(0,1,0), color:0xff3333 },
+          { axis:'z', dir:new THREE.Vector3(0,0,1), color:0x2255ff },
+        ]
+        const SHAFT_LEN=80, SHAFT_R=3, HEAD_LEN=28, HEAD_R=9
+        const materials = {}
+        for (const { axis, dir, color } of AXES) {
+          // One material shared by this axis's shaft+head, so hover/active
+          // recoloring (see hoverMoveGizmoAxis/setActiveGizmoAxis) changes
+          // the whole arrow as a single unit with one mutation.
+          // transparent:true is load-bearing, not cosmetic (opacity stays
+          // 1 — fully opaque-looking). Three.js renders the whole scene in
+          // two separate passes — every opaque object, THEN every
+          // transparent one — and renderOrder only sorts objects WITHIN
+          // whichever pass they landed in; it can never make an opaque
+          // object draw after a transparent one. Every solid's face
+          // material (cadMesh.js) is transparent:true (opacity 0.9), so it
+          // always lands in the second pass. A plain (non-transparent)
+          // gizmo material was finishing its entire opaque pass first and
+          // then getting painted over by the solid regardless of
+          // renderOrder/depthTest — this is what actually caused the
+          // "arrows hidden behind the shape" bug, not draw order within a
+          // pass. Marking the gizmo transparent too puts it in the same
+          // pass as the solid, where renderOrder (set below) finally has
+          // something to act on.
+          const mat = new THREE.MeshBasicMaterial({ color, transparent:true, depthTest:false })
+          mat.userData.baseColor = color
+          materials[axis] = mat
+
+          const shaftGeo = new THREE.CylinderGeometry(SHAFT_R, SHAFT_R, SHAFT_LEN, 12)
+          shaftGeo.translate(0, SHAFT_LEN/2, 0)   // base at local origin, extends up local +Y
+          const shaft = new THREE.Mesh(shaftGeo, mat)
+          const headGeo = new THREE.ConeGeometry(HEAD_R, HEAD_LEN, 16)
+          headGeo.translate(0, SHAFT_LEN + HEAD_LEN/2, 0)   // sits right past the shaft's tip
+          const head = new THREE.Mesh(headGeo, mat)
+          // renderOrder has to be set on the actual renderable objects (the
+          // meshes) — setting it on a non-rendered parent Group does
+          // nothing, since the renderer only reads renderOrder from objects
+          // it actually draws when building its sorted draw queue. Combined
+          // with depthTest:false above, this is what makes the arrows read
+          // on top of the solid regardless of which is actually closer to
+          // the camera.
+          shaft.renderOrder = 10; head.renderOrder = 10
+          shaft.userData.axis = axis; head.userData.axis = axis
+
+          const arrowGroup = new THREE.Group()
+          arrowGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), dir)
+          arrowGroup.userData.axis = axis
+          arrowGroup.add(shaft, head)
+          gizmo.add(arrowGroup)
+        }
+        s.scene.add(gizmo)
+        moveGizmoRef.current = gizmo
+        moveGizmoMaterialsRef.current = materials
+      }
+      // Fresh selection — always start from every arrow visible at its base
+      // color, in case a previous drag left a stale hover/active tint or
+      // hid the other two arrows (see setActiveGizmoAxis).
+      for (const arrowGroup of gizmo.children) arrowGroup.visible = true
+      for (const mat of Object.values(moveGizmoMaterialsRef.current)) mat.color.setHex(mat.userData.baseColor)
+      gizmo.position.copy(center)
+      gizmo.visible = true
+      moveGizmoStateRef.current = { solidId, basePosition: center.clone(), group }
+    },
+
+    /**
+     * Hides the Move/Copy gizmo shown by showMoveGizmo(), if any, and resets
+     * the dragged solid's live-preview position back to zero. On a real
+     * commit this is a harmless no-op (the commit rebuilds the solid with
+     * the offset baked into its geometry and swaps in a brand-new group at
+     * identity position, discarding this one entirely) — but on Escape/
+     * cancel, nothing else would ever clear the leftover drag offset.
+     */
+    hideMoveGizmo() {
+      if (moveGizmoRef.current) moveGizmoRef.current.visible = false
+      const { group } = moveGizmoStateRef.current
+      if (group) group.position.set(0,0,0)
+      moveGizmoStateRef.current = { solidId: null, basePosition: null, group: null }
+    },
+
+    /**
+     * Raycasts against the 3 gizmo arrows only (a dedicated pass, separate
+     * from raycastSolidFace) to determine which axis a click grabbed. Real
+     * mesh geometry (see showMoveGizmo) — a plain intersectObjects, no
+     * artificial hit-threshold needed the way a thin Line would.
+     */
+    raycastMoveGizmo(clientX, clientY) {
+      const gizmo = moveGizmoRef.current
+      const s = stateRef.current
+      if (!gizmo || !gizmo.visible || !s) return null
+      const el = mountRef.current; if (!el) return null
+      const rect = el.getBoundingClientRect()
+      const ndc = new THREE.Vector2(
+        ((clientX - rect.left) / rect.width)  *  2 - 1,
+        ((clientY - rect.top)  / rect.height) * -2 + 1,
+      )
+      const raycaster = new THREE.Raycaster()
+      raycaster.setFromCamera(ndc, s.camera)
+      const targets = gizmo.children.flatMap(a => a.children)   // [shaft, head] per arrow
+      const hits = raycaster.intersectObjects(targets, false)
+      if (!hits.length) return null
+      return { axis: hits[0].object.userData.axis }
+    },
+
+    /**
+     * Live hover feedback while still choosing which axis to grab (no axis
+     * armed yet) — brightens the hovered arrow's shared material toward
+     * white, restores every other arrow to its base color. Same "mutate the
+     * material directly, no React state" pattern hoverSolidByRef already
+     * uses for body hover, so it stays cheap on every mouse move.
+     */
+    hoverMoveGizmoAxis(axis) {
+      const materials = moveGizmoMaterialsRef.current
+      for (const [a, mat] of Object.entries(materials)) {
+        mat.color.setHex(mat.userData.baseColor)
+        if (a === axis) mat.color.lerp(new THREE.Color(0xffffff), 0.5)
+      }
+    },
+
+    /**
+     * Marks one axis as actively being dragged: recolors it bright yellow
+     * and hides the other two arrows entirely (rather than just dimming
+     * them) so there's no ambiguity about which axis a live drag/typed
+     * value currently applies to. Pass null to restore every arrow to
+     * visible + base color (drag accepted or cancelled).
+     */
+    setActiveGizmoAxis(axis) {
+      const gizmo = moveGizmoRef.current; if (!gizmo) return
+      const materials = moveGizmoMaterialsRef.current
+      for (const arrowGroup of gizmo.children) {
+        const a = arrowGroup.userData.axis
+        arrowGroup.visible = !axis || a === axis
+        const mat = materials[a]
+        mat.color.setHex(a === axis ? 0xffee00 : mat.userData.baseColor)
+      }
+    },
+
+    /**
+     * Live-drag preview: moves the REAL solid (cheap — just this one
+     * group's position, the baked geometry is untouched until commit) by
+     * `deltaMm` ([dx,dy,dz], mm) from where it started this drag, and moves
+     * the gizmo the same amount so it visibly stays attached to the solid.
+     */
+    previewMoveSolid(deltaMm) {
+      const { group, basePosition } = moveGizmoStateRef.current
+      if (!group || !basePosition) return
+      const SCALE = 2
+      const offset = new THREE.Vector3(deltaMm[0]*SCALE, deltaMm[1]*SCALE, deltaMm[2]*SCALE)
+      group.position.copy(offset)
+      if (moveGizmoRef.current) moveGizmoRef.current.position.copy(basePosition).add(offset)
+    },
+
+    /**
+     * World-space point (scene px) the Move/Copy gizmo is currently anchored
+     * to — the dragged solid's own center, captured when showMoveGizmo() was
+     * called — or null if no gizmo is showing. Used as the projection origin
+     * for the drag-to-mm math in App3D.jsx, the same role a picked plane's
+     * own origin plays for Mirror/Extrude's offset-plane drag.
+     */
+    getMoveGizmoOrigin() {
+      const { basePosition } = moveGizmoStateRef.current
+      return basePosition ? { x: basePosition.x, y: basePosition.y, z: basePosition.z } : null
+    },
+
+    /**
      * Recolors a solid's face material live, in place — no mesh/geometry
      * rebuild. The `solids` sync effect above only diffs group membership
      * (add/remove), it never re-reads `solid.color`, so this is the only
@@ -1955,6 +2156,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     },
 
     getDomElement() { return stateRef.current?.renderer.domElement||null },
+
 
   }), [])
 

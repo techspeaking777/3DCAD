@@ -323,6 +323,23 @@ export function IconJoin3D({ color = '#FFEE88' }) {
   )
 }
 
+export function IconMoveCopy3D({ color = '#FF9800' }) {
+  return (
+    <svg width="70" height="70" viewBox="0 0 70 70" fill="none" style={glow(color)}>
+      <GroundShadow color={color}/>
+      <IsoCube color={color}/>
+      {/* 3 short arrows radiating from the cube's center, echoing the tool's
+          own on-model gizmo (3 draggable translate handles) */}
+      <line x1="35" y1="40" x2="35" y2="12" stroke={color} strokeWidth="2" strokeLinecap="round"/>
+      <path d="M30 17 L35 11 L40 17" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+      <line x1="35" y1="40" x2="58" y2="27" stroke={color} strokeWidth="2" strokeLinecap="round"/>
+      <path d="M51 24 L59 27 L57 35" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+      <line x1="35" y1="40" x2="14" y2="53" stroke={color} strokeWidth="2" strokeLinecap="round"/>
+      <path d="M14 45 L14 53 L22 55" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  )
+}
+
 export function IconMeasure3D({ color = '#4FC3F7' }) {
   return (
     <svg width="70" height="70" viewBox="0 0 70 70" fill="none" style={glow(color)}>

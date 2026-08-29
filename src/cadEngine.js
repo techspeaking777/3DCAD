@@ -142,6 +142,20 @@ class CadEngine {
   }
 
   /**
+   * Bakes a Move/Copy's translation into a solid's actual geometry. params:
+   * {solidId, position:[dxMm,dyMm,dzMm], sourceSolidId?, base?, ops?} —
+   * solidId is written to; without sourceSolidId it's also read from (a
+   * plain Move, re-targeting the same body). Copy passes a distinct
+   * sourceSolidId to read the original body's shape from while writing the
+   * new duplicate's shape to solidId. base/ops are the same cold-rebuild
+   * fallback shape buildBaseWorkerParams()/buildSolidOpsForWorker() already
+   * produce elsewhere, used only if the source isn't in shapeStore.
+   */
+  async transformShape(params) {
+    return this._send('transformShape', params)
+  }
+
+  /**
    * Fuse every top-level solid (cutouts already baked in) into one body and
    * export it as a single STL Blob — for 3D printing, which needs one
    * continuous manifold mesh, not several independently-overlapping bodies.

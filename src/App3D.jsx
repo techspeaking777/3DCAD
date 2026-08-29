@@ -45,7 +45,7 @@ import {
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
   IconUndo, IconRedo, IconFitView, IconReframe, IconNew, IconSave, IconLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
   IconIncludeEdge,
-  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D,
+  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D,
 } from './draw/ToolIcons.jsx'
 import { glowStroke, glowFill } from './draw/vectorTheme.js'
 
@@ -54,7 +54,7 @@ import { glowStroke, glowFill } from './draw/vectorTheme.js'
 // the old solid-icons.png raster sprite sheet.
 const SOLID_ICON_COMPONENTS = {
   extrude: IconExtrude3D, cutout: IconCutout3D, fillet3d: IconFillet3D,
-  mirror3d: IconMirror3D, loft3d: IconLoft3D, join3d: IconJoin3D,
+  mirror3d: IconMirror3D, loft3d: IconLoft3D, join3d: IconJoin3D, movecopy3d: IconMoveCopy3D,
   // Reuses the additive Loft icon's shape, rendered in Cutout's color (see
   // the button color below) — same "one glyph, color signals cut variant"
   // convention Extrude/Cutout already lean on, no separate icon needed.
@@ -392,22 +392,24 @@ const EXTRUDE_STEPS = [
   { id: 3, label: 'Set Depth' },
 ]
 
-// Live offset-distance input, anchored (via the parent action button's own
+// Live numeric input, anchored (via the parent action button's own
 // position:relative wrapper in SmartStepBar — see the `popover` field on an
-// action) directly above whichever button currently represents "commit the
-// offset plane". Shared between Mirror3D and Extrude/Cutout so both tools'
-// offset-plane UI reads identically, not just their SmartStepBar buttons.
+// action) directly above whichever button currently represents "commit".
+// Shared between Mirror3D/Extrude's offset-plane and Move/Copy's drag
+// distance so every tool's live-numeric UI reads identically, not just
+// their SmartStepBar buttons. `label`/`unit` default to the original
+// offset-plane wording so existing call sites don't need to change.
 // Deliberately has no onKeyDown of its own — Enter is handled by each
 // caller's own handleKeyDown block, relying on the keydown bubbling up
 // naturally, so adding a local handler here would risk double-committing.
-function OffsetDistancePopover({ color, value, onChange }) {
+function OffsetDistancePopover({ color, value, onChange, label='OFFSET', unit='mm' }) {
   return (
     <div style={{
       position:'absolute', bottom:'calc(100% + 8px)', left:'50%', transform:'translateX(-50%)',
       zIndex:200, background:'rgba(12,12,26,0.97)', border:`2px solid ${color}`,
       borderRadius:8, padding:'10px 16px', display:'flex', alignItems:'center', gap:10, whiteSpace:'nowrap',
     }}>
-      <span style={{fontFamily:'monospace',fontSize:11,fontWeight:'bold',color,letterSpacing:'0.08em'}}>OFFSET</span>
+      <span style={{fontFamily:'monospace',fontSize:11,fontWeight:'bold',color,letterSpacing:'0.08em'}}>{label}</span>
       <input
         type="number"
         autoFocus
@@ -416,7 +418,7 @@ function OffsetDistancePopover({ color, value, onChange }) {
         style={{width:70,textAlign:'center',fontFamily:'monospace',fontSize:14,fontWeight:'bold',
           background:'#0d0d1a',color:'#fff',border:`2px solid ${color}`,borderRadius:6,padding:'4px 6px'}}
       />
-      <span style={{fontFamily:'monospace',fontSize:11,color:'#888'}}>mm</span>
+      <span style={{fontFamily:'monospace',fontSize:11,color:'#888'}}>{unit}</span>
     </div>
   )
 }
@@ -4394,6 +4396,195 @@ const App3D = forwardRef(function App3D(props, ref) {
     viewport3dRef.current?.hoverSolid(mirror3dHoverSolidId)
   }, [mirror3dHoverSolidId, tool])
 
+  // ── Move/Copy (3D solid) state machine — Stage 1: translate-only gizmo ────
+  // Step 1: click a body directly in the 3D view (same hover/select pattern
+  // as Mirror3D/Join3D — orange hover via hoverSolid, cyan selected via
+  // highlightSolid). Step 2: a gizmo with 3 draggable axis arrows appears at
+  // the body's center. Grabbing an arrow is a plain CLICK (not a press-and-
+  // hold drag) — same "click to arm, just move the mouse to preview, click
+  // again anywhere to accept" gesture Extrude's depth-set and Mirror/
+  // Extrude's own offset-plane already use, not a new interaction paradigm.
+  // Copy toggles whether accepting duplicates the body instead of moving
+  // the original in place.
+  const [moveCopy3dSel, setMoveCopy3dSel] = useState(null)          // solidId, or null
+  const [moveCopy3dHoverSolidId, setMoveCopy3dHoverSolidId] = useState(null)
+  const [moveCopy3dMode, setMoveCopy3dMode] = useState('move')      // 'move' | 'copy'
+  const [moveCopy3dDragAxis, setMoveCopy3dDragAxis] = useState(null) // 'x'|'y'|'z'|null
+  const [moveCopy3dDistInput, setMoveCopy3dDistInput] = useState('0') // signed mm along moveCopy3dDragAxis
+
+  function activateMoveCopy3DTool() {
+    resetSelection()
+    resetDrawState()
+    restoreHiddenEditSolid()
+    // See activateLoft3DTool's comment — restoreSavedView() must stay inside
+    // this guard, not fire unconditionally, or it jumps the camera to
+    // whatever unrelated view was last saved by some other snap elsewhere.
+    if (sketchModeRef.current) {
+      setSketchMode(false)
+      setActivePlane(null)
+      setActiveSketchId(null)
+      activePlaneRef.current = null
+      viewport3dRef.current?.restoreSavedView()
+    }
+    setTool('movecopy3d')
+    setExtrudeTool(null)
+    setExtrudeState(null)
+    setEditingFeatureId(null)
+    resetMoveCopy3D()
+  }
+
+  function resetMoveCopy3D() {
+    setMoveCopy3dSel(null)
+    setMoveCopy3dHoverSolidId(null)
+    setMoveCopy3dMode('move')
+    setMoveCopy3dDragAxis(null)
+    setMoveCopy3dDistInput('0')
+    viewport3dRef.current?.clearSolidHighlight()
+    viewport3dRef.current?.clearSolidHover()
+    viewport3dRef.current?.hoverMoveGizmoAxis(null)
+    viewport3dRef.current?.hideMoveGizmo()
+  }
+
+  // Step 1 body pick — same baseFeatureForSolid eligibility Mirror3D/Join3D
+  // already use (extrude/revolve/loft/mirror/join all qualify).
+  function handleMoveCopy3DBodyClick(e) {
+    if (tool !== 'movecopy3d' || moveCopy3dSel != null) return
+    const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
+    if (!hit || hit.solidId==null) return
+    const feat = baseFeatureForSolid(hit.solidId)
+    if (!feat) return
+    setMoveCopy3dSel(hit.solidId)
+  }
+
+  // Live hover glow while still picking the body — mirrors handleMirror3DHover.
+  function handleMoveCopy3DHover(e) {
+    if (moveCopy3dSel != null) { setMoveCopy3dHoverSolidId(null); return }
+    const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
+    const solidId = hit?.solidId ?? null
+    setMoveCopy3dHoverSolidId(prev => solidId === prev ? prev : solidId)
+  }
+
+  useEffect(() => {
+    if (tool !== 'movecopy3d' || moveCopy3dSel == null) {
+      viewport3dRef.current?.clearSolidHighlight()
+      viewport3dRef.current?.hideMoveGizmo()
+      return
+    }
+    viewport3dRef.current?.highlightSolid(moveCopy3dSel)
+    viewport3dRef.current?.showMoveGizmo(moveCopy3dSel)
+  }, [moveCopy3dSel, tool])
+
+  useEffect(() => {
+    if (tool !== 'movecopy3d' || moveCopy3dHoverSolidId==null) { viewport3dRef.current?.clearSolidHover(); return }
+    viewport3dRef.current?.hoverSolid(moveCopy3dHoverSolidId)
+  }, [moveCopy3dHoverSolidId, tool])
+
+  // Drag-to-set-distance along whichever world axis was armed — same
+  // projection math as handleMirror3DOffsetDragMove/handleExtrudeOffsetDragMove
+  // (project a fixed direction to screen space, scalar-project the mouse
+  // offset onto it, divide by px-per-mm), just anchored on the gizmo's own
+  // origin (the body's center when the gizmo was shown) instead of a picked
+  // plane's basis, and projecting a world axis instead of a plane normal.
+  function handleMoveCopy3DDragMove(e) {
+    if (tool !== 'movecopy3d' || !moveCopy3dDragAxis || moveCopy3dSel == null) return
+    const vp = viewport3dRef.current
+    if (!vp) return
+    const origin = vp.getMoveGizmoOrigin?.()
+    if (!origin) return
+    const AXIS_DIRS = { x:[1,0,0], y:[0,1,0], z:[0,0,1] }
+    const [ax,ay,az] = AXIS_DIRS[moveCopy3dDragAxis]
+    const p0 = vp.worldToScreen(origin.x, origin.y, origin.z)
+    const p1 = vp.worldToScreen(origin.x+ax*2, origin.y+ay*2, origin.z+az*2)
+    if (!p0 || !p1) return
+    const dx = p1.x-p0.x, dy = p1.y-p0.y
+    const pxPerMm = Math.hypot(dx,dy)
+    if (!pxPerMm) return
+    const vpRect = vp.getDomElement?.()?.parentElement?.getBoundingClientRect?.()
+    if (!vpRect) return
+    const mx = e.clientX - vpRect.left, my = e.clientY - vpRect.top
+    const proj = (mx-p0.x)*(dx/pxPerMm) + (my-p0.y)*(dy/pxPerMm)
+    let mm = proj/pxPerMm
+    if (gridSnap) mm = Math.round(mm/gridSizeMm)*gridSizeMm
+    setMoveCopy3dDistInput(String(Math.round(mm*100)/100))
+  }
+
+  // Live preview — moves the REAL solid (cheap: just this one group's
+  // position, see previewMoveSolid's own comment) every time the armed
+  // axis or its live distance changes, whether driven by mouse movement or
+  // typing directly into the popover.
+  useEffect(() => {
+    if (tool !== 'movecopy3d' || !moveCopy3dDragAxis) return
+    const mm = parseFloat(moveCopy3dDistInput) || 0
+    const delta = { x:0, y:0, z:0 }
+    delta[moveCopy3dDragAxis] = mm
+    viewport3dRef.current?.previewMoveSolid([delta.x, delta.y, delta.z])
+  }, [tool, moveCopy3dDragAxis, moveCopy3dDistInput])
+
+  // Gizmo-arrow hover feedback — only meaningful once a body is picked but
+  // before an axis is armed (once armed, setActiveGizmoAxis below already
+  // owns the arrow colors/visibility for the whole drag). Direct
+  // Viewport3D call, no React state — same "mutate material, skip
+  // re-render" convention as hoverSolid/highlightSolid.
+  function handleMoveCopy3DGizmoHover(e) {
+    if (tool !== 'movecopy3d' || moveCopy3dSel == null || moveCopy3dDragAxis) return
+    const hit = viewport3dRef.current?.raycastMoveGizmo(e.clientX, e.clientY)
+    viewport3dRef.current?.hoverMoveGizmoAxis(hit?.axis ?? null)
+  }
+
+  // Recolors/isolates the armed axis the moment it's grabbed, and restores
+  // every arrow to its idle state once the drag is accepted/cancelled.
+  useEffect(() => {
+    viewport3dRef.current?.setActiveGizmoAxis(moveCopy3dDragAxis)
+  }, [moveCopy3dDragAxis])
+
+  // Bakes the live delta into the solid's actual geometry via the new
+  // transformShape worker op. Move re-targets the same solidId (shapeStore
+  // is warm at its PRIOR position, so only the fresh delta is sent — the
+  // cumulative total lives in transform.position, not in the worker call).
+  // Copy reads from the original (sourceSolidId) and writes a brand-new
+  // solid+feature, inheriting the original's shape-defining fields so it
+  // still rebuilds correctly on a cold reload (see featureToTempSolid).
+  async function commitMoveCopy3D() {
+    const solidId = moveCopy3dSel
+    const axis = moveCopy3dDragAxis
+    const solid = solids.find(s => s.id === solidId)
+    const feat = baseFeatureForSolid(solidId)
+    if (solidId==null || !axis || !solid || !feat) { resetMoveCopy3D(); return }
+    const mm = parseFloat(moveCopy3dDistInput) || 0
+    const delta = { x:0, y:0, z:0 }
+    delta[axis] = mm
+    const priorPos = solid.transform?.position || [0,0,0]
+    const newPos = [priorPos[0]+delta.x, priorPos[1]+delta.y, priorPos[2]+delta.z]
+    feat3d.commit(features)
+    try {
+      if (moveCopy3dMode === 'copy') {
+        const newSolidId = Date.now()
+        const base = buildBaseWorkerParams(solid)
+        const ops = buildSolidOpsForWorker(solid, features)
+        const meshData = await cadEngine.transformShape({
+          solidId: newSolidId, sourceSolidId: solidId, base, ops,
+          position: [delta.x, delta.y, delta.z],
+        })
+        const group = replicadMeshToThree(meshData, solid.color, newSolidId)
+        const newFeatId = `${feat.id}-copy-${newSolidId}`
+        setSolids(prev => [...prev, { ...solid, id: newSolidId, group, transform: { position: newPos } }])
+        setFeatures(prev => [...prev, {
+          ...feat, id: newFeatId, solidId: newSolidId, name: `${feat.name} Copy`,
+          transform: { position: newPos }, joinedInto: undefined,
+        }])
+      } else {
+        const meshData = await cadEngine.transformShape({ solidId, position: [delta.x, delta.y, delta.z] })
+        const group = replicadMeshToThree(meshData, solid.color, solidId)
+        setSolids(prev => prev.map(s => s.id===solidId ? { ...s, group, transform: { position: newPos } } : s))
+        setFeatures(prev => prev.map(f => f.id===feat.id ? { ...f, transform: { position: newPos } } : f))
+      }
+    } catch (err) {
+      setCadError('Move failed: ' + (err.message || String(err)))
+      setTimeout(() => setCadError(null), 6000)
+    }
+    resetMoveCopy3D()
+  }
+
   // ── Join (3D boolean union) state machine ─────────────────────────────────
   // Step 1: click bodies directly in the 3D view to accumulate joinSel
   //   (same viewport click/hover pattern as Mirror/Export STL/Body Color —
@@ -5126,6 +5317,11 @@ const App3D = forwardRef(function App3D(props, ref) {
       // its own basis + ordered profile list instead, same fields
       // buildBaseWorkerParams' loft branch reads off a `solid` object.
       normal: feat.normal, origin: feat.origin, uAxis: feat.uAxis, vAxis: feat.vAxis, profiles: feat.profiles, ruled: feat.ruled,
+      // Move/Copy's baked position offset (see activateMoveCopy3DTool's own
+      // comment) — orthogonal to every operation type above, so it's just
+      // carried through verbatim regardless of which branch built the rest
+      // of this temp solid.
+      transform: feat.transform,
     }
   }
 
@@ -5139,7 +5335,13 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (!sourceSolid) throw new Error('Mirror source solid not found')
       const base = buildBaseWorkerParams(sourceSolid)
       const ops = buildSolidOpsForWorker(sourceSolid, feats)
-      return cadEngine.mirrorShape({ solidId: feat.solidId, sourceSolidId: sourceSolid.id, base, ops, plane: feat.mirrorPlane })
+      let meshData = await cadEngine.mirrorShape({ solidId: feat.solidId, sourceSolidId: sourceSolid.id, base, ops, plane: feat.mirrorPlane })
+      // A moved/copied mirror result — mirrorShape bypasses rebuildSolidChain
+      // entirely (it's a special case right here, not routed through it), so
+      // its own baked-transform bake-in has to happen right after, same as
+      // rebuildSolidChain's own trailing step does for every other operation.
+      if (feat.transform) meshData = await cadEngine.transformShape({ solidId: feat.solidId, position: feat.transform.position })
+      return meshData
     }
     // rebuildSolidChain also transparently replays this member's OWN
     // cutouts/fillets — untouched by the join, still in `feats` keyed to
@@ -6088,6 +6290,14 @@ const App3D = forwardRef(function App3D(props, ref) {
         const cutParams = opFeat.id === overrideId ? overrideCut : buildCutWorkerParams(opFeat)
         meshData = await cadEngine.subtract({ baseSolidId: baseSolid.id, cut: cutParams, base: baseWorkerParams })
       }
+    }
+    // Move/Copy's baked position offset — applied last, on top of the clean
+    // base plus every cutout/fillet, so it's one uniform final step
+    // regardless of operation type (extrude/revolve/loft/join all reach
+    // here; mirror is the one exception, handled in rebuildFeatureSolid
+    // itself since it bypasses this function entirely).
+    if (baseSolid.transform) {
+      meshData = await cadEngine.transformShape({ solidId: baseSolid.id, position: baseSolid.transform.position })
     }
     return meshData
   }
@@ -7359,6 +7569,28 @@ const App3D = forwardRef(function App3D(props, ref) {
       return
     }
 
+    // Move/Copy step 2b: an axis is already armed — this click accepts the
+    // live drag value, wherever in the canvas it lands (same "click anywhere
+    // once armed accepts" convention as Mirror/Extrude's offset-plane).
+    if (tool==='movecopy3d' && moveCopy3dDragAxis) {
+      commitMoveCopy3D()
+      return
+    }
+    // Move/Copy step 2a: body picked, no axis armed yet — a click only does
+    // something if it actually lands on a gizmo arrow (arms that axis);
+    // anything else is ignored rather than reinterpreted as re-picking a
+    // different body — Escape backs out to step 1 for that.
+    if (tool==='movecopy3d' && moveCopy3dSel != null) {
+      const hit = viewport3dRef.current?.raycastMoveGizmo(e.clientX, e.clientY)
+      if (hit) { setMoveCopy3dDragAxis(hit.axis); setMoveCopy3dDistInput('0') }
+      return
+    }
+    // Move/Copy step 1: pick the body.
+    if (tool==='movecopy3d') {
+      handleMoveCopy3DBodyClick(e)
+      return
+    }
+
     if (tool==='color') {
       handleColorClick(e)
       return
@@ -7988,6 +8220,12 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (tool==='mirror3d' && !mirror3dSelectionDone) { handleMirror3DHover(e); return }
     // Join — picks bodies the whole time it's active, same hover pattern.
     if (tool==='join3d') { handleJoin3DHover(e); return }
+    // Move/Copy — same hover pattern, only while still picking the body
+    // (once picked, mouse movement instead drives handleMoveCopy3DDragMove/
+    // handleMoveCopy3DGizmoHover on the root div's own unthrottled
+    // onMouseMove, for smooth live drag/hover).
+    if (tool==='movecopy3d' && moveCopy3dSel==null) { handleMoveCopy3DHover(e); return }
+    if (tool==='movecopy3d' && moveCopy3dSel!=null) { return }
 
     const worldPos=screenToWorld(sx,sy)
 
@@ -8169,6 +8407,22 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (mirror3dSelectionDone) { setMirror3dSelectionDone(false); return }
       if (mirror3dSel.length>0) { setMirror3dSel([]); return }
       resetMirror3D(); setTool('select'); return
+    }
+    if (e.key==='Enter'&&tool==='movecopy3d'&&moveCopy3dDragAxis){
+      // Confirm the live drag distance and commit — same role as a plain
+      // click anywhere once an axis is armed.
+      e.preventDefault()
+      commitMoveCopy3D()
+      return
+    }
+    if (e.key==='Escape'&&tool==='movecopy3d'){
+      // One consolidated block, deepest-first — the convention Mirror3D/
+      // Fillet3D/Measure already use, NOT Extrude's split-across-two-blocks
+      // approach (that one's own comment documents it as an actual ordering
+      // bug hit twice already this session).
+      if (moveCopy3dDragAxis) { setMoveCopy3dDragAxis(null); setMoveCopy3dDistInput('0'); viewport3dRef.current?.previewMoveSolid([0,0,0]); return }
+      if (moveCopy3dSel != null) { setMoveCopy3dSel(null); return }
+      resetMoveCopy3D(); setTool('select'); return
     }
     if (e.key==='Escape'&&tool==='measure'){
       // First Escape clears the current result or a pending first point;
@@ -8850,7 +9104,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   return (
     <div ref={rootDivRef} style={{display:'flex',height:'100%',outline:'none'}} tabIndex={0}
       onKeyDown={handleKeyDown}
-      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e); handleMirror3DOffsetDragMove(e); handleExtrudeOffsetDragMove(e) }}
+      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e); handleMirror3DOffsetDragMove(e); handleExtrudeOffsetDragMove(e); handleMoveCopy3DDragMove(e); handleMoveCopy3DGizmoHover(e) }}
       onMouseUp={e=>{ }}
     >
 
@@ -8949,10 +9203,12 @@ const App3D = forwardRef(function App3D(props, ref) {
               {id:'join3d',   label:'JOIN',    color:'#FFEE88'},
               {id:'loft3d',   label:'LOFT',    color:'#FBDA2D'},
               {id:'loftcutout', label:'LOFT CUT', color:'#53D3E4'},
+              {id:'movecopy3d', label:'MOVE/COPY', color:'#FF9800'},
             ].map(({id,label,color})=>{
               const isActive = id==='fillet3d' ? tool==='fillet3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
                 : id==='loft3d' ? ((tool==='loft3d' || !!loftState) && loftTool!=='loftcutout')
                 : id==='loftcutout' ? ((tool==='loft3d' || !!loftState) && loftTool==='loftcutout')
+                : id==='movecopy3d' ? tool==='movecopy3d'
                 : extrudeTool===id
               return (
               <button key={id}
@@ -8964,6 +9220,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                   else if (id==='join3d') activateJoin3DTool()
                   else if (id==='loft3d') activateLoft3DTool('loft')
                   else if (id==='loftcutout') activateLoft3DTool('loftcutout')
+                  else if (id==='movecopy3d') activateMoveCopy3DTool()
                 }}
                 style={{...btnBase, flexDirection:'column', gap:2,
                   width:102, height:102,
@@ -9291,7 +9548,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             dxfPickMode={tool==='exportfacedxf'}
             dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : []}
             extrudeArmed={!!extrudeState || (!!loftState && !sketchMode)}
-            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hidePlanesForExtrude && (tool==='extrude' || tool==='cutout'))}
+            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && tool!=='movecopy3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hidePlanesForExtrude && (tool==='extrude' || tool==='cutout'))}
             activePlane={activePlane}
             sketchMode={sketchMode}
             gridVisible={gridVisible}
@@ -9458,6 +9715,29 @@ const App3D = forwardRef(function App3D(props, ref) {
               : 'Click bodies to join (click again to remove)'}
             action={{label:'✓ Join', enabled:joinSel.length>=2, onClick:commitJoin}}
             onStepBack={()=>{}}
+          />
+
+          {/* ── SmartStep bar: overlays bottom of viewport during Move/Copy ── */}
+          <SmartStepBar
+            op={tool==='movecopy3d' ? 'MOVE/COPY' : null}
+            steps={[{ id:1, label:'Select Body' }, { id:2, label:'Move' }]}
+            currentStep={moveCopy3dSel!=null ? 2 : 1}
+            color="#FF9800"
+            hint={moveCopy3dSel==null
+              ? 'Click a body to move or copy'
+              : moveCopy3dDragAxis
+                ? 'Move the mouse or type a distance, click or Enter to confirm'
+                : 'Click an axis arrow on the gizmo'}
+            action={moveCopy3dSel==null ? null : [
+              { label: moveCopy3dMode==='copy' ? '⧉ Copy' : '✛ Move', enabled:true,
+                onClick: () => setMoveCopy3dMode(m => m==='copy' ? 'move' : 'copy') },
+              ...(moveCopy3dDragAxis ? [{
+                label:'✓ Confirm', enabled:true, onClick:commitMoveCopy3D,
+                popover: <OffsetDistancePopover color="#FF9800" label={moveCopy3dMode==='copy' ? 'COPY' : 'MOVE'}
+                  unit="mm" value={moveCopy3dDistInput} onChange={setMoveCopy3dDistInput}/>,
+              }] : []),
+            ]}
+            onStepBack={step => { if (step === 1) resetMoveCopy3D() }}
           />
 
           {/* ── SmartStep bar: overlays bottom of viewport during Loft ── */}

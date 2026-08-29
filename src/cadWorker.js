@@ -650,6 +650,33 @@ self.onmessage = async function(e) {
         throw new Error('The selected bodies don’t touch or overlap — move them so they intersect or share a face before joining.')
       }
       if (params.solidId) shapeStore.set(params.solidId, shape)
+    } else if (type==='transformShape') {
+      // Bakes a Move/Copy's translation into the solid's actual OCC geometry
+      // — same shapeStore-or-cold-rebuild-from-params fallback fillet3d
+      // already uses on a cache miss. Move re-targets the SAME solidId (no
+      // sourceSolidId) so this reads and overwrites one shapeStore entry —
+      // repeated live moves each send only the NEW delta, since the shape
+      // already sitting in the cache reflects every prior move already
+      // applied (the cumulative total lives on the feature/solid's own
+      // `transform` field in App3D.jsx, not in the worker). Copy passes a
+      // distinct `sourceSolidId` to read from and `solidId` to write the new
+      // body's shape to, mirroring mirrorShape's own source/target split.
+      let base = shapeStore.get(params.sourceSolidId ?? params.solidId)
+      if (!base) {
+        if (!params.base) throw new Error('Transform-MISS: base not in store and no fallback params')
+        base = buildBase(params.base)
+        for (const op of params.ops || []) {
+          if (op.type === 'fillet') {
+            base = base.fillet(op.radius, e => e.either(
+              op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
+            ))
+          } else {
+            base = cutTolerant(base, buildCutShape(clampCutDepth(op.params, params.base)))
+          }
+        }
+      }
+      shape = base.translate(params.position)
+      if (params.solidId) shapeStore.set(params.solidId, shape)
     } else {
       throw new Error(`Unknown: ${type}`)
     }

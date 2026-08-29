@@ -163,6 +163,19 @@ class CadEngine {
   }
 
   /**
+   * Imports a STEP file's geometry as a new solid's actual shape. params:
+   * {solidId, stepText} — stepText is the raw STEP file content (plain
+   * ASCII, straight from File.text()). Used identically for a fresh
+   * user-initiated import and for replaying that same import during a cold
+   * project rebuild — a STEP file's saved text produces the same shape
+   * every time, so there's no separate "build fresh" vs "replay" case the
+   * way extrude/revolve's ops-replay needs.
+   */
+  async importStep(params) {
+    return this._send('importStep', params)
+  }
+
+  /**
    * Fuse every top-level solid (cutouts already baked in) into one body and
    * export it as a single STL Blob — for 3D printing, which needs one
    * continuous manifold mesh, not several independently-overlapping bodies.

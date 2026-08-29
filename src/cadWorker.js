@@ -1,6 +1,6 @@
 import opencascade from 'replicad-opencascadejs/src/replicad_single.js'
 import opencascadeWasm from 'replicad-opencascadejs/src/replicad_single.wasm?url'
-import { setOC, Sketcher, Plane, makePlane, sketchCircle, getOC, cast, localGC, FaceFinder, Vector } from 'replicad'
+import { setOC, Sketcher, Plane, makePlane, sketchCircle, getOC, cast, localGC, FaceFinder, Vector, importSTEP } from 'replicad'
 
 const SCALE = 2
 // Tolerance (mm) for matching a picked screen point to the actual OCC edge —
@@ -47,11 +47,12 @@ function fuseTolerant(a, b) {
 // after a fresh load with no edits yet. Multiple solids get welded into one
 // with fuseTolerant (see the exportSTL/exportSTEP handler's own comment on
 // why not makeCompound).
-function gatherAndFuseExportSolids(solidsParams) {
-  const shapes = solidsParams.map(({ solidId, base, ops }) => {
+async function gatherAndFuseExportSolids(solidsParams) {
+  const shapes = []
+  for (const { solidId, base, ops } of solidsParams) {
     let shape = shapeStore.get(solidId)
     if (!shape) {
-      shape = buildBase(base)
+      shape = await buildBase(base)
       for (const op of ops) {
         if (op.type === 'fillet') {
           shape = shape.fillet(op.radius, e => e.either(
@@ -62,8 +63,8 @@ function gatherAndFuseExportSolids(solidsParams) {
         }
       }
     }
-    return shape
-  })
+    shapes.push(shape)
+  }
   if (shapes.length === 0) throw new Error('No solids to export')
   let fused = shapes[0]
   for (let i = 1; i < shapes.length; i++) fused = fuseTolerant(fused, shapes[i])
@@ -383,7 +384,7 @@ self.onmessage = async function(e) {
       // WASM object instead of cleanly cache-missing. fuseTolerant only
       // reads .wrapped, never deletes its operands, so it's safe here —
       // same reasoning Join/exportSTL's own multi-solid fuse already rely on.
-      const fused = gatherAndFuseExportSolids(params.solids)
+      const fused = await gatherAndFuseExportSolids(params.solids)
       if (type==='exportSTL') {
         // Same tolerances used for the on-screen render mesh elsewhere in
         // this file, so the printed geometry matches what was previewed.
@@ -526,7 +527,7 @@ self.onmessage = async function(e) {
       if (!base) {
         if (!params.base) throw new Error(`Fillet-MISS: base not in store and no fallback params`)
         console.warn('[cadWorker] shapeStore miss — rebuilding base from params')
-        base = buildBase(params.base)
+        base = await buildBase(params.base)
       }
       try {
         shape = base.fillet(params.radius, e => e.either(
@@ -542,7 +543,7 @@ self.onmessage = async function(e) {
       if (!base) {
         if (!params.base) throw new Error(`Step1-MISS: base not in store and no fallback params`)
         console.warn('[cadWorker] shapeStore miss — rebuilding base from params')
-        try { base = buildBase(params.base) }
+        try { base = await buildBase(params.base) }
         catch(e) { throw new Error(`Step1-BASE: ${e.message} | planeId=${params.base.planeId} dir=${params.base.direction}`) }
       }
       let cutShape
@@ -585,7 +586,7 @@ self.onmessage = async function(e) {
       // rebuildProjectFromFeatures' ordering guarantee).
       let base
       if (params.base) {
-        base = buildBase(params.base)
+        base = await buildBase(params.base)
       } else {
         base = shapeStore.get(params.sourceSolidId)
         if (!base) throw new Error('Mirror source shape not found in cache (join/mirror source not yet built)')
@@ -617,10 +618,11 @@ self.onmessage = async function(e) {
       // there's no "went stale after the fact" case to guard against). Same
       // shapeStore-or-cold-rebuild-from-params fallback exportSTL already
       // uses for its own multi-solid fuse, reused here per member.
-      const shapes = params.members.map(m => {
+      const shapes = []
+      for (const m of params.members) {
         let s = shapeStore.get(m.solidId)
         if (!s) {
-          s = buildBase(m.base)
+          s = await buildBase(m.base)
           for (const op of m.ops || []) {
             if (op.type === 'fillet') {
               s = s.fillet(op.radius, e => e.either(
@@ -631,8 +633,8 @@ self.onmessage = async function(e) {
             }
           }
         }
-        return s
-      })
+        shapes.push(s)
+      }
       if (shapes.length < 2) throw new Error('Need at least 2 shapes to join')
       shape = shapes.reduce((a, b) => fuseTolerant(a, b))
       // A fuse can come back wrapped in a Compound container even when it
@@ -665,7 +667,7 @@ self.onmessage = async function(e) {
       let base = shapeStore.get(params.sourceSolidId ?? params.solidId)
       if (!base) {
         if (!params.base) throw new Error('Transform-MISS: base not in store and no fallback params')
-        base = buildBase(params.base)
+        base = await buildBase(params.base)
         for (const op of params.ops || []) {
           if (op.type === 'fillet') {
             base = base.fillet(op.radius, e => e.either(
@@ -692,6 +694,16 @@ self.onmessage = async function(e) {
         base = base.rotate(params.rotation.angleDeg, pivot, params.rotation.axis)
       }
       shape = params.position ? base.translate(params.position) : base
+      if (params.solidId) shapeStore.set(params.solidId, shape)
+    } else if (type==='importStep') {
+      // A fresh user-initiated import and a cold-rebuild's re-import (via
+      // buildBase's own stepText branch above) both end up here with the
+      // same stepText — there's only one code path either way, unlike
+      // extrude/revolve/etc. which distinguish "build fresh" from "replay
+      // ops on top of a cold-rebuilt base." An imported body has no ops to
+      // replay at import time itself; cutouts/fillets added to it later go
+      // through the normal subtract/fillet3d handlers same as any other solid.
+      shape = await importSTEP(new Blob([params.stepText]))
       if (params.solidId) shapeStore.set(params.solidId, shape)
     } else {
       throw new Error(`Unknown: ${type}`)
@@ -1030,10 +1042,15 @@ function buildExtrude({ pts, depthMm, planeId, direction='both',
 // Rebuilds a solid's OWN base shape (no cuts/fillets applied) from its stored
 // params — used whenever the worker's shapeStore doesn't have a solid cached
 // (e.g. right after a fresh page load). `profiles` (array) means Loft;
-// `axis` means Revolve, not a linear extrude — same discriminators already
-// used everywhere else a base gets cold-rebuilt (cuts, fillets, STL export,
-// Join member fallback), so Loft slots into all of them for free.
-function buildBase(params) {
+// `axis` means Revolve, not a linear extrude; `stepText` means an imported
+// STEP body being re-imported (same text, same result, every time) — same
+// discriminators already used everywhere else a base gets cold-rebuilt
+// (cuts, fillets, STL export, Join member fallback), so both Loft and
+// Import slot into all of them for free. Async (unlike every other branch
+// here) only because importSTEP itself is — it has to read the Blob's
+// bytes before OCC can parse them.
+async function buildBase(params) {
+  if (params.stepText) return await importSTEP(new Blob([params.stepText]))
   if (params.profiles) return buildLoft(params)
   return params.axis ? buildRevolve(params) : buildExtrude(params)
 }

@@ -195,6 +195,11 @@ function buildBaseWorkerParams(solid) {
   // "one-time snapshot, no live tracking" assumption Join3D/Mirror3D already
   // make elsewhere.
   if (solid.operation === 'join' || solid.operation === 'mirror') return null
+  // An imported STEP body's "recipe" is just its own file text — replayable
+  // via cadWorker.js's buildBase(stepText branch)/importStep handler
+  // exactly like every other base type, unlike join/mirror above (which
+  // genuinely have no cold-rebuild path and rely on a warm shapeStore).
+  if (solid.operation === 'import') return { stepText: solid.stepText }
   // Loft has no single profilePts/depthMm/planeId either — its "base" is an
   // ordered list of profiles sharing one normal/uAxis basis (already stored
   // in mm on the solid, see commitLoft) rebuilt via cadWorker.js's buildLoft.
@@ -314,6 +319,11 @@ async function rebuildBaseMesh(solid) {
     // mirrors that same convention.
     : solid.operation === 'loft'
     ? await cadEngine.loft({ solidId: solid.id, ...baseWorkerParams })
+    // An imported STEP body: baseWorkerParams is just {stepText} here (see
+    // buildBaseWorkerParams' import branch) — re-running the same import
+    // reproduces the identical shape, same as replaying any other recipe.
+    : solid.operation === 'import'
+    ? await cadEngine.importStep({ solidId: solid.id, ...baseWorkerParams })
     : await cadEngine.extrude({ solidId: solid.id, ...baseWorkerParams })
   return { meshData, baseWorkerParams }
 }
@@ -646,7 +656,7 @@ function featureOpColor(feat) {
   const op = feat.operation || 'extrude'
   return {
     extrude: '#FBDA2D', revolve: '#FBDA2D', cutout: '#53D3E4',
-    mirror: '#8E65F3', loft: '#FBDA2D', join: '#FFEE88',
+    mirror: '#8E65F3', loft: '#FBDA2D', join: '#FFEE88', import: '#66BB6A',
   }[op] || '#FBDA2D'
 }
 
@@ -665,6 +675,7 @@ function RowIcon({ kind, color, size=13 }) {
     mirror:  <><line x1="6.5" y1="1" x2="6.5" y2="12" strokeDasharray="1.5 1.5" {...p}/><path d="M4.5 4L2.5 5.5 4.5 7" {...p}/><path d="M8.5 4l2 1.5-2 1.5" {...p}/></>,
     join:    <><circle cx="5" cy="6.5" r="3.5" {...p}/><circle cx="8" cy="6.5" r="3.5" {...p}/></>,
     loft:    <><rect x="4" y="1.5" width="5" height="2.5" {...p}/><rect x="1.5" y="8" width="10" height="2.5" {...p}/><line x1="4.5" y1="4" x2="2.5" y2="8" {...p}/><line x1="8.5" y1="4" x2="9.5" y2="8" {...p}/></>,
+    import:  <><path d="M6.5 1v6M4 4.5l2.5 2.5L9 4.5" {...p}/><path d="M2 9.5h9" {...p}/></>,
   }
   return <svg width={size} height={size} viewBox="0 0 13 13" style={{flexShrink:0}}>{shapes[kind]}</svg>
 }
@@ -806,13 +817,13 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           // blocking it just made "join a mirrored part to its original" — an
           // ordinary CAD operation — impossible.
           const isBodyOwner = isExtrude && !isLocked &&
-            ['extrude','revolve','loft','mirror','join'].includes(feat.operation || 'extrude')
+            ['extrude','revolve','loft','mirror','join','import'].includes(feat.operation || 'extrude')
           const isBodyHidden = isBodyOwner && hiddenSolidIds?.includes(feat.solidId)
           const editingDepth = editDepthId === feat.id
 
           const rowKind = isSketch ? 'sketch' : isFillet ? 'fillet' : isMirror ? 'mirror'
             : isJoin ? 'join' : isLoft ? 'loft' : feat.operation === 'cutout' ? 'cutout'
-            : feat.operation === 'revolve' ? 'revolve' : 'extrude'
+            : feat.operation === 'revolve' ? 'revolve' : feat.operation === 'import' ? 'import' : 'extrude'
           const rowColor = featureOpColor(feat)
 
           const itemBg = isActiveSketch ? '#4FC3F722' : 'transparent'
@@ -1058,12 +1069,14 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                     <div style={{width:8,height:8,borderRadius:'50%',
                       background:feat.color||'#3a7bd5', flexShrink:0}}/>
                     <span style={{color:'#8fa0b8', fontSize:10}}>
-                      {feat.operation==='cutout'
+                      {feat.operation==='import'
+                        ? `${Math.round((feat.stepText?.length||0)/1024)}KB`
+                        : feat.operation==='cutout'
                         ? (feat.revolveAxis ? `${feat.angleDeg ?? 360}°` : feat.extentMode==='through' ? '∞ through-all' : `${feat.depthMm||'?'}mm`)
                         : feat.operation==='revolve'
                         ? `${feat.angleDeg ?? 360}°`
                         : `${feat.depthMm||'?'}mm`
-                      } · {feat.operation==='cutout' && feat.revolveAxis ? 'revolve cutout' : (feat.operation||'extrude')}
+                      } · {feat.operation==='cutout' && feat.revolveAxis ? 'revolve cutout' : feat.operation==='import' ? 'STEP import' : (feat.operation||'extrude')}
                       {feat.operation==='cutout' && !feat.revolveAxis && feat.cutDirection && feat.cutDirection!=='both'
                         ? ` · ${feat.cutDirection}` : ''}
                       {feat.operation!=='cutout' && feat.operation!=='revolve' && feat.direction && feat.direction!=='both'
@@ -1518,6 +1531,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   const snapArcsRef=useRef([])
   const loadFileRef=useRef(null)
   const loadProjectFileRef=useRef(null)
+  const importStepFileRef=useRef(null)
   // Arcade attract-screen shown once per page load — "1 PLAYER"/"2 PLAYER"
   // map to New/Open Project (see SplashScreen.jsx). Dismissing via New is
   // just hiding the overlay (a fresh load is already a blank project);
@@ -1664,6 +1678,36 @@ const App3D = forwardRef(function App3D(props, ref) {
       setFeatures([]); setSolids([])
       setLoadError('Old-format file — loaded as a sketch only, no feature tree.')
       setTimeout(()=>setLoadError(null), 4000)
+    }
+  }
+
+  // Imports a STEP file as a brand-new top-level solid body — same "push a
+  // new solid+feature" shape as commitExtrude's plain (non-cutout) success
+  // path, just with no sketch/profile involved: the whole shape comes from
+  // the file itself (see cadEngine.importStep). Lands wherever the file's
+  // own STEP-space coordinates place it — reposition afterward with Move/
+  // Copy/Rotate/Snap Move, same as any other body. `feat.type` stays
+  // 'extrude' (operation:'import' distinguishes it), matching how
+  // revolve/loft/join/mirror/cutout are all 'extrude'-type variants too —
+  // that's what keeps it flowing through baseFeatureForSolid and every
+  // other "is this a real body" filter with no special-casing.
+  async function handleImportStepFile(file) {
+    const stepText = await file.text()
+    const solidId = Date.now()
+    const name = file.name.replace(/\.(step|stp)$/i, '')
+    const color = extrudeColor
+    feat3d.commit(features)
+    try {
+      const meshData = await cadEngine.importStep({ solidId, stepText })
+      const group = replicadMeshToThree(meshData, color, solidId)
+      setSolids(prev => [...prev, { id: solidId, group, operation:'import', stepText, color }])
+      setFeatures(prev => [...prev, {
+        id: `import-${solidId}`, type:'extrude', operation:'import',
+        name, solidId, color, stepText,
+      }])
+    } catch (err) {
+      setCadError('Import failed: ' + (err.message || String(err)))
+      setTimeout(() => setCadError(null), 6000)
     }
   }
 
@@ -4383,7 +4427,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // of-mirror, mirror-of-join) — see commitMirrorSolid/rebuildDependentMirrors.
   function baseFeatureForSolid(solidId) {
     return features.find(f => f.type==='extrude' && !f.joinedInto && f.solidId===solidId &&
-      ['extrude','revolve','loft','mirror','join'].includes(f.operation || 'extrude'))
+      ['extrude','revolve','loft','mirror','join','import'].includes(f.operation || 'extrude'))
   }
 
   function activateMirror3DTool() {
@@ -5626,6 +5670,9 @@ const App3D = forwardRef(function App3D(props, ref) {
       // its own basis + ordered profile list instead, same fields
       // buildBaseWorkerParams' loft branch reads off a `solid` object.
       normal: feat.normal, origin: feat.origin, uAxis: feat.uAxis, vAxis: feat.vAxis, profiles: feat.profiles, ruled: feat.ruled,
+      // An imported STEP body's whole "recipe" — see buildBaseWorkerParams'
+      // import branch.
+      stepText: feat.stepText,
       // Move/Copy's baked position offset (see activateMoveCopy3DTool's own
       // comment) — orthogonal to every operation type above, so it's just
       // carried through verbatim regardless of which branch built the rest
@@ -10284,6 +10331,15 @@ const App3D = forwardRef(function App3D(props, ref) {
                 <IconLoad/>
                 <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>OPEN</span>
               </button>
+              <button onClick={()=>importStepFileRef.current.click()}
+                title="Import STEP — adds the file as a new solid body, reposition it with Move/Copy afterward"
+                style={{...btnBase,flexDirection:'column',gap:2,background:'transparent',border:'none'}}>
+                <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                  <path d="M11 2l8 4.5v9L11 20l-8-4.5v-9L11 2z" stroke="#aaa" strokeWidth="1.5" strokeLinejoin="round"/>
+                  <path d="M11 6v7M8 10l3 3 3-3" stroke="#66BB6A" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>IMPORT</span>
+              </button>
               <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
             </>
           )}
@@ -11180,6 +11236,13 @@ const App3D = forwardRef(function App3D(props, ref) {
           const file=e.target.files[0];e.target.value=''
           if (!file) return
           await handleOpenProject(file)
+        }}
+      />
+      <input ref={importStepFileRef} type="file" accept=".step,.stp" style={{display:'none'}}
+        onChange={async e=>{
+          const file=e.target.files[0];e.target.value=''
+          if (!file) return
+          await handleImportStepFile(file)
         }}
       />
       {loadError&&<div style={{position:'fixed',top:10,left:'50%',transform:'translateX(-50%)',background:'#b71c1c',color:'white',padding:'6px 16px',borderRadius:4,fontFamily:'monospace',fontSize:12,pointerEvents:'none'}}>⚠ {loadError}</div>}

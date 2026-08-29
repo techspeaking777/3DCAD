@@ -4070,6 +4070,10 @@ const App3D = forwardRef(function App3D(props, ref) {
   // diameter/radius), or a general curve (fallback: summed segment length,
   // labeled so it's not mistaken for a true diameter). Returns null if the
   // edge can't be looked up (e.g. solid rebuilt since the hover).
+  // `points` (the world-mm polyline, as THREE.Vector3s) is included on every
+  // return so callers besides Measure — Snap Move's getEdgeSnapCandidates —
+  // can derive endpoint/midpoint candidates without recomputing this same
+  // matrix-transform pass.
   function classifyEdgeGeometry(vp, solidId, edgeId) {
     const poly = vp.getEdgePolyline(solidId, edgeId)
     if (!poly?.points || poly.points.length < 6) return null
@@ -4091,7 +4095,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       : 0
     const straightTol = Math.max(0.02, chord * 0.01)
     if (chordDir && maxDev < straightTol) {
-      return { kind: 'straight', length: chord }
+      return { kind: 'straight', length: chord, points: pts }
     }
 
     // Try a circle fit through 3 well-spread samples (first / ~1/3 / ~2/3).
@@ -4101,9 +4105,54 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (fit) {
       const tol = Math.max(0.05, fit.radius * 0.02)
       const fits = pts.every(p => Math.abs(p.distanceTo(fit.center) - fit.radius) < tol)
-      if (fits) return { kind: 'circular', radius: fit.radius, diameter: fit.radius*2, center: fit.center }
+      if (fits) return { kind: 'circular', radius: fit.radius, diameter: fit.radius*2, center: fit.center, points: pts }
     }
-    return { kind: 'curve', length: segLen }
+    return { kind: 'curve', length: segLen, points: pts }
+  }
+
+  // Derives Snap Move's discrete snap candidates for one edge: both
+  // endpoints and the midpoint always, plus the circle's own center for a
+  // circular edge (e.g. a hole) — reuses classifyEdgeGeometry so a
+  // straight/circular/curve edge is only ever classified in one place.
+  // Returns [{point:[x,y,z]}, ...] (mm) or [] if the edge can't be read.
+  function getEdgeSnapCandidates(vp, solidId, edgeId) {
+    const geo = classifyEdgeGeometry(vp, solidId, edgeId)
+    if (!geo?.points?.length) return []
+    // A circular edge (a hole, a cylinder's rim) offers ONLY its center —
+    // not competing with points on the rim itself. Every point ON a circle
+    // is exactly `radius` away from its center by definition, while a
+    // rim-tessellation "first/last" point sits right where the cursor is
+    // (distance ~0) — nearestSnapCandidate's plain 3D-distance rule would
+    // then NEVER pick the center, permanently defeating the "center point
+    // to center point" case the user explicitly asked for. A full circle
+    // also has no real geometric "vertex" the way a straight edge's actual
+    // corners are — first/last there are just a tessellation artifact, not
+    // a meaningful snap target — so center is the only candidate offered.
+    if (geo.kind === 'circular') {
+      return [{ point: [geo.center.x, geo.center.y, geo.center.z] }]
+    }
+    const pts = geo.points
+    const first = pts[0], last = pts[pts.length-1]
+    const mid = geo.kind === 'straight'
+      ? first.clone().add(last).multiplyScalar(0.5)
+      : pts[Math.floor(pts.length/2)]
+    return [
+      { point: [first.x, first.y, first.z] },
+      { point: [last.x, last.y, last.z] },
+      { point: [mid.x, mid.y, mid.z] },
+    ]
+  }
+
+  // Nearest of an edge's snap candidates to a raw hit point (plain 3D
+  // distance — the user is already hovering this specific edge, so its
+  // closest special point is always the intended one, never a dead zone).
+  function nearestSnapCandidate(candidates, hitPoint) {
+    let best = null, bestD = Infinity
+    for (const c of candidates) {
+      const d = Math.hypot(c.point[0]-hitPoint[0], c.point[1]-hitPoint[1], c.point[2]-hitPoint[2])
+      if (d < bestD) { bestD = d; best = c }
+    }
+    return best
   }
 
   // Redraws the point-mode markers (P1 dot, live hover dot, dashed connector
@@ -4428,6 +4477,16 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [moveCopy3dDragHandle, setMoveCopy3dDragHandle] = useState(null) // {kind:'move'|'rotate', axis:'x'|'y'|'z'} | null
   const [moveCopy3dDistInput, setMoveCopy3dDistInput] = useState('0')   // signed mm, kind:'move'
   const [moveCopy3dAngleInput, setMoveCopy3dAngleInput] = useState('0') // signed degrees, kind:'rotate'
+  // Stage 3 — Snap Move: a third mode alongside the gizmo, entered once a
+  // body is selected. No dragging at all — click a point ON the selected
+  // body, then click a target point on any solid (self or other); the body
+  // translates by that exact vector, no rotation, no lasting relationship
+  // (a one-time move, same as a plain gizmo Move — see commitSnapMove).
+  // 0=off, 1=picking the source point (must land on moveCopy3dSel),
+  // 2=picking the target point (any solid).
+  const [moveCopy3dSnapStep, setMoveCopy3dSnapStep] = useState(0)
+  const [moveCopy3dSnapP1, setMoveCopy3dSnapP1] = useState(null)       // {solidId, point:[x,y,z]mm} | null
+  const [moveCopy3dSnapHover, setMoveCopy3dSnapHover] = useState(null) // same shape, current hover candidate
   // Grab-time reference basis for the rotate drag's angle math (see
   // handleMoveCopy3DDragMove) — a plain ref, not state: write-once the
   // instant a ring is grabbed, read every mouse move after that, no
@@ -4490,6 +4549,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     setMoveCopy3dDragHandle(null)
     setMoveCopy3dDistInput('0')
     setMoveCopy3dAngleInput('0')
+    setMoveCopy3dSnapStep(0)
+    setMoveCopy3dSnapP1(null)
+    setMoveCopy3dSnapHover(null)
     moveCopy3dRotateBasisRef.current = null
     viewport3dRef.current?.clearSolidHighlight()
     viewport3dRef.current?.clearSolidHover()
@@ -4517,7 +4579,10 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   useEffect(() => {
-    if (tool !== 'movecopy3d' || moveCopy3dSel == null) {
+    // No gizmo while Snap Move is engaged — that mode is pure point-to-point
+    // clicking, no handle to drag, and showing the arrows/rings alongside it
+    // would be confusing about which interaction is actually live.
+    if (tool !== 'movecopy3d' || moveCopy3dSel == null || moveCopy3dSnapStep > 0) {
       viewport3dRef.current?.clearSolidHighlight()
       viewport3dRef.current?.hideMoveGizmo()
       return
@@ -4525,7 +4590,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     const solid = solids.find(s => s.id === moveCopy3dSel)
     viewport3dRef.current?.highlightSolid(moveCopy3dSel)
     viewport3dRef.current?.showMoveGizmo(moveCopy3dSel, rotationToQuat(solid?.transform?.rotation))
-  }, [moveCopy3dSel, tool])
+  }, [moveCopy3dSel, tool, moveCopy3dSnapStep])
 
   useEffect(() => {
     if (tool !== 'movecopy3d' || moveCopy3dHoverSolidId==null) { viewport3dRef.current?.clearSolidHover(); return }
@@ -4630,10 +4695,90 @@ const App3D = forwardRef(function App3D(props, ref) {
   // Viewport3D call, no React state — same "mutate material, skip
   // re-render" convention as hoverSolid/highlightSolid.
   function handleMoveCopy3DGizmoHover(e) {
-    if (tool !== 'movecopy3d' || moveCopy3dSel == null || moveCopy3dDragHandle) return
+    if (tool !== 'movecopy3d' || moveCopy3dSel == null || moveCopy3dDragHandle || moveCopy3dSnapStep > 0) return
     const hit = viewport3dRef.current?.raycastMoveGizmo(e.clientX, e.clientY)
     viewport3dRef.current?.hoverMoveGizmoAxis(hit ? `${hit.kind}-${hit.axis}` : null)
   }
+
+  // Snap Move — step 1 only accepts a point on the body being moved
+  // (moveCopy3dSel), step 2 accepts any solid. Same raycastSolidEdges pass
+  // Measure/Fillet3D already use; only edges contribute snap candidates
+  // (vertices + circle centers) — see getEdgeSnapCandidates's own comment
+  // on why bare faces aren't a candidate source.
+  function handleSnapMoveHover(e) {
+    if (tool !== 'movecopy3d' || moveCopy3dSnapStep === 0) return
+    const vp = viewport3dRef.current; if (!vp) return
+    const edgeHit = vp.raycastSolidEdges(e.clientX, e.clientY)
+    if (!edgeHit || edgeHit.edgeId == null) { setMoveCopy3dSnapHover(null); return }
+    if (moveCopy3dSnapStep === 1 && edgeHit.solidId !== moveCopy3dSel) { setMoveCopy3dSnapHover(null); return }
+    const candidates = getEdgeSnapCandidates(vp, edgeHit.solidId, edgeHit.edgeId)
+    const nearest = nearestSnapCandidate(candidates, edgeHit.point)
+    setMoveCopy3dSnapHover(nearest ? { solidId: edgeHit.solidId, point: nearest.point } : null)
+  }
+
+  function handleSnapMoveClick(e) {
+    if (tool !== 'movecopy3d' || moveCopy3dSnapStep === 0 || !moveCopy3dSnapHover) return
+    if (moveCopy3dSnapStep === 1) {
+      setMoveCopy3dSnapP1(moveCopy3dSnapHover)
+      setMoveCopy3dSnapHover(null)
+      setMoveCopy3dSnapStep(2)
+      return
+    }
+    commitSnapMove()
+  }
+
+  // Dot-at-P1 + dot-at-hover + dashed connector, same shared overlay canvas
+  // and drawing shape as drawMeasureOverlay/clearMeasureOverlay (never
+  // active at the same time — Measure and Move/Copy are different tools) —
+  // just no distance label, since the second click commits immediately
+  // rather than reporting a number.
+  function clearSnapMoveOverlay() {
+    const vp = viewport3dRef.current; if (!vp) return
+    const oc = vp.getExtrudePreviewCanvas(); if (!oc) return
+    const ctx = oc.getContext('2d')
+    ctx.setTransform(1,0,0,1,0,0)
+    ctx.clearRect(0,0,oc.width,oc.height)
+  }
+
+  function drawSnapMoveOverlay(vp, p1, hover) {
+    const oc = vp.getExtrudePreviewCanvas(); if (!oc) return
+    const ctx = oc.getContext('2d')
+    ctx.setTransform(1,0,0,1,0,0)
+    ctx.clearRect(0,0,oc.width,oc.height)
+    const SCALE = 2
+    const color = '#FF9800'
+    const toScreen = p => vp.worldToScreen(p[0]*SCALE, p[1]*SCALE, p[2]*SCALE)
+
+    const drawDot = (pt) => {
+      const s = toScreen(pt); if (!s) return null
+      ctx.save(); ctx.fillStyle = color
+      ctx.beginPath(); ctx.arc(s.x, s.y, 5, 0, Math.PI*2); ctx.fill()
+      ctx.restore()
+      return s
+    }
+
+    const p1Screen = p1 ? drawDot(p1.point) : null
+    const hoverScreen = hover ? drawDot(hover.point) : null
+    if (p1Screen && hoverScreen) {
+      ctx.save()
+      ctx.strokeStyle = color
+      ctx.setLineDash([5,4])
+      ctx.lineWidth = 1.5
+      ctx.beginPath()
+      ctx.moveTo(p1Screen.x, p1Screen.y)
+      ctx.lineTo(hoverScreen.x, hoverScreen.y)
+      ctx.stroke()
+      ctx.restore()
+    }
+  }
+
+  // Keeps Snap Move's point markers in sync — mirrors Measure's own
+  // marker-sync effect.
+  useEffect(() => {
+    const vp = viewport3dRef.current
+    if (!vp || tool !== 'movecopy3d' || moveCopy3dSnapStep === 0) { clearSnapMoveOverlay(); return }
+    drawSnapMoveOverlay(vp, moveCopy3dSnapP1, moveCopy3dSnapHover)
+  }, [tool, moveCopy3dSnapStep, moveCopy3dSnapP1, moveCopy3dSnapHover])
 
   // Recolors/isolates the armed handle the moment it's grabbed, and
   // restores every handle to its idle state once the drag is
@@ -4654,33 +4799,17 @@ const App3D = forwardRef(function App3D(props, ref) {
   // reads from the original (sourceSolidId) and writes a brand-new
   // solid+feature, inheriting the original's shape-defining fields so it
   // still rebuilds correctly on a cold reload (see featureToTempSolid).
-  async function commitMoveCopy3D() {
-    const solidId = moveCopy3dSel
-    const handle = moveCopy3dDragHandle
+  // Shared tail for every Move/Copy/Rotate/Snap-Move commit: given the
+  // worker params for THIS delta and the resulting cumulative transform,
+  // bakes it in (or duplicates onto a new body, if Copy is active) and
+  // resets the tool back to "Select Body." Factored out of commitMoveCopy3D
+  // so Snap Move (which computes its own position-only delta from two
+  // picked points, not a gizmo handle) can commit through the exact same
+  // path instead of duplicating the copy/move branching.
+  async function commitMoveCopy3DTransform(solidId, workerParams, newTransform) {
     const solid = solids.find(s => s.id === solidId)
     const feat = baseFeatureForSolid(solidId)
-    const vp = viewport3dRef.current
-    if (solidId==null || !handle || !solid || !feat || !vp) { resetMoveCopy3D(); return }
-    const dir = vp.getGizmoAxisWorldDir(handle.axis)
-    const priorPos = solid.transform?.position || [0,0,0]
-    const priorRotation = solid.transform?.rotation || null
-
-    let workerParams, newTransform
-    if (handle.kind === 'move') {
-      const mm = parseFloat(moveCopy3dDistInput) || 0
-      const delta = [dir.x*mm, dir.y*mm, dir.z*mm]
-      workerParams = { position: delta }
-      newTransform = { position: [priorPos[0]+delta[0], priorPos[1]+delta[1], priorPos[2]+delta[2]], rotation: priorRotation }
-    } else {
-      const deg = parseFloat(moveCopy3dAngleInput) || 0
-      const origin = vp.getMoveGizmoOrigin()
-      const pivotMm = [pxToMm(origin.x), pxToMm(origin.y), pxToMm(origin.z)]
-      workerParams = { rotation: { angleDeg: deg, axis: [dir.x, dir.y, dir.z], pivot: pivotMm } }
-      const Rdelta = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(dir.x, dir.y, dir.z), THREE.MathUtils.degToRad(deg))
-      const Rnew = Rdelta.multiply(rotationToQuat(priorRotation))
-      newTransform = { position: priorPos, rotation: quatToAxisAngle(Rnew) }
-    }
-
+    if (!solid || !feat) { resetMoveCopy3D(); return }
     feat3d.commit(features)
     try {
       if (moveCopy3dMode === 'copy') {
@@ -4703,21 +4832,66 @@ const App3D = forwardRef(function App3D(props, ref) {
         setSolids(prev => prev.map(s => s.id===solidId ? { ...s, group, transform: newTransform } : s))
         setFeatures(prev => prev.map(f => f.id===feat.id ? { ...f, transform: newTransform } : f))
       }
-      // Move (not Copy) is the only case that skips the preview-position
-      // reset: its solidId gets a freshly rebuilt group swapped in above,
-      // already positioned correctly, so resetting the OLD group (about to
-      // be discarded) would just flash it back to its start position for a
-      // frame first. Copy leaves the original's own group/transform
-      // completely untouched — nothing else will ever clear the live-drag
-      // offset that previewMoveSolid/previewRotateSolid left on it — so it
-      // still needs the real reset.
+      // Move/Snap Move (not Copy) is the only case that skips the
+      // preview-position reset: its solidId gets a freshly rebuilt group
+      // swapped in above, already positioned correctly, so resetting the
+      // OLD group (about to be discarded) would just flash it back to its
+      // start position for a frame first. Copy leaves the original's own
+      // group/transform completely untouched — nothing else will ever
+      // clear the live-drag offset that previewMoveSolid/previewRotateSolid
+      // left on it — so it still needs the real reset.
       resetMoveCopy3D({ skipPreviewReset: moveCopy3dMode !== 'copy' })
-      return
     } catch (err) {
       setCadError('Move failed: ' + (err.message || String(err)))
       setTimeout(() => setCadError(null), 6000)
+      resetMoveCopy3D()
     }
-    resetMoveCopy3D()
+  }
+
+  async function commitMoveCopy3D() {
+    const solidId = moveCopy3dSel
+    const handle = moveCopy3dDragHandle
+    const solid = solids.find(s => s.id === solidId)
+    const vp = viewport3dRef.current
+    if (solidId==null || !handle || !solid || !vp) { resetMoveCopy3D(); return }
+    const dir = vp.getGizmoAxisWorldDir(handle.axis)
+    const priorPos = solid.transform?.position || [0,0,0]
+    const priorRotation = solid.transform?.rotation || null
+
+    let workerParams, newTransform
+    if (handle.kind === 'move') {
+      const mm = parseFloat(moveCopy3dDistInput) || 0
+      const delta = [dir.x*mm, dir.y*mm, dir.z*mm]
+      workerParams = { position: delta }
+      newTransform = { position: [priorPos[0]+delta[0], priorPos[1]+delta[1], priorPos[2]+delta[2]], rotation: priorRotation }
+    } else {
+      const deg = parseFloat(moveCopy3dAngleInput) || 0
+      const origin = vp.getMoveGizmoOrigin()
+      const pivotMm = [pxToMm(origin.x), pxToMm(origin.y), pxToMm(origin.z)]
+      workerParams = { rotation: { angleDeg: deg, axis: [dir.x, dir.y, dir.z], pivot: pivotMm } }
+      const Rdelta = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(dir.x, dir.y, dir.z), THREE.MathUtils.degToRad(deg))
+      const Rnew = Rdelta.multiply(rotationToQuat(priorRotation))
+      newTransform = { position: priorPos, rotation: quatToAxisAngle(Rnew) }
+    }
+    await commitMoveCopy3DTransform(solidId, workerParams, newTransform)
+  }
+
+  // Snap Move commit: the delta is just the vector between the two picked
+  // points (mm) — no rotation, no gizmo handle involved — so it shares
+  // commitMoveCopy3DTransform's copy/move branching exactly like a plain
+  // gizmo Move does.
+  async function commitSnapMove() {
+    const solidId = moveCopy3dSel
+    const solid = solids.find(s => s.id === solidId)
+    if (solidId==null || !solid || !moveCopy3dSnapP1 || !moveCopy3dSnapHover) { resetMoveCopy3D(); return }
+    const p1 = moveCopy3dSnapP1.point, p2 = moveCopy3dSnapHover.point
+    const delta = [p2[0]-p1[0], p2[1]-p1[1], p2[2]-p1[2]]
+    const priorPos = solid.transform?.position || [0,0,0]
+    const newTransform = {
+      position: [priorPos[0]+delta[0], priorPos[1]+delta[1], priorPos[2]+delta[2]],
+      rotation: solid.transform?.rotation || null,
+    }
+    await commitMoveCopy3DTransform(solidId, { position: delta }, newTransform)
   }
 
   // ── Join (3D boolean union) state machine ─────────────────────────────────
@@ -7715,6 +7889,13 @@ const App3D = forwardRef(function App3D(props, ref) {
       commitMoveCopy3D()
       return
     }
+    // Snap Move: picking point 1 or point 2 — takes over clicks entirely
+    // while active (the gizmo is hidden for the same reason, see the
+    // showMoveGizmo effect's own comment).
+    if (tool==='movecopy3d' && moveCopy3dSnapStep > 0) {
+      handleSnapMoveClick(e)
+      return
+    }
     // Move/Copy step 2a: body picked, no handle armed yet — a click only
     // does something if it actually lands on a gizmo arrow/ring (arms that
     // handle); anything else is ignored rather than reinterpreted as
@@ -8569,6 +8750,10 @@ const App3D = forwardRef(function App3D(props, ref) {
         moveCopy3dRotateBasisRef.current = null
         return
       }
+      // Snap Move: step 2 backs out to step 1 (clear P1, keep picking on
+      // the same body); step 1 exits Snap Move entirely back to the gizmo.
+      if (moveCopy3dSnapStep === 2) { setMoveCopy3dSnapP1(null); setMoveCopy3dSnapHover(null); setMoveCopy3dSnapStep(1); return }
+      if (moveCopy3dSnapStep === 1) { setMoveCopy3dSnapStep(0); setMoveCopy3dSnapHover(null); return }
       if (moveCopy3dSel != null) { setMoveCopy3dSel(null); return }
       resetMoveCopy3D(); setTool('select'); return
     }
@@ -9252,7 +9437,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   return (
     <div ref={rootDivRef} style={{display:'flex',height:'100%',outline:'none'}} tabIndex={0}
       onKeyDown={handleKeyDown}
-      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e); handleMirror3DOffsetDragMove(e); handleExtrudeOffsetDragMove(e); handleMoveCopy3DDragMove(e); handleMoveCopy3DGizmoHover(e) }}
+      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e); handleMirror3DOffsetDragMove(e); handleExtrudeOffsetDragMove(e); handleMoveCopy3DDragMove(e); handleMoveCopy3DGizmoHover(e); handleSnapMoveHover(e) }}
       onMouseUp={e=>{ }}
     >
 
@@ -9868,14 +10053,17 @@ const App3D = forwardRef(function App3D(props, ref) {
           {/* ── SmartStep bar: overlays bottom of viewport during Move/Copy ── */}
           <SmartStepBar
             op={tool==='movecopy3d' ? 'MOVE/COPY' : null}
-            steps={[{ id:1, label:'Select Body' }, { id:2, label: moveCopy3dDragHandle?.kind==='rotate' ? 'Rotate' : 'Move' }]}
+            steps={[{ id:1, label:'Select Body' }, { id:2, label:
+              moveCopy3dSnapStep>0 ? 'Snap Move' : moveCopy3dDragHandle?.kind==='rotate' ? 'Rotate' : 'Move' }]}
             currentStep={moveCopy3dSel!=null ? 2 : 1}
             color="#FF9800"
             hint={moveCopy3dSel==null
               ? 'Click a body to move or copy'
+              : moveCopy3dSnapStep===1 ? 'Click a point on the body to move'
+              : moveCopy3dSnapStep===2 ? 'Click a point on the target'
               : moveCopy3dDragHandle
                 ? `Move the mouse or type ${moveCopy3dDragHandle.kind==='rotate' ? 'an angle' : 'a distance'}, click or Enter to confirm`
-                : 'Click an axis arrow or rotate ring on the gizmo'}
+                : 'Click an axis arrow/ring on the gizmo, or Snap Move'}
             action={moveCopy3dSel==null ? null : [
               // Two separate always-clickable buttons, only one highlighted
               // at a time — a single toggle button that renamed itself
@@ -9883,6 +10071,15 @@ const App3D = forwardRef(function App3D(props, ref) {
               // name the current mode, or what clicking switches to?).
               { label:'Move', enabled:true, active: moveCopy3dMode!=='copy', onClick: () => setMoveCopy3dMode('move') },
               { label:'Copy', enabled:true, active: moveCopy3dMode==='copy', onClick: () => setMoveCopy3dMode('copy') },
+              // Snap Move toggle — hidden mid-drag (a gizmo handle already
+              // armed), since the two interactions are mutually exclusive.
+              ...(moveCopy3dDragHandle ? [] : [{
+                label:'⌖ Snap Move', enabled:true, active: moveCopy3dSnapStep>0,
+                onClick: () => {
+                  if (moveCopy3dSnapStep>0) { setMoveCopy3dSnapStep(0); setMoveCopy3dSnapP1(null); setMoveCopy3dSnapHover(null) }
+                  else setMoveCopy3dSnapStep(1)
+                },
+              }]),
               ...(moveCopy3dDragHandle ? [{
                 label:'✓ Confirm', enabled:true, onClick:commitMoveCopy3D,
                 popover: moveCopy3dDragHandle.kind==='rotate'

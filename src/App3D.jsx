@@ -591,15 +591,27 @@ function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEP
           (bottom:100%, centered) means it visually reads as belonging to
           that exact button with no ref/getBoundingClientRect bookkeeping,
           and it stays correctly placed even if the bar's layout shifts. */}
-      {actions.map((a, i) => (
+      {actions.map((a, i) => {
+        // `active` is a separate concept from `enabled`: it's for a set of
+        // mutually-exclusive toggle buttons (e.g. Move/Copy) where BOTH
+        // stay clickable but only one should look "on" at a time — using
+        // `enabled` alone for that (as the single old Move/Copy toggle
+        // button did, flipping its own label between "Move"/"Copy") reads
+        // as ambiguous: is the label naming the current mode, or the mode
+        // clicking it switches TO? Two separate buttons with one clearly
+        // highlighted removes that ambiguity. Omitting `active` keeps the
+        // original always-filled look for every other existing call site.
+        const isGhost = a.active === false
+        return (
         <div key={i} style={{ position: 'relative', marginRight: 16 }}>
           <button
             onClick={a.onClick}
             disabled={!a.enabled}
             style={{
-              padding:'5px 14px', borderRadius: 20, border:'none',
-              background: a.enabled ? color : '#2a2a4a',
-              color: a.enabled ? '#0d0d1a' : '#666',
+              padding:'5px 14px', borderRadius: 20,
+              border: isGhost ? `1.5px solid ${color}88` : 'none',
+              background: isGhost ? 'transparent' : (a.enabled ? color : '#2a2a4a'),
+              color: isGhost ? color : (a.enabled ? '#0d0d1a' : '#666'),
               fontFamily:'monospace', fontWeight:'bold', fontSize: 11,
               cursor: a.enabled ? 'pointer' : 'default',
             }}>
@@ -607,7 +619,8 @@ function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEP
           </button>
           {a.popover}
         </div>
-      ))}
+        )
+      })}
 
       {/* Esc hint */}
       <span style={{
@@ -4433,7 +4446,12 @@ const App3D = forwardRef(function App3D(props, ref) {
     resetMoveCopy3D()
   }
 
-  function resetMoveCopy3D() {
+  // skipPreviewReset: passed through to hideMoveGizmo — see its own comment.
+  // Only a just-succeeded commit should pass true (the old group is about
+  // to be discarded anyway once setSolids/setFeatures lands); every other
+  // caller (Escape/cancel, deactivating the tool, a failed commit) needs
+  // the default false so the live-drag offset actually gets cleared.
+  function resetMoveCopy3D({ skipPreviewReset=false } = {}) {
     setMoveCopy3dSel(null)
     setMoveCopy3dHoverSolidId(null)
     setMoveCopy3dMode('move')
@@ -4442,7 +4460,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     viewport3dRef.current?.clearSolidHighlight()
     viewport3dRef.current?.clearSolidHover()
     viewport3dRef.current?.hoverMoveGizmoAxis(null)
-    viewport3dRef.current?.hideMoveGizmo()
+    viewport3dRef.current?.hideMoveGizmo(skipPreviewReset)
   }
 
   // Step 1 body pick — same baseFeatureForSolid eligibility Mirror3D/Join3D
@@ -4578,6 +4596,16 @@ const App3D = forwardRef(function App3D(props, ref) {
         setSolids(prev => prev.map(s => s.id===solidId ? { ...s, group, transform: { position: newPos } } : s))
         setFeatures(prev => prev.map(f => f.id===feat.id ? { ...f, transform: { position: newPos } } : f))
       }
+      // Move (not Copy) is the only case that skips the preview-position
+      // reset: its solidId gets a freshly rebuilt group swapped in above,
+      // already positioned correctly, so resetting the OLD group (about to
+      // be discarded) would just flash it back to its start position for a
+      // frame first. Copy leaves the original's own group/position
+      // completely untouched — nothing else will ever clear the live-drag
+      // offset that previewMoveSolid left on it — so it still needs the
+      // real reset.
+      resetMoveCopy3D({ skipPreviewReset: moveCopy3dMode !== 'copy' })
+      return
     } catch (err) {
       setCadError('Move failed: ' + (err.message || String(err)))
       setTimeout(() => setCadError(null), 6000)
@@ -9729,8 +9757,12 @@ const App3D = forwardRef(function App3D(props, ref) {
                 ? 'Move the mouse or type a distance, click or Enter to confirm'
                 : 'Click an axis arrow on the gizmo'}
             action={moveCopy3dSel==null ? null : [
-              { label: moveCopy3dMode==='copy' ? '⧉ Copy' : '✛ Move', enabled:true,
-                onClick: () => setMoveCopy3dMode(m => m==='copy' ? 'move' : 'copy') },
+              // Two separate always-clickable buttons, only one highlighted
+              // at a time — a single toggle button that renamed itself
+              // between "Move"/"Copy" read as ambiguous (does the label
+              // name the current mode, or what clicking switches to?).
+              { label:'Move', enabled:true, active: moveCopy3dMode!=='copy', onClick: () => setMoveCopy3dMode('move') },
+              { label:'Copy', enabled:true, active: moveCopy3dMode==='copy', onClick: () => setMoveCopy3dMode('copy') },
               ...(moveCopy3dDragAxis ? [{
                 label:'✓ Confirm', enabled:true, onClick:commitMoveCopy3D,
                 popover: <OffsetDistancePopover color="#FF9800" label={moveCopy3dMode==='copy' ? 'COPY' : 'MOVE'}

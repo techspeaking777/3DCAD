@@ -1834,17 +1834,24 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     },
 
     /**
-     * Hides the Move/Copy gizmo shown by showMoveGizmo(), if any, and resets
-     * the dragged solid's live-preview position back to zero. On a real
-     * commit this is a harmless no-op (the commit rebuilds the solid with
-     * the offset baked into its geometry and swaps in a brand-new group at
-     * identity position, discarding this one entirely) — but on Escape/
-     * cancel, nothing else would ever clear the leftover drag offset.
+     * Hides the Move/Copy gizmo shown by showMoveGizmo(), if any. On
+     * Escape/cancel, also resets the dragged solid's live-preview position
+     * back to zero — nothing else would ever clear that leftover drag
+     * offset. Pass skipPreviewReset:true from a successful commit: React's
+     * setSolids/setFeatures update (which swaps in a freshly rebuilt group,
+     * offset already baked into its geometry, at identity position) hasn't
+     * actually reached this group yet when commitMoveCopy3D calls this —
+     * state updates aren't synchronous — so zeroing THIS group's position
+     * here would snap the old group back to its start position for one
+     * visible frame before the new group replaces it, a jump-back-then-
+     * jump-forward flash. Skipping it just leaves the old (about to be
+     * discarded) group exactly where the live drag left it until the swap
+     * happens, so there's nothing to flash.
      */
-    hideMoveGizmo() {
+    hideMoveGizmo(skipPreviewReset=false) {
       if (moveGizmoRef.current) moveGizmoRef.current.visible = false
       const { group } = moveGizmoStateRef.current
-      if (group) group.position.set(0,0,0)
+      if (group && !skipPreviewReset) group.position.set(0,0,0)
       moveGizmoStateRef.current = { solidId: null, basePosition: null, group: null }
     },
 

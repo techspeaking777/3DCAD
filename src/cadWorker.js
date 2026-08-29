@@ -651,16 +651,17 @@ self.onmessage = async function(e) {
       }
       if (params.solidId) shapeStore.set(params.solidId, shape)
     } else if (type==='transformShape') {
-      // Bakes a Move/Copy's translation into the solid's actual OCC geometry
-      // — same shapeStore-or-cold-rebuild-from-params fallback fillet3d
-      // already uses on a cache miss. Move re-targets the SAME solidId (no
-      // sourceSolidId) so this reads and overwrites one shapeStore entry —
-      // repeated live moves each send only the NEW delta, since the shape
-      // already sitting in the cache reflects every prior move already
-      // applied (the cumulative total lives on the feature/solid's own
-      // `transform` field in App3D.jsx, not in the worker). Copy passes a
-      // distinct `sourceSolidId` to read from and `solidId` to write the new
-      // body's shape to, mirroring mirrorShape's own source/target split.
+      // Bakes a Move/Copy/Rotate's transform into the solid's actual OCC
+      // geometry — same shapeStore-or-cold-rebuild-from-params fallback
+      // fillet3d already uses on a cache miss. Move re-targets the SAME
+      // solidId (no sourceSolidId) so this reads and overwrites one
+      // shapeStore entry — repeated live moves/rotates each send only the
+      // NEW delta, since the shape already sitting in the cache reflects
+      // every prior move/rotate already applied (the cumulative total
+      // lives on the feature/solid's own `transform` field in App3D.jsx,
+      // not in the worker). Copy passes a distinct `sourceSolidId` to read
+      // from and `solidId` to write the new body's shape to, mirroring
+      // mirrorShape's own source/target split.
       let base = shapeStore.get(params.sourceSolidId ?? params.solidId)
       if (!base) {
         if (!params.base) throw new Error('Transform-MISS: base not in store and no fallback params')
@@ -675,7 +676,22 @@ self.onmessage = async function(e) {
           }
         }
       }
-      shape = base.translate(params.position)
+      // rotation.pivot present = a live incremental rotate delta (App3D
+      // already knows the body's CURRENT world pivot at drag time — the
+      // shape found above may already carry prior transforms, this is
+      // just the fresh delta on top). rotation.pivot ABSENT = a full
+      // cumulative rebuild (rebuildSolidChain/rebuildFeatureSolid's mirror
+      // branch, replaying the feature's whole stored `transform` in one
+      // shot against a pristine, never-transformed shape) — pivot must be
+      // that pristine shape's OWN center, which only the worker can know
+      // (boundingBox is OCC-side). Order is fixed: rotate about that
+      // pivot, THEN translate — matches how `transform.rotation`'s
+      // cumulative angle is defined relative to the untransformed shape.
+      if (params.rotation) {
+        const pivot = params.rotation.pivot ?? base.boundingBox.center
+        base = base.rotate(params.rotation.angleDeg, pivot, params.rotation.axis)
+      }
+      shape = params.position ? base.translate(params.position) : base
       if (params.solidId) shapeStore.set(params.solidId, shape)
     } else {
       throw new Error(`Unknown: ${type}`)

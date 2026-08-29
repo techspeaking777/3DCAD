@@ -38,6 +38,20 @@ import { SKETCH_PLANES } from './SketchPlane.js'
 import { faceHitToPlane, previewBottomEdge, faceBoundarySegments, facePickBoundaryLoops } from './FacePlane.js'
 import { mmToPx } from './constants.js'
 
+// Move/Copy/Rotate gizmo axis convention — colors match SketchPlane.js's
+// planeColor() mapped from "the plane whose NORMAL is this axis"
+// (X↔YZ-plane green, Y↔XZ-plane red, Z↔XY-plane blue), deliberately NOT the
+// generic red/green/blue CAD convention, so it reads consistently with the
+// work-plane colors already taught elsewhere in this app.
+const AXIS_META = [
+  { axis:'x', color:0x22cc55 },
+  { axis:'y', color:0xff3333 },
+  { axis:'z', color:0x2255ff },
+]
+const AXIS_UNIT_DIRS = { x:new THREE.Vector3(1,0,0), y:new THREE.Vector3(0,1,0), z:new THREE.Vector3(0,0,1) }
+const UNIT_Y = new THREE.Vector3(0,1,0)   // move arrows are built pointing local +Y
+const UNIT_Z = new THREE.Vector3(0,0,1)   // TorusGeometry's ring axis is local Z by construction
+
 // The hit triangle's own geometric normal (from its vertex POSITIONS via
 // THREE's raycaster, not the mesh's stored per-vertex normal ATTRIBUTES) —
 // the same value faceHitToPlane itself uses at actual click/commit time.
@@ -1759,25 +1773,23 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
      * arrows always point along world axes — reorienting to a solid's own
      * local axes is a Stage 2 concern once rotation exists).
      */
-    showMoveGizmo(solidId) {
+    showMoveGizmo(solidId, rotationQuat=null) {
       const s = stateRef.current; if (!s?.solidsGroup) return
       const group = s.solidsGroup.children.find(g => g.userData?.solidId === solidId)
       if (!group) return
       const center = new THREE.Box3().setFromObject(group).getCenter(new THREE.Vector3())
+      const bodyQuat = rotationQuat ? rotationQuat.clone() : new THREE.Quaternion()
       let gizmo = moveGizmoRef.current
       if (!gizmo) {
         gizmo = new THREE.Group()
-        const AXES = [
-          { axis:'x', dir:new THREE.Vector3(1,0,0), color:0x22cc55 },
-          { axis:'y', dir:new THREE.Vector3(0,1,0), color:0xff3333 },
-          { axis:'z', dir:new THREE.Vector3(0,0,1), color:0x2255ff },
-        ]
         const SHAFT_LEN=80, SHAFT_R=3, HEAD_LEN=28, HEAD_R=9
+        const RING_R=90, RING_TUBE=2.5
         const materials = {}
-        for (const { axis, dir, color } of AXES) {
-          // One material shared by this axis's shaft+head, so hover/active
+        for (const { axis, color } of AXIS_META) {
+          // One material shared by this axis's whole handle (move arrow's
+          // shaft+head, AND the separate rotate ring), so hover/active
           // recoloring (see hoverMoveGizmoAxis/setActiveGizmoAxis) changes
-          // the whole arrow as a single unit with one mutation.
+          // it as a single unit with one mutation.
           // transparent:true is load-bearing, not cosmetic (opacity stays
           // 1 — fully opaque-looking). Three.js renders the whole scene in
           // two separate passes — every opaque object, THEN every
@@ -1792,17 +1804,21 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
           // "arrows hidden behind the shape" bug, not draw order within a
           // pass. Marking the gizmo transparent too puts it in the same
           // pass as the solid, where renderOrder (set below) finally has
-          // something to act on.
-          const mat = new THREE.MeshBasicMaterial({ color, transparent:true, depthTest:false })
-          mat.userData.baseColor = color
-          materials[axis] = mat
+          // something to act on. Rotate rings get this exact same
+          // treatment from the start — no reason to relearn that lesson.
+          const moveMat = new THREE.MeshBasicMaterial({ color, transparent:true, depthTest:false })
+          moveMat.userData.baseColor = color
+          materials[`move-${axis}`] = moveMat
+          const rotMat = new THREE.MeshBasicMaterial({ color, transparent:true, depthTest:false })
+          rotMat.userData.baseColor = color
+          materials[`rotate-${axis}`] = rotMat
 
           const shaftGeo = new THREE.CylinderGeometry(SHAFT_R, SHAFT_R, SHAFT_LEN, 12)
           shaftGeo.translate(0, SHAFT_LEN/2, 0)   // base at local origin, extends up local +Y
-          const shaft = new THREE.Mesh(shaftGeo, mat)
+          const shaft = new THREE.Mesh(shaftGeo, moveMat)
           const headGeo = new THREE.ConeGeometry(HEAD_R, HEAD_LEN, 16)
           headGeo.translate(0, SHAFT_LEN + HEAD_LEN/2, 0)   // sits right past the shaft's tip
-          const head = new THREE.Mesh(headGeo, mat)
+          const head = new THREE.Mesh(headGeo, moveMat)
           // renderOrder has to be set on the actual renderable objects (the
           // meshes) — setting it on a non-rendered parent Group does
           // nothing, since the renderer only reads renderOrder from objects
@@ -1811,26 +1827,52 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
           // on top of the solid regardless of which is actually closer to
           // the camera.
           shaft.renderOrder = 10; head.renderOrder = 10
-          shaft.userData.axis = axis; head.userData.axis = axis
+          shaft.userData.kind = head.userData.kind = 'move'
+          shaft.userData.axis = head.userData.axis = axis
 
           const arrowGroup = new THREE.Group()
-          arrowGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), dir)
+          arrowGroup.userData.kind = 'move'
           arrowGroup.userData.axis = axis
           arrowGroup.add(shaft, head)
           gizmo.add(arrowGroup)
+
+          // Rotate ring — TorusGeometry lies flat in its LOCAL XY plane with
+          // its "donut hole" axis along local Z by construction, so
+          // orienting local Z to the target direction (below, every call)
+          // makes the ring's plane the actual rotation plane for this axis.
+          const ringGeo = new THREE.TorusGeometry(RING_R, RING_TUBE, 10, 48)
+          const ring = new THREE.Mesh(ringGeo, rotMat)
+          ring.renderOrder = 10
+          ring.userData.kind = 'rotate'
+          ring.userData.axis = axis
+          const ringGroup = new THREE.Group()
+          ringGroup.userData.kind = 'rotate'
+          ringGroup.userData.axis = axis
+          ringGroup.add(ring)
+          gizmo.add(ringGroup)
         }
         s.scene.add(gizmo)
         moveGizmoRef.current = gizmo
         moveGizmoMaterialsRef.current = materials
       }
-      // Fresh selection — always start from every arrow visible at its base
-      // color, in case a previous drag left a stale hover/active tint or
-      // hid the other two arrows (see setActiveGizmoAxis).
-      for (const arrowGroup of gizmo.children) arrowGroup.visible = true
+      // Orient every handle to the body's CURRENT cumulative rotation, not
+      // just once at construction — a body rotated since the gizmo was
+      // last shown needs its arrows/rings to reflect its new local axes
+      // ("local axis" requirement), and this same gizmo instance is reused
+      // across different solids/selections.
+      for (const handleGroup of gizmo.children) {
+        const targetDir = AXIS_UNIT_DIRS[handleGroup.userData.axis].clone().applyQuaternion(bodyQuat)
+        const localAxis = handleGroup.userData.kind === 'rotate' ? UNIT_Z : UNIT_Y
+        handleGroup.quaternion.setFromUnitVectors(localAxis, targetDir)
+      }
+      // Fresh selection — always start from every handle visible at its
+      // base color, in case a previous drag left a stale hover/active tint
+      // or hid the other handles (see setActiveGizmoAxis).
+      for (const handleGroup of gizmo.children) handleGroup.visible = true
       for (const mat of Object.values(moveGizmoMaterialsRef.current)) mat.color.setHex(mat.userData.baseColor)
       gizmo.position.copy(center)
       gizmo.visible = true
-      moveGizmoStateRef.current = { solidId, basePosition: center.clone(), group }
+      moveGizmoStateRef.current = { solidId, basePosition: center.clone(), group, rotationQuat: bodyQuat }
     },
 
     /**
@@ -1856,10 +1898,11 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     },
 
     /**
-     * Raycasts against the 3 gizmo arrows only (a dedicated pass, separate
-     * from raycastSolidFace) to determine which axis a click grabbed. Real
-     * mesh geometry (see showMoveGizmo) — a plain intersectObjects, no
-     * artificial hit-threshold needed the way a thin Line would.
+     * Raycasts against the 6 gizmo handles (3 move arrows + 3 rotate rings)
+     * only (a dedicated pass, separate from raycastSolidFace) to determine
+     * which one a click grabbed. Real mesh geometry (see showMoveGizmo) — a
+     * plain intersectObjects, no artificial hit-threshold needed the way a
+     * thin Line would. Returns {kind:'move'|'rotate', axis} or null.
      */
     raycastMoveGizmo(clientX, clientY) {
       const gizmo = moveGizmoRef.current
@@ -1873,42 +1916,44 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       )
       const raycaster = new THREE.Raycaster()
       raycaster.setFromCamera(ndc, s.camera)
-      const targets = gizmo.children.flatMap(a => a.children)   // [shaft, head] per arrow
+      const targets = gizmo.children.flatMap(h => h.children)   // [shaft,head] or [ring] per handle
       const hits = raycaster.intersectObjects(targets, false)
       if (!hits.length) return null
-      return { axis: hits[0].object.userData.axis }
+      return { kind: hits[0].object.userData.kind, axis: hits[0].object.userData.axis }
     },
 
     /**
-     * Live hover feedback while still choosing which axis to grab (no axis
-     * armed yet) — brightens the hovered arrow's shared material toward
-     * white, restores every other arrow to its base color. Same "mutate the
-     * material directly, no React state" pattern hoverSolidByRef already
-     * uses for body hover, so it stays cheap on every mouse move.
+     * Live hover feedback while still choosing which handle to grab (none
+     * armed yet) — brightens the hovered handle's shared material toward
+     * white, restores every other handle to its base color. Same "mutate
+     * the material directly, no React state" pattern hoverSolidByRef
+     * already uses for body hover, so it stays cheap on every mouse move.
+     * `key` is `${kind}-${axis}` (e.g. "move-x", "rotate-z") or null.
      */
-    hoverMoveGizmoAxis(axis) {
+    hoverMoveGizmoAxis(key) {
       const materials = moveGizmoMaterialsRef.current
-      for (const [a, mat] of Object.entries(materials)) {
+      for (const [k, mat] of Object.entries(materials)) {
         mat.color.setHex(mat.userData.baseColor)
-        if (a === axis) mat.color.lerp(new THREE.Color(0xffffff), 0.5)
+        if (k === key) mat.color.lerp(new THREE.Color(0xffffff), 0.5)
       }
     },
 
     /**
-     * Marks one axis as actively being dragged: recolors it bright yellow
-     * and hides the other two arrows entirely (rather than just dimming
-     * them) so there's no ambiguity about which axis a live drag/typed
-     * value currently applies to. Pass null to restore every arrow to
-     * visible + base color (drag accepted or cancelled).
+     * Marks one handle as actively being dragged: recolors it bright
+     * yellow and hides the other 5 entirely (rather than just dimming
+     * them) so there's no ambiguity about which handle a live drag/typed
+     * value currently applies to. Pass null to restore every handle to
+     * visible + base color (drag accepted or cancelled). `key` is
+     * `${kind}-${axis}` or null.
      */
-    setActiveGizmoAxis(axis) {
+    setActiveGizmoAxis(key) {
       const gizmo = moveGizmoRef.current; if (!gizmo) return
       const materials = moveGizmoMaterialsRef.current
-      for (const arrowGroup of gizmo.children) {
-        const a = arrowGroup.userData.axis
-        arrowGroup.visible = !axis || a === axis
-        const mat = materials[a]
-        mat.color.setHex(a === axis ? 0xffee00 : mat.userData.baseColor)
+      for (const handleGroup of gizmo.children) {
+        const k = `${handleGroup.userData.kind}-${handleGroup.userData.axis}`
+        handleGroup.visible = !key || k === key
+        const mat = materials[k]
+        mat.color.setHex(k === key ? 0xffee00 : mat.userData.baseColor)
       }
     },
 
@@ -1928,6 +1973,34 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     },
 
     /**
+     * Live-drag preview: rotates the REAL solid (cheap — just this one
+     * group's transform, the baked geometry is untouched until commit) by
+     * `deltaAngleRad` around the gizmo's own pivot (its live world center),
+     * about whichever axis's CURRENT world direction (already accounting
+     * for any prior rotation — see showMoveGizmo's local-axis comment).
+     * The gizmo itself deliberately does NOT spin along with the solid
+     * during the drag — the ring being dragged stays put as the reference
+     * frame you're rotating against (same convention most 3D tools use for
+     * a rotate manipulator), it re-orients on the NEXT showMoveGizmo call
+     * once the new orientation is actually committed.
+     *
+     * Rotating a group around an arbitrary world pivot (rather than the
+     * group's own local origin, which Three.js quaternions always pivot
+     * around) needs the standard external-pivot compensation: for every
+     * point p, we want `Q·(p-pivot)+pivot`. Setting group.quaternion=Q and
+     * group.position = pivot - Q·pivot reproduces exactly that, since
+     * Three.js applies position AFTER quaternion: Q·p + (pivot - Q·pivot).
+     */
+    previewRotateSolid(deltaAngleRad, axis) {
+      const { group, basePosition, rotationQuat } = moveGizmoStateRef.current
+      if (!group || !basePosition) return
+      const axisDir = AXIS_UNIT_DIRS[axis].clone().applyQuaternion(rotationQuat || new THREE.Quaternion())
+      const Q = new THREE.Quaternion().setFromAxisAngle(axisDir, deltaAngleRad)
+      group.quaternion.copy(Q)
+      group.position.copy(basePosition).sub(basePosition.clone().applyQuaternion(Q))
+    },
+
+    /**
      * World-space point (scene px) the Move/Copy gizmo is currently anchored
      * to — the dragged solid's own center, captured when showMoveGizmo() was
      * called — or null if no gizmo is showing. Used as the projection origin
@@ -1937,6 +2010,48 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     getMoveGizmoOrigin() {
       const { basePosition } = moveGizmoStateRef.current
       return basePosition ? { x: basePosition.x, y: basePosition.y, z: basePosition.z } : null
+    },
+
+    /**
+     * The CURRENT world-space unit direction of one of the gizmo's 3 base
+     * axes — already rotated by the body's cumulative orientation (identity
+     * if it's never been rotated, in which case this is just the world
+     * axis, matching Stage 1's behavior exactly). Used by App3D.jsx to
+     * build both the move-drag projection line and the rotate-drag plane
+     * without duplicating the "apply the body's rotation to a base axis"
+     * logic on the React side.
+     */
+    getGizmoAxisWorldDir(axis) {
+      const { rotationQuat } = moveGizmoStateRef.current
+      const dir = AXIS_UNIT_DIRS[axis].clone().applyQuaternion(rotationQuat || new THREE.Quaternion())
+      return { x: dir.x, y: dir.y, z: dir.z }
+    },
+
+    /**
+     * Raycasts the mouse into an arbitrary world plane (given as a point +
+     * normal) and returns the world-space hit point, or null if the ray is
+     * ~parallel to the plane. Generic version of the same
+     * raycaster+intersectPlane pattern already used for sketch-plane/face
+     * picking elsewhere in this file — used by App3D.jsx's rotate-drag math
+     * to turn mouse movement into a point on the rotation plane.
+     */
+    raycastPlaneWorld(clientX, clientY, planePoint, planeNormal) {
+      const s = stateRef.current; if (!s) return null
+      const el = mountRef.current; if (!el) return null
+      const rect = el.getBoundingClientRect()
+      const ndc = new THREE.Vector2(
+        ((clientX - rect.left) / rect.width)  *  2 - 1,
+        ((clientY - rect.top)  / rect.height) * -2 + 1,
+      )
+      const raycaster = new THREE.Raycaster()
+      raycaster.setFromCamera(ndc, s.camera)
+      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(
+        new THREE.Vector3(planeNormal.x, planeNormal.y, planeNormal.z),
+        new THREE.Vector3(planePoint.x, planePoint.y, planePoint.z),
+      )
+      const hit = new THREE.Vector3()
+      if (!raycaster.ray.intersectPlane(plane, hit)) return null
+      return { x: hit.x, y: hit.y, z: hit.z }
     },
 
     /**

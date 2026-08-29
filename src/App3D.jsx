@@ -4409,21 +4409,53 @@ const App3D = forwardRef(function App3D(props, ref) {
     viewport3dRef.current?.hoverSolid(mirror3dHoverSolidId)
   }, [mirror3dHoverSolidId, tool])
 
-  // ── Move/Copy (3D solid) state machine — Stage 1: translate-only gizmo ────
+  // ── Move/Copy/Rotate (3D solid) state machine — Stage 2 adds Rotate ───────
   // Step 1: click a body directly in the 3D view (same hover/select pattern
   // as Mirror3D/Join3D — orange hover via hoverSolid, cyan selected via
-  // highlightSolid). Step 2: a gizmo with 3 draggable axis arrows appears at
-  // the body's center. Grabbing an arrow is a plain CLICK (not a press-and-
-  // hold drag) — same "click to arm, just move the mouse to preview, click
-  // again anywhere to accept" gesture Extrude's depth-set and Mirror/
-  // Extrude's own offset-plane already use, not a new interaction paradigm.
-  // Copy toggles whether accepting duplicates the body instead of moving
-  // the original in place.
+  // highlightSolid). Step 2: a combined gizmo with 3 draggable axis arrows
+  // AND 3 rotate rings appears at the body's center, oriented to the
+  // body's own current local axes (world-aligned until it's ever been
+  // rotated — see rotationToQuat/getGizmoAxisWorldDir). Grabbing a handle
+  // is a plain CLICK (not a press-and-hold drag) — same "click to arm, just
+  // move the mouse to preview, click again anywhere to accept" gesture
+  // Extrude's depth-set and Mirror/Extrude's own offset-plane already use,
+  // not a new interaction paradigm. Copy toggles whether accepting
+  // duplicates the body instead of altering the original — applies equally
+  // to a move or a rotate.
   const [moveCopy3dSel, setMoveCopy3dSel] = useState(null)          // solidId, or null
   const [moveCopy3dHoverSolidId, setMoveCopy3dHoverSolidId] = useState(null)
   const [moveCopy3dMode, setMoveCopy3dMode] = useState('move')      // 'move' | 'copy'
-  const [moveCopy3dDragAxis, setMoveCopy3dDragAxis] = useState(null) // 'x'|'y'|'z'|null
-  const [moveCopy3dDistInput, setMoveCopy3dDistInput] = useState('0') // signed mm along moveCopy3dDragAxis
+  const [moveCopy3dDragHandle, setMoveCopy3dDragHandle] = useState(null) // {kind:'move'|'rotate', axis:'x'|'y'|'z'} | null
+  const [moveCopy3dDistInput, setMoveCopy3dDistInput] = useState('0')   // signed mm, kind:'move'
+  const [moveCopy3dAngleInput, setMoveCopy3dAngleInput] = useState('0') // signed degrees, kind:'rotate'
+  // Grab-time reference basis for the rotate drag's angle math (see
+  // handleMoveCopy3DDragMove) — a plain ref, not state: write-once the
+  // instant a ring is grabbed, read every mouse move after that, no
+  // re-render should ever depend on it.
+  const moveCopy3dRotateBasisRef = useRef(null)
+
+  // A solid's stored transform.rotation (axis-angle, or absent = identity)
+  // as a THREE.Quaternion — the one conversion point between the
+  // JSON-friendly stored form and the Quaternion math everywhere else
+  // (gizmo orientation, composing a new rotate delta) needs.
+  function rotationToQuat(rotation) {
+    if (!rotation) return new THREE.Quaternion()
+    return new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3(...rotation.axis).normalize(), THREE.MathUtils.degToRad(rotation.angleDeg)
+    )
+  }
+
+  // Inverse of the above — every 3D rotation, however it was reached,
+  // collapses to a single net axis+angle. `w` is clamped since floating
+  // point can push it a hair past ±1, which would make acos() return NaN.
+  function quatToAxisAngle(q) {
+    const n = q.clone().normalize()
+    const w = Math.min(1, Math.max(-1, n.w))
+    const angle = 2 * Math.acos(w)
+    const s = Math.sqrt(1 - w*w)
+    const axis = s < 1e-6 ? [1,0,0] : [n.x/s, n.y/s, n.z/s]
+    return { angleDeg: THREE.MathUtils.radToDeg(angle), axis }
+  }
 
   function activateMoveCopy3DTool() {
     resetSelection()
@@ -4455,8 +4487,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     setMoveCopy3dSel(null)
     setMoveCopy3dHoverSolidId(null)
     setMoveCopy3dMode('move')
-    setMoveCopy3dDragAxis(null)
+    setMoveCopy3dDragHandle(null)
     setMoveCopy3dDistInput('0')
+    setMoveCopy3dAngleInput('0')
+    moveCopy3dRotateBasisRef.current = null
     viewport3dRef.current?.clearSolidHighlight()
     viewport3dRef.current?.clearSolidHover()
     viewport3dRef.current?.hoverMoveGizmoAxis(null)
@@ -4488,8 +4522,9 @@ const App3D = forwardRef(function App3D(props, ref) {
       viewport3dRef.current?.hideMoveGizmo()
       return
     }
+    const solid = solids.find(s => s.id === moveCopy3dSel)
     viewport3dRef.current?.highlightSolid(moveCopy3dSel)
-    viewport3dRef.current?.showMoveGizmo(moveCopy3dSel)
+    viewport3dRef.current?.showMoveGizmo(moveCopy3dSel, rotationToQuat(solid?.transform?.rotation))
   }, [moveCopy3dSel, tool])
 
   useEffect(() => {
@@ -4497,82 +4532,155 @@ const App3D = forwardRef(function App3D(props, ref) {
     viewport3dRef.current?.hoverSolid(moveCopy3dHoverSolidId)
   }, [moveCopy3dHoverSolidId, tool])
 
-  // Drag-to-set-distance along whichever world axis was armed — same
-  // projection math as handleMirror3DOffsetDragMove/handleExtrudeOffsetDragMove
-  // (project a fixed direction to screen space, scalar-project the mouse
-  // offset onto it, divide by px-per-mm), just anchored on the gizmo's own
-  // origin (the body's center when the gizmo was shown) instead of a picked
-  // plane's basis, and projecting a world axis instead of a plane normal.
+  // Arms whichever handle a gizmo click hit, capturing everything the drag
+  // math (below) needs at the exact moment of grabbing. For a rotate ring,
+  // that means the plane/reference-vector basis the live angle is measured
+  // against — captured HERE (using this exact click's position) so the
+  // very first computed delta is 0°, not whatever angle the mouse happens
+  // to already be at.
+  function armMoveCopy3DHandle(hit, e) {
+    setMoveCopy3dDragHandle({ kind: hit.kind, axis: hit.axis })
+    setMoveCopy3dDistInput('0')
+    setMoveCopy3dAngleInput('0')
+    moveCopy3dRotateBasisRef.current = null
+    if (hit.kind !== 'rotate') return
+    const vp = viewport3dRef.current
+    const origin = vp?.getMoveGizmoOrigin?.()
+    const dir = vp?.getGizmoAxisWorldDir?.(hit.axis)
+    if (!origin || !dir) return
+    const pivot = new THREE.Vector3(origin.x, origin.y, origin.z)
+    const axisDir = new THREE.Vector3(dir.x, dir.y, dir.z).normalize()
+    const hitPt = vp.raycastPlaneWorld?.(e.clientX, e.clientY, origin, dir)
+    const refVec = hitPt ? new THREE.Vector3(hitPt.x-pivot.x, hitPt.y-pivot.y, hitPt.z-pivot.z) : null
+    // Falls back to an arbitrary perpendicular if the initial click somehow
+    // missed the rotation plane (a near-parallel ray) — rare, but atan2(0,0)
+    // would otherwise report a nonsense angle instead of just starting at 0.
+    const ref = (refVec && refVec.lengthSq() > 1e-6)
+      ? refVec.normalize()
+      : new THREE.Vector3().crossVectors(axisDir, Math.abs(axisDir.y) < 0.9 ? new THREE.Vector3(0,1,0) : new THREE.Vector3(1,0,0)).normalize()
+    const perp = new THREE.Vector3().crossVectors(axisDir, ref).normalize()
+    moveCopy3dRotateBasisRef.current = { pivot, axisDir, ref, perp }
+  }
+
+  // Drag-to-set-value along/around whichever handle was armed. Move keeps
+  // Stage 1's screen-projection-of-a-direction math, now reading the axis's
+  // CURRENT world direction via getGizmoAxisWorldDir (identity rotation =
+  // the same world direction Stage 1 always used) instead of a hardcoded
+  // vector — so it drags along the body's own local axis once it's been
+  // rotated. Rotate raycasts the mouse into the plane perpendicular to the
+  // grabbed axis (through the gizmo's pivot) and measures the signed angle
+  // from the reference vector armMoveCopy3DHandle captured at grab time.
   function handleMoveCopy3DDragMove(e) {
-    if (tool !== 'movecopy3d' || !moveCopy3dDragAxis || moveCopy3dSel == null) return
+    if (tool !== 'movecopy3d' || !moveCopy3dDragHandle || moveCopy3dSel == null) return
     const vp = viewport3dRef.current
     if (!vp) return
     const origin = vp.getMoveGizmoOrigin?.()
     if (!origin) return
-    const AXIS_DIRS = { x:[1,0,0], y:[0,1,0], z:[0,0,1] }
-    const [ax,ay,az] = AXIS_DIRS[moveCopy3dDragAxis]
-    const p0 = vp.worldToScreen(origin.x, origin.y, origin.z)
-    const p1 = vp.worldToScreen(origin.x+ax*2, origin.y+ay*2, origin.z+az*2)
-    if (!p0 || !p1) return
-    const dx = p1.x-p0.x, dy = p1.y-p0.y
-    const pxPerMm = Math.hypot(dx,dy)
-    if (!pxPerMm) return
-    const vpRect = vp.getDomElement?.()?.parentElement?.getBoundingClientRect?.()
-    if (!vpRect) return
-    const mx = e.clientX - vpRect.left, my = e.clientY - vpRect.top
-    const proj = (mx-p0.x)*(dx/pxPerMm) + (my-p0.y)*(dy/pxPerMm)
-    let mm = proj/pxPerMm
-    if (gridSnap) mm = Math.round(mm/gridSizeMm)*gridSizeMm
-    setMoveCopy3dDistInput(String(Math.round(mm*100)/100))
+    const { kind, axis } = moveCopy3dDragHandle
+
+    if (kind === 'move') {
+      const dir = vp.getGizmoAxisWorldDir?.(axis)
+      if (!dir) return
+      const p0 = vp.worldToScreen(origin.x, origin.y, origin.z)
+      const p1 = vp.worldToScreen(origin.x+dir.x*2, origin.y+dir.y*2, origin.z+dir.z*2)
+      if (!p0 || !p1) return
+      const dx = p1.x-p0.x, dy = p1.y-p0.y
+      const pxPerMm = Math.hypot(dx,dy)
+      if (!pxPerMm) return
+      const vpRect = vp.getDomElement?.()?.parentElement?.getBoundingClientRect?.()
+      if (!vpRect) return
+      const mx = e.clientX - vpRect.left, my = e.clientY - vpRect.top
+      const proj = (mx-p0.x)*(dx/pxPerMm) + (my-p0.y)*(dy/pxPerMm)
+      let mm = proj/pxPerMm
+      if (gridSnap) mm = Math.round(mm/gridSizeMm)*gridSizeMm
+      setMoveCopy3dDistInput(String(Math.round(mm*100)/100))
+      return
+    }
+
+    const basis = moveCopy3dRotateBasisRef.current
+    if (!basis) return
+    const hitPt = vp.raycastPlaneWorld?.(e.clientX, e.clientY, origin, { x:basis.axisDir.x, y:basis.axisDir.y, z:basis.axisDir.z })
+    if (!hitPt) return
+    const v = new THREE.Vector3(hitPt.x-basis.pivot.x, hitPt.y-basis.pivot.y, hitPt.z-basis.pivot.z)
+    const deg = Math.atan2(v.dot(basis.perp), v.dot(basis.ref)) * 180/Math.PI
+    setMoveCopy3dAngleInput(String(Math.round(deg*10)/10))
   }
 
-  // Live preview — moves the REAL solid (cheap: just this one group's
-  // position, see previewMoveSolid's own comment) every time the armed
-  // axis or its live distance changes, whether driven by mouse movement or
-  // typing directly into the popover.
+  // Live preview — moves/rotates the REAL solid (cheap: just this one
+  // group's transform, see previewMoveSolid/previewRotateSolid's own
+  // comments) every time the armed handle or its live value changes,
+  // whether driven by mouse movement or typing directly into the popover.
   useEffect(() => {
-    if (tool !== 'movecopy3d' || !moveCopy3dDragAxis) return
-    const mm = parseFloat(moveCopy3dDistInput) || 0
-    const delta = { x:0, y:0, z:0 }
-    delta[moveCopy3dDragAxis] = mm
-    viewport3dRef.current?.previewMoveSolid([delta.x, delta.y, delta.z])
-  }, [tool, moveCopy3dDragAxis, moveCopy3dDistInput])
+    if (tool !== 'movecopy3d' || !moveCopy3dDragHandle) return
+    const vp = viewport3dRef.current
+    const { kind, axis } = moveCopy3dDragHandle
+    if (kind === 'move') {
+      const mm = parseFloat(moveCopy3dDistInput) || 0
+      const dir = vp?.getGizmoAxisWorldDir?.(axis)
+      if (dir) vp?.previewMoveSolid([dir.x*mm, dir.y*mm, dir.z*mm])
+    } else {
+      const deg = parseFloat(moveCopy3dAngleInput) || 0
+      vp?.previewRotateSolid?.(THREE.MathUtils.degToRad(deg), axis)
+    }
+  }, [tool, moveCopy3dDragHandle, moveCopy3dDistInput, moveCopy3dAngleInput])
 
-  // Gizmo-arrow hover feedback — only meaningful once a body is picked but
-  // before an axis is armed (once armed, setActiveGizmoAxis below already
-  // owns the arrow colors/visibility for the whole drag). Direct
+  // Gizmo-handle hover feedback — only meaningful once a body is picked but
+  // before a handle is armed (once armed, setActiveGizmoAxis below already
+  // owns the handle colors/visibility for the whole drag). Direct
   // Viewport3D call, no React state — same "mutate material, skip
   // re-render" convention as hoverSolid/highlightSolid.
   function handleMoveCopy3DGizmoHover(e) {
-    if (tool !== 'movecopy3d' || moveCopy3dSel == null || moveCopy3dDragAxis) return
+    if (tool !== 'movecopy3d' || moveCopy3dSel == null || moveCopy3dDragHandle) return
     const hit = viewport3dRef.current?.raycastMoveGizmo(e.clientX, e.clientY)
-    viewport3dRef.current?.hoverMoveGizmoAxis(hit?.axis ?? null)
+    viewport3dRef.current?.hoverMoveGizmoAxis(hit ? `${hit.kind}-${hit.axis}` : null)
   }
 
-  // Recolors/isolates the armed axis the moment it's grabbed, and restores
-  // every arrow to its idle state once the drag is accepted/cancelled.
+  // Recolors/isolates the armed handle the moment it's grabbed, and
+  // restores every handle to its idle state once the drag is
+  // accepted/cancelled.
   useEffect(() => {
-    viewport3dRef.current?.setActiveGizmoAxis(moveCopy3dDragAxis)
-  }, [moveCopy3dDragAxis])
+    const h = moveCopy3dDragHandle
+    viewport3dRef.current?.setActiveGizmoAxis(h ? `${h.kind}-${h.axis}` : null)
+  }, [moveCopy3dDragHandle])
 
-  // Bakes the live delta into the solid's actual geometry via the new
+  // Bakes the live delta into the solid's actual geometry via the
   // transformShape worker op. Move re-targets the same solidId (shapeStore
-  // is warm at its PRIOR position, so only the fresh delta is sent — the
-  // cumulative total lives in transform.position, not in the worker call).
-  // Copy reads from the original (sourceSolidId) and writes a brand-new
+  // is warm at its PRIOR position/rotation, so only the fresh delta is
+  // sent — the cumulative total lives in transform, not in the worker
+  // call). A rotate delta composes into the stored cumulative rotation as
+  // Rdelta·Rold (see the Stage 2 plan's derivation) and leaves `position`
+  // completely untouched — a rotate always pivots at the body's CURRENT
+  // live center, so the translation component never needs to change. Copy
+  // reads from the original (sourceSolidId) and writes a brand-new
   // solid+feature, inheriting the original's shape-defining fields so it
   // still rebuilds correctly on a cold reload (see featureToTempSolid).
   async function commitMoveCopy3D() {
     const solidId = moveCopy3dSel
-    const axis = moveCopy3dDragAxis
+    const handle = moveCopy3dDragHandle
     const solid = solids.find(s => s.id === solidId)
     const feat = baseFeatureForSolid(solidId)
-    if (solidId==null || !axis || !solid || !feat) { resetMoveCopy3D(); return }
-    const mm = parseFloat(moveCopy3dDistInput) || 0
-    const delta = { x:0, y:0, z:0 }
-    delta[axis] = mm
+    const vp = viewport3dRef.current
+    if (solidId==null || !handle || !solid || !feat || !vp) { resetMoveCopy3D(); return }
+    const dir = vp.getGizmoAxisWorldDir(handle.axis)
     const priorPos = solid.transform?.position || [0,0,0]
-    const newPos = [priorPos[0]+delta.x, priorPos[1]+delta.y, priorPos[2]+delta.z]
+    const priorRotation = solid.transform?.rotation || null
+
+    let workerParams, newTransform
+    if (handle.kind === 'move') {
+      const mm = parseFloat(moveCopy3dDistInput) || 0
+      const delta = [dir.x*mm, dir.y*mm, dir.z*mm]
+      workerParams = { position: delta }
+      newTransform = { position: [priorPos[0]+delta[0], priorPos[1]+delta[1], priorPos[2]+delta[2]], rotation: priorRotation }
+    } else {
+      const deg = parseFloat(moveCopy3dAngleInput) || 0
+      const origin = vp.getMoveGizmoOrigin()
+      const pivotMm = [pxToMm(origin.x), pxToMm(origin.y), pxToMm(origin.z)]
+      workerParams = { rotation: { angleDeg: deg, axis: [dir.x, dir.y, dir.z], pivot: pivotMm } }
+      const Rdelta = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(dir.x, dir.y, dir.z), THREE.MathUtils.degToRad(deg))
+      const Rnew = Rdelta.multiply(rotationToQuat(priorRotation))
+      newTransform = { position: priorPos, rotation: quatToAxisAngle(Rnew) }
+    }
+
     feat3d.commit(features)
     try {
       if (moveCopy3dMode === 'copy') {
@@ -4580,30 +4688,29 @@ const App3D = forwardRef(function App3D(props, ref) {
         const base = buildBaseWorkerParams(solid)
         const ops = buildSolidOpsForWorker(solid, features)
         const meshData = await cadEngine.transformShape({
-          solidId: newSolidId, sourceSolidId: solidId, base, ops,
-          position: [delta.x, delta.y, delta.z],
+          solidId: newSolidId, sourceSolidId: solidId, base, ops, ...workerParams,
         })
         const group = replicadMeshToThree(meshData, solid.color, newSolidId)
         const newFeatId = `${feat.id}-copy-${newSolidId}`
-        setSolids(prev => [...prev, { ...solid, id: newSolidId, group, transform: { position: newPos } }])
+        setSolids(prev => [...prev, { ...solid, id: newSolidId, group, transform: newTransform }])
         setFeatures(prev => [...prev, {
           ...feat, id: newFeatId, solidId: newSolidId, name: `${feat.name} Copy`,
-          transform: { position: newPos }, joinedInto: undefined,
+          transform: newTransform, joinedInto: undefined,
         }])
       } else {
-        const meshData = await cadEngine.transformShape({ solidId, position: [delta.x, delta.y, delta.z] })
+        const meshData = await cadEngine.transformShape({ solidId, ...workerParams })
         const group = replicadMeshToThree(meshData, solid.color, solidId)
-        setSolids(prev => prev.map(s => s.id===solidId ? { ...s, group, transform: { position: newPos } } : s))
-        setFeatures(prev => prev.map(f => f.id===feat.id ? { ...f, transform: { position: newPos } } : f))
+        setSolids(prev => prev.map(s => s.id===solidId ? { ...s, group, transform: newTransform } : s))
+        setFeatures(prev => prev.map(f => f.id===feat.id ? { ...f, transform: newTransform } : f))
       }
       // Move (not Copy) is the only case that skips the preview-position
       // reset: its solidId gets a freshly rebuilt group swapped in above,
       // already positioned correctly, so resetting the OLD group (about to
       // be discarded) would just flash it back to its start position for a
-      // frame first. Copy leaves the original's own group/position
+      // frame first. Copy leaves the original's own group/transform
       // completely untouched — nothing else will ever clear the live-drag
-      // offset that previewMoveSolid left on it — so it still needs the
-      // real reset.
+      // offset that previewMoveSolid/previewRotateSolid left on it — so it
+      // still needs the real reset.
       resetMoveCopy3D({ skipPreviewReset: moveCopy3dMode !== 'copy' })
       return
     } catch (err) {
@@ -5368,7 +5475,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       // entirely (it's a special case right here, not routed through it), so
       // its own baked-transform bake-in has to happen right after, same as
       // rebuildSolidChain's own trailing step does for every other operation.
-      if (feat.transform) meshData = await cadEngine.transformShape({ solidId: feat.solidId, position: feat.transform.position })
+      if (feat.transform) meshData = await cadEngine.transformShape({ solidId: feat.solidId, position: feat.transform.position, rotation: feat.transform.rotation })
       return meshData
     }
     // rebuildSolidChain also transparently replays this member's OWN
@@ -6319,13 +6426,17 @@ const App3D = forwardRef(function App3D(props, ref) {
         meshData = await cadEngine.subtract({ baseSolidId: baseSolid.id, cut: cutParams, base: baseWorkerParams })
       }
     }
-    // Move/Copy's baked position offset — applied last, on top of the clean
-    // base plus every cutout/fillet, so it's one uniform final step
+    // Move/Copy/Rotate's baked transform — applied last, on top of the
+    // clean base plus every cutout/fillet, so it's one uniform final step
     // regardless of operation type (extrude/revolve/loft/join all reach
     // here; mirror is the one exception, handled in rebuildFeatureSolid
-    // itself since it bypasses this function entirely).
+    // itself since it bypasses this function entirely). No rotation.pivot
+    // here — this replays the feature's whole cumulative transform against
+    // its pristine rebuilt shape in one shot, so the worker computes the
+    // pivot itself from that shape's own bounding box (see transformShape's
+    // own comment).
     if (baseSolid.transform) {
-      meshData = await cadEngine.transformShape({ solidId: baseSolid.id, position: baseSolid.transform.position })
+      meshData = await cadEngine.transformShape({ solidId: baseSolid.id, position: baseSolid.transform.position, rotation: baseSolid.transform.rotation })
     }
     return meshData
   }
@@ -7597,20 +7708,20 @@ const App3D = forwardRef(function App3D(props, ref) {
       return
     }
 
-    // Move/Copy step 2b: an axis is already armed — this click accepts the
+    // Move/Copy step 2b: a handle is already armed — this click accepts the
     // live drag value, wherever in the canvas it lands (same "click anywhere
     // once armed accepts" convention as Mirror/Extrude's offset-plane).
-    if (tool==='movecopy3d' && moveCopy3dDragAxis) {
+    if (tool==='movecopy3d' && moveCopy3dDragHandle) {
       commitMoveCopy3D()
       return
     }
-    // Move/Copy step 2a: body picked, no axis armed yet — a click only does
-    // something if it actually lands on a gizmo arrow (arms that axis);
-    // anything else is ignored rather than reinterpreted as re-picking a
-    // different body — Escape backs out to step 1 for that.
+    // Move/Copy step 2a: body picked, no handle armed yet — a click only
+    // does something if it actually lands on a gizmo arrow/ring (arms that
+    // handle); anything else is ignored rather than reinterpreted as
+    // re-picking a different body — Escape backs out to step 1 for that.
     if (tool==='movecopy3d' && moveCopy3dSel != null) {
       const hit = viewport3dRef.current?.raycastMoveGizmo(e.clientX, e.clientY)
-      if (hit) { setMoveCopy3dDragAxis(hit.axis); setMoveCopy3dDistInput('0') }
+      if (hit) armMoveCopy3DHandle(hit, e)
       return
     }
     // Move/Copy step 1: pick the body.
@@ -8436,9 +8547,9 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (mirror3dSel.length>0) { setMirror3dSel([]); return }
       resetMirror3D(); setTool('select'); return
     }
-    if (e.key==='Enter'&&tool==='movecopy3d'&&moveCopy3dDragAxis){
-      // Confirm the live drag distance and commit — same role as a plain
-      // click anywhere once an axis is armed.
+    if (e.key==='Enter'&&tool==='movecopy3d'&&moveCopy3dDragHandle){
+      // Confirm the live drag value and commit — same role as a plain
+      // click anywhere once a handle is armed.
       e.preventDefault()
       commitMoveCopy3D()
       return
@@ -8448,7 +8559,16 @@ const App3D = forwardRef(function App3D(props, ref) {
       // Fillet3D/Measure already use, NOT Extrude's split-across-two-blocks
       // approach (that one's own comment documents it as an actual ordering
       // bug hit twice already this session).
-      if (moveCopy3dDragAxis) { setMoveCopy3dDragAxis(null); setMoveCopy3dDistInput('0'); viewport3dRef.current?.previewMoveSolid([0,0,0]); return }
+      if (moveCopy3dDragHandle) {
+        const vp = viewport3dRef.current
+        if (moveCopy3dDragHandle.kind === 'move') vp?.previewMoveSolid([0,0,0])
+        else vp?.previewRotateSolid?.(0, moveCopy3dDragHandle.axis)
+        setMoveCopy3dDragHandle(null)
+        setMoveCopy3dDistInput('0')
+        setMoveCopy3dAngleInput('0')
+        moveCopy3dRotateBasisRef.current = null
+        return
+      }
       if (moveCopy3dSel != null) { setMoveCopy3dSel(null); return }
       resetMoveCopy3D(); setTool('select'); return
     }
@@ -9748,14 +9868,14 @@ const App3D = forwardRef(function App3D(props, ref) {
           {/* ── SmartStep bar: overlays bottom of viewport during Move/Copy ── */}
           <SmartStepBar
             op={tool==='movecopy3d' ? 'MOVE/COPY' : null}
-            steps={[{ id:1, label:'Select Body' }, { id:2, label:'Move' }]}
+            steps={[{ id:1, label:'Select Body' }, { id:2, label: moveCopy3dDragHandle?.kind==='rotate' ? 'Rotate' : 'Move' }]}
             currentStep={moveCopy3dSel!=null ? 2 : 1}
             color="#FF9800"
             hint={moveCopy3dSel==null
               ? 'Click a body to move or copy'
-              : moveCopy3dDragAxis
-                ? 'Move the mouse or type a distance, click or Enter to confirm'
-                : 'Click an axis arrow on the gizmo'}
+              : moveCopy3dDragHandle
+                ? `Move the mouse or type ${moveCopy3dDragHandle.kind==='rotate' ? 'an angle' : 'a distance'}, click or Enter to confirm`
+                : 'Click an axis arrow or rotate ring on the gizmo'}
             action={moveCopy3dSel==null ? null : [
               // Two separate always-clickable buttons, only one highlighted
               // at a time — a single toggle button that renamed itself
@@ -9763,10 +9883,13 @@ const App3D = forwardRef(function App3D(props, ref) {
               // name the current mode, or what clicking switches to?).
               { label:'Move', enabled:true, active: moveCopy3dMode!=='copy', onClick: () => setMoveCopy3dMode('move') },
               { label:'Copy', enabled:true, active: moveCopy3dMode==='copy', onClick: () => setMoveCopy3dMode('copy') },
-              ...(moveCopy3dDragAxis ? [{
+              ...(moveCopy3dDragHandle ? [{
                 label:'✓ Confirm', enabled:true, onClick:commitMoveCopy3D,
-                popover: <OffsetDistancePopover color="#FF9800" label={moveCopy3dMode==='copy' ? 'COPY' : 'MOVE'}
-                  unit="mm" value={moveCopy3dDistInput} onChange={setMoveCopy3dDistInput}/>,
+                popover: moveCopy3dDragHandle.kind==='rotate'
+                  ? <OffsetDistancePopover color="#FF9800" label={moveCopy3dMode==='copy' ? 'COPY' : 'ROTATE'}
+                      unit="°" value={moveCopy3dAngleInput} onChange={setMoveCopy3dAngleInput}/>
+                  : <OffsetDistancePopover color="#FF9800" label={moveCopy3dMode==='copy' ? 'COPY' : 'MOVE'}
+                      unit="mm" value={moveCopy3dDistInput} onChange={setMoveCopy3dDistInput}/>,
               }] : []),
             ]}
             onStepBack={step => { if (step === 1) resetMoveCopy3D() }}

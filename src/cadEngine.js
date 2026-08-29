@@ -142,14 +142,21 @@ class CadEngine {
   }
 
   /**
-   * Bakes a Move/Copy's translation into a solid's actual geometry. params:
-   * {solidId, position:[dxMm,dyMm,dzMm], sourceSolidId?, base?, ops?} —
+   * Bakes a Move/Copy/Rotate's transform into a solid's actual geometry.
+   * params: {solidId, position?:[dxMm,dyMm,dzMm], rotation?:{angleDeg,
+   * axis:[x,y,z], pivot?:[xMm,yMm,zMm]}, sourceSolidId?, base?, ops?} —
    * solidId is written to; without sourceSolidId it's also read from (a
-   * plain Move, re-targeting the same body). Copy passes a distinct
+   * plain Move/Rotate, re-targeting the same body). Copy passes a distinct
    * sourceSolidId to read the original body's shape from while writing the
    * new duplicate's shape to solidId. base/ops are the same cold-rebuild
    * fallback shape buildBaseWorkerParams()/buildSolidOpsForWorker() already
    * produce elsewhere, used only if the source isn't in shapeStore.
+   *
+   * A live incremental rotate always includes rotation.pivot (the body's
+   * current world center, already known on the main thread). Omitting
+   * pivot — used when replaying a feature's whole cumulative `transform`
+   * against its pristine shape on a full rebuild — tells the worker to
+   * compute it itself from the shape's own bounding box.
    */
   async transformShape(params) {
     return this._send('transformShape', params)

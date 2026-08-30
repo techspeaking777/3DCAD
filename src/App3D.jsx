@@ -4049,14 +4049,29 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   // ── Measure (3D) state machine ────────────────────────────────────────────
-  // Single-click on an edge → immediate result (length for a straight edge,
-  // diameter for a circular one, or a labeled curve length as a fallback —
-  // see classifyEdgeGeometry, since neither the mesh data nor OCC expose a
-  // curve-type tag we could read directly, only point samples). Two clicks on
-  // faces/points (anywhere raycastSolidFace lands, not just vertices) →
-  // distance between them. Esc clears the current result/pending point first,
-  // a second Esc (nothing pending) leaves the tool — same two-stage pattern
-  // as fillet3d/mirror3d/join3d.
+  // An explicit mode toggle (measureMode, buttons in the SmartStepBar below)
+  // decides what a click/hover can even see — this replaced an earlier
+  // "everything's live at once" version where an edge's generous hit
+  // threshold made it all but impossible to land a click precisely on a
+  // line's ENDPOINT instead of grabbing the whole edge:
+  //   'line'      — only straight edges register; single click → length.
+  //   'circlearc' — only non-straight (circular or general-curve) edges
+  //                 register; single click → diameter (or curve length).
+  //                 See classifyEdgeGeometry — neither the mesh data nor OCC
+  //                 expose a curve-type tag we could read directly, only
+  //                 point samples, hence the circle-fit-and-verify approach.
+  //   'point'     — two clicks → distance between them. Hovering near an
+  //                 edge SNAPS to its nearest discrete point (an endpoint/
+  //                 midpoint, or a circular edge's center) via the same
+  //                 getEdgeSnapCandidates/nearestSnapCandidate Snap Move
+  //                 already uses, rather than an arbitrary spot on the face
+  //                 — that snap is what actually makes picking a line's
+  //                 endpoint reliable. Falls back to a plain point-on-face
+  //                 hit when nothing is nearby.
+  // Esc clears the current result/pending point first, a second Esc
+  // (nothing pending) leaves the tool — same two-stage pattern as
+  // fillet3d/mirror3d/join3d.
+  const [measureMode, setMeasureMode] = useState('line')        // 'line' | 'circlearc' | 'point'
   const [measureHover, setMeasureHover] = useState(null)       // {kind:'edge',solidId,edgeId,point} | {kind:'point',solidId,point} | null
   const [measureP1, setMeasureP1] = useState(null)             // {solidId, point} — first point of a pending distance pick
   const [measureResult, setMeasureResult] = useState(null)     // {kind:'straight'|'circular'|'curve'|'distance', ...}
@@ -4253,19 +4268,47 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }
 
-  // Mouse move while the Measure tool is active — edges take priority (same
-  // dedicated raycastSolidEdges pass fillet3d uses); if the ray misses every
-  // edge, fall back to a plain point-on-face hit via raycastSolidFace.
+  // Mouse move while the Measure tool is active — behavior branches on
+  // measureMode (see the state comment above). 'point' mode ignores whole
+  // edges entirely and snaps to a nearby edge's discrete points instead;
+  // 'line'/'circlearc' each only let a matching edge kind register at all,
+  // clearing the raycast's own hover highlight when an edge is under the
+  // cursor but doesn't match — otherwise it'd glow as if clickable when it
+  // isn't (a raw click miss with no visible cue why).
   function handleMeasureHover(e) {
     if (tool !== 'measure') return
     const vp = viewport3dRef.current; if (!vp) return
-    const edgeHit = vp.raycastSolidEdges(e.clientX, e.clientY)
-    if (edgeHit && edgeHit.edgeId != null) {
-      setMeasureHover({ kind:'edge', ...edgeHit })
+
+    if (measureMode === 'point') {
+      const edgeHit = vp.raycastSolidEdges(e.clientX, e.clientY)
+      if (edgeHit && edgeHit.edgeId != null) {
+        // raycastSolidEdges sets its own whole-edge hover highlight as a side
+        // effect regardless of what we do with its return value — point mode
+        // only ever wants the snapped-point marker (drawn by
+        // drawMeasureOverlay), never the cyan edge glow, so clear it here.
+        vp.clearEdgeHighlight()
+        const nearest = nearestSnapCandidate(getEdgeSnapCandidates(vp, edgeHit.solidId, edgeHit.edgeId), edgeHit.point)
+        if (nearest) {
+          setMeasureHover({ kind:'point', solidId: edgeHit.solidId, point: nearest.point })
+          return
+        }
+      }
+      const faceHit = vp.raycastSolidFace(e.clientX, e.clientY)
+      setMeasureHover(faceHit ? { kind:'point', ...faceHit } : null)
       return
     }
-    const faceHit = vp.raycastSolidFace(e.clientX, e.clientY)
-    setMeasureHover(faceHit ? { kind:'point', ...faceHit } : null)
+
+    const edgeHit = vp.raycastSolidEdges(e.clientX, e.clientY)
+    if (edgeHit && edgeHit.edgeId != null) {
+      const geo = classifyEdgeGeometry(vp, edgeHit.solidId, edgeHit.edgeId)
+      const matches = geo && (measureMode === 'line' ? geo.kind === 'straight' : geo.kind !== 'straight')
+      if (matches) {
+        setMeasureHover({ kind:'edge', ...edgeHit })
+        return
+      }
+      vp.clearEdgeHighlight()
+    }
+    setMeasureHover(null)
   }
 
   function handleMeasureClick(e) {
@@ -10176,21 +10219,37 @@ const App3D = forwardRef(function App3D(props, ref) {
             onStepBack={step => { if (step===1) resetFillet3D() }}
           />
 
-          {/* ── SmartStep bar: overlays bottom of viewport during Measure ── */}
+          {/* ── SmartStep bar: overlays bottom of viewport during Measure —
+              the 3 mode buttons decide what a click/hover can even see (see
+              the measureMode state comment above); switching modes resets
+              any in-progress pick/result so stale state from the old mode
+              can't linger. ── */}
           <SmartStepBar
             op={tool==='measure' ? 'MEASURE' : null}
-            steps={[{ id:1, label:'Click Geometry' }, { id:2, label:'Click Second Point' }]}
-            currentStep={measureP1 ? 2 : 1}
+            steps={
+              measureMode === 'point'
+                ? [{ id:1, label:'Select an Option' }, { id:2, label:'Click Second Point' }]
+                : [{ id:1, label:'Select an Option' }]
+            }
+            currentStep={measureMode === 'point' && measureP1 ? 2 : 1}
             color="#4FC3F7"
+            action={[
+              { label:'Line', enabled:true, active: measureMode==='line', onClick:()=>{ setMeasureMode('line'); resetMeasure() } },
+              { label:'Circle/Arc', enabled:true, active: measureMode==='circlearc', onClick:()=>{ setMeasureMode('circlearc'); resetMeasure() } },
+              { label:'Point to Point', enabled:true, active: measureMode==='point', onClick:()=>{ setMeasureMode('point'); resetMeasure() } },
+            ]}
             hint={
-              measureP1
-                ? 'Click a second point for distance'
-                : measureResult
-                  ? (measureResult.kind==='distance' ? `Distance: ${measureResult.distance.toFixed(2)} mm`
-                    : measureResult.kind==='straight'  ? `Length: ${measureResult.length.toFixed(2)} mm`
-                    : measureResult.kind==='circular'  ? `⌀ ${measureResult.diameter.toFixed(2)} mm`
-                    : `Length: ${measureResult.length.toFixed(2)} mm (curve)`) + ' — click new geometry to remeasure'
-                  : 'Click an edge to measure it, or a point to start a distance'
+              measureMode === 'point'
+                ? (measureP1
+                    ? 'Click a second point for distance'
+                    : measureResult?.kind === 'distance'
+                      ? `Distance: ${measureResult.distance.toFixed(2)} mm — click new points to remeasure`
+                      : 'Click a point (snaps to nearby corners/centers) to start a distance')
+                : (measureResult
+                    ? (measureResult.kind==='straight' ? `Length: ${measureResult.length.toFixed(2)} mm`
+                      : measureResult.kind==='circular' ? `⌀ ${measureResult.diameter.toFixed(2)} mm`
+                      : `Length: ${measureResult.length.toFixed(2)} mm (curve)`) + ' — click new geometry to remeasure'
+                    : measureMode === 'line' ? 'Click a straight edge to measure its length' : 'Click a circular or curved edge to measure its diameter')
             }
             onStepBack={step => { if (step===1) resetMeasure() }}
           />

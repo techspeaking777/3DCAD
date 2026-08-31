@@ -792,6 +792,24 @@ export function IconLoad() {
   )
 }
 
+export function IconCloudSave() {
+  return (
+    <V>
+      <path d="M9 20a4.5 4.5 0 01-.5-8.98A5.5 5.5 0 0119 9.5a4 4 0 011 7.9V20H9z" fill="#374151" stroke="#4ade80" strokeWidth="1.5"/>
+      <path d="M14 21v-7M11 17l3-3 3 3" stroke="#4ade80" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+    </V>
+  )
+}
+
+export function IconCloudLoad() {
+  return (
+    <V>
+      <path d="M9 20a4.5 4.5 0 01-.5-8.98A5.5 5.5 0 0119 9.5a4 4 0 011 7.9V20H9z" fill="#374151" stroke="#3b82f6" strokeWidth="1.5"/>
+      <path d="M14 14v7M11 18l3 3 3-3" stroke="#3b82f6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+    </V>
+  )
+}
+
 export function IconDXF() {
   return (
     <V>

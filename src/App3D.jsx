@@ -19,7 +19,8 @@ import { sampleSpline, nearestSpline, computeSplineTrimPreview, performSplineTri
 import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform } from './tools/selectMath.js'
 import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine, perpLabelOffset } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
-import { saveJSON, loadJSON, exportDXF, parseDXF, saveProjectAs, canPickSaveLocation, exportFaceDXF as writeFaceDXF, saveBlobAs, saveProjectFileAs, loadProjectFile } from './tools/saveLoad.js'
+import { saveJSON, loadJSON, exportDXF, parseDXF, saveProjectAs, canPickSaveLocation, exportFaceDXF as writeFaceDXF, saveBlobAs, saveProjectFileAs, loadProjectFile, serializeProject, parseProjectData } from './tools/saveLoad.js'
+import { getAuthState, fetchMyClasses, saveNewCloudProject, updateCloudProject, loadCloudProject } from './tools/cloudSave.js'
 import { detectProfiles, buildSolid, pickProfile } from './tools/extrudeMath.js'
 import { cadEngine } from './cadEngine.js'
 import { replicadMeshToThree } from './cadMesh.js'
@@ -28,6 +29,8 @@ import TextPanel from './tools/TextPanel.jsx'
 import PageSetupPanel from './tools/PageSetupPanel.jsx'
 import GuidePanel from './tools/GuidePanel.jsx'
 import SaveAsPanel from './tools/SaveAsPanel.jsx'
+import CloudSavePanel from './tools/CloudSavePanel.jsx'
+import CloudOpenPanel from './tools/CloudOpenPanel.jsx'
 import SplashScreen from './SplashScreen.jsx'
 import LineSnapPanel from './tools/LineSnapPanel.jsx'
 import CircleSnapPanel from './tools/CircleSnapPanel.jsx'
@@ -43,7 +46,7 @@ import { useDraggablePanel, DragHandle } from './tools/useDraggablePanel.jsx'
 import {
   IconLine, IconCircle, IconTrim, IconDelete, IconExtend, IconOffset,
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
-  IconUndo, IconRedo, IconFitView, IconReframe, IconNew, IconSave, IconLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
+  IconUndo, IconRedo, IconFitView, IconReframe, IconNew, IconSave, IconLoad, IconCloudSave, IconCloudLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
   IconIncludeEdge,
   IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D,
 } from './draw/ToolIcons.jsx'
@@ -1154,7 +1157,25 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   const [cadError, setCadError] = useState(null)
   const [saveToast, setSaveToast] = useState(null)
-  function flashSaved(){ setSaveToast('Saved'); setTimeout(() => setSaveToast(null), 2000) }
+  function flashSaved(msg='Saved'){ setSaveToast(msg); setTimeout(() => setSaveToast(null), 2000) }
+
+  // ── Cloud save/load (classroom feature) ──────────────────────────────────
+  // Talks to the website's classroom backend — see tools/cloudSave.js's own
+  // comment for why a plain fetch() is enough (same-origin session cookie,
+  // no auth plumbing needed here). `loggedIn` is probed once on mount, not
+  // re-polled, so logging in/out in another tab won't update it until this
+  // page reloads — an acceptable gap for a same-tab classroom workflow.
+  // cloudProjectIdRef mirrors projectFileHandleRef's "silently re-save to
+  // the same place next time" role, but for the cloud instead of a local
+  // file handle — nulled everywhere that ref already gets nulled (opening a
+  // local file, opening a DIFFERENT cloud project, New Project), and set
+  // whenever this session's work lands in a specific cloud row.
+  const [cloudLoggedIn, setCloudLoggedIn] = useState(false)
+  const [cloudSaveOpen, setCloudSaveOpen] = useState(false)
+  const [cloudSaveClasses, setCloudSaveClasses] = useState([])
+  const [cloudOpenOpen, setCloudOpenOpen] = useState(false)
+  const cloudProjectIdRef = useRef(null)
+  useEffect(() => { getAuthState().then(s => setCloudLoggedIn(s.loggedIn)) }, [])
 
   // ── CAD engine (replicad + OpenCascade) ──
   const [occReady, setOccReady] = useState(false)
@@ -1538,6 +1559,19 @@ const App3D = forwardRef(function App3D(props, ref) {
   // dismissing via Open also fires the same file input the OPEN toolbar
   // button uses.
   const [showSplash, setShowSplash] = useState(true)
+  // A teacher's "Open in Retro CAD" link (classroom/[id].astro, in the
+  // website repo) points here with ?loadProjectId=<id> — skip the splash
+  // screen entirely and load that project straight away rather than making
+  // them click "New Project" first just to reach a toolbar button.
+  // handleCloudProjectPicked is a `function` declaration further down this
+  // component, hoisted within this same function body, so it's safely
+  // callable here despite being defined later in the file.
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get('loadProjectId')
+    if (!id) return
+    setShowSplash(false)
+    handleCloudProjectPicked(id)
+  }, [])
   // The FileSystemFileHandle from the last successful project save — lets
   // handleSaveProject silently re-write the SAME file on subsequent saves
   // instead of always re-opening the native picker and re-suggesting the
@@ -1635,6 +1669,25 @@ const App3D = forwardRef(function App3D(props, ref) {
     setExtrudeState(null); setExtrudeTool(null); setExtrudeHandlePos(null); setEditingFeatureId(null)
   }
 
+  // Shared tail of "replace everything on screen with this project" — pulled
+  // out of handleOpenProject so the cloud-open path (a project fetched as
+  // JSON, no File involved) can apply it identically instead of duplicating
+  // this sequence. Callers are responsible for resetAllToolState() and
+  // clearing whichever file-handle/cloud-id ref no longer applies BEFORE
+  // calling this, same as handleOpenProject already did inline.
+  async function applyLoadedProject({ features: newFeatures, sheet }) {
+    setFeatures(newFeatures)
+    props.onSheetLoaded?.(sheet)
+    try {
+      const newSolids = await rebuildProjectFromFeatures(newFeatures)
+      setSolids(newSolids)
+      setLoadError(null)
+    } catch (err) {
+      setCadError('Project loaded but rebuild failed: ' + err.message)
+      setTimeout(() => setCadError(null), 8000)
+    }
+  }
+
   // Opens a .trc project: parses first (non-destructive), THEN clears the
   // current scene and replays every feature through cadEngine from scratch
   // via rebuildProjectFromFeatures — solids are never stored in the file
@@ -1658,26 +1711,80 @@ const App3D = forwardRef(function App3D(props, ref) {
     resetAllToolState()
     // Opening a project reads it via a plain <input type="file"> (no
     // writable handle), and it's a DIFFERENT file from whatever was saved
-    // before — clear the cached handle so the next Save prompts fresh
-    // instead of silently overwriting the previous project.
+    // before — clear the cached handle/cloud-id so the next Save prompts
+    // fresh instead of silently overwriting the previous project.
     projectFileHandleRef.current = null
+    cloudProjectIdRef.current = null
     if (projectData) {
-      setFeatures(projectData.features)
-      props.onSheetLoaded?.(projectData.sheet)
-      try {
-        const newSolids = await rebuildProjectFromFeatures(projectData.features)
-        setSolids(newSolids)
-        setLoadError(null)
-      } catch (err) {
-        setCadError('Project loaded but rebuild failed: ' + err.message)
-        setTimeout(() => setCadError(null), 8000)
-      }
+      await applyLoadedProject(projectData)
     } else {
       if (legacyData.dims) setDims(legacyData.dims)
       setLines(legacyData.lines); setCircles(legacyData.circles); setArcs(legacyData.arcs); setSplines(legacyData.splines||[])
       setFeatures([]); setSolids([])
       setLoadError('Old-format file — loaded as a sketch only, no feature tree.')
       setTimeout(()=>setLoadError(null), 4000)
+    }
+  }
+
+  // "Save to My Account" — first save of this session prompts for a
+  // name/class (CloudSavePanel), a subsequent save silently overwrites the
+  // same row (cloudProjectIdRef), mirroring how local Save reuses
+  // projectFileHandleRef. Logged-out click just opens the login page in a
+  // new tab rather than attempting (and failing) a request — no in-app
+  // router here to preserve unsaved work across an in-tab redirect.
+  async function handleCloudSaveClick() {
+    if (!cloudLoggedIn) { window.open('/login', '_blank'); return }
+    if (cloudProjectIdRef.current) {
+      try {
+        const dataObj = JSON.parse(serializeProject(features, solids, props.getSheetData?.()))
+        await updateCloudProject(cloudProjectIdRef.current, undefined, dataObj)
+        flashSaved('Saved to your account')
+      } catch (err) {
+        setCadError('Cloud save failed: ' + err.message)
+        setTimeout(() => setCadError(null), 6000)
+      }
+      return
+    }
+    const classes = await fetchMyClasses()
+    setCloudSaveClasses(classes)
+    setCloudSaveOpen(true)
+  }
+
+  async function handleCloudSaveSubmit(name, classId) {
+    setCloudSaveOpen(false)
+    try {
+      const dataObj = JSON.parse(serializeProject(features, solids, props.getSheetData?.()))
+      const saved = await saveNewCloudProject(name, classId, dataObj)
+      cloudProjectIdRef.current = saved.id
+      flashSaved('Saved to your account')
+    } catch (err) {
+      setCadError('Cloud save failed: ' + err.message)
+      setTimeout(() => setCadError(null), 6000)
+    }
+  }
+
+  function handleCloudOpenClick() {
+    if (!cloudLoggedIn) { window.open('/login', '_blank'); return }
+    setCloudOpenOpen(true)
+  }
+
+  // Loads one saved project by id (picked from CloudOpenPanel), through the
+  // exact same validation (parseProjectData) and scene-apply path
+  // (applyLoadedProject) a local .trc file goes through — a corrupt/
+  // incompatible `data` blob fails the same graceful way a bad local file
+  // already does, not a crash.
+  async function handleCloudProjectPicked(id) {
+    setCloudOpenOpen(false)
+    try {
+      const { data } = await loadCloudProject(id)
+      const projectData = parseProjectData(data)
+      resetAllToolState()
+      projectFileHandleRef.current = null
+      await applyLoadedProject(projectData)
+      cloudProjectIdRef.current = id
+    } catch (err) {
+      setLoadError(err.message || 'Could not open project')
+      setTimeout(() => setLoadError(null), 3000)
     }
   }
 
@@ -10400,6 +10507,19 @@ const App3D = forwardRef(function App3D(props, ref) {
                 <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>IMPORT</span>
               </button>
               <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
+              <button onClick={handleCloudSaveClick}
+                title={cloudLoggedIn ? 'Save to My Account' : 'Log in to save to your account'}
+                style={{...btnBase,flexDirection:'column',gap:2,background:'transparent',border:'none',opacity:cloudLoggedIn?1:0.45}}>
+                <IconCloudSave/>
+                <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>CLOUD SAVE</span>
+              </button>
+              <button onClick={handleCloudOpenClick}
+                title={cloudLoggedIn ? 'Open from My Account' : 'Log in to open your saved projects'}
+                style={{...btnBase,flexDirection:'column',gap:2,background:'transparent',border:'none',opacity:cloudLoggedIn?1:0.45}}>
+                <IconCloudLoad/>
+                <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>CLOUD OPEN</span>
+              </button>
+              <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
             </>
           )}
           {/* Grid toggle — stays visible in 3D mode too: gridSnap/gridSizeMm
@@ -11429,6 +11549,19 @@ const App3D = forwardRef(function App3D(props, ref) {
             else await saveProjectAs(lines,circles,arcs,splines,dims,filename)
           }}
           onClose={()=>setSaveAsOpen(false)}
+        />
+      )}
+      {cloudSaveOpen&&(
+        <CloudSavePanel
+          classes={cloudSaveClasses}
+          onSave={handleCloudSaveSubmit}
+          onClose={()=>setCloudSaveOpen(false)}
+        />
+      )}
+      {cloudOpenOpen&&(
+        <CloudOpenPanel
+          onOpen={handleCloudProjectPicked}
+          onClose={()=>setCloudOpenOpen(false)}
         />
       )}
       {pageSetupOpen&&(

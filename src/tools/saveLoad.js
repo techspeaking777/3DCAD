@@ -160,7 +160,11 @@ const PROJECT_FORMAT_VERSION = 1
 // already uses (see App.jsx's getSheetData) — folded in as a sibling to
 // `features` so one .trc round-trips both the 3D feature tree and whatever's
 // on the Drawing tab's sheet. Absent on older files; loads as an empty sheet.
-function serializeProject(features, solids, drawingSheet) {
+// Exported (not just used internally by saveProjectFileAs below) so
+// cloudSave.js's account-save path can produce the exact same payload
+// shape — a saved project should be identical whether it lands in a local
+// .trc file or a cad_projects row.
+export function serializeProject(features, solids, drawingSheet) {
   const hiddenById = new Map(solids.map(s => [s.id, !!s.hidden]))
   return JSON.stringify({
     formatVersion: PROJECT_FORMAT_VERSION,
@@ -220,6 +224,17 @@ export async function saveProjectFileAs(features, solids, suggestedName = 'drawi
   return { status: 'downloaded', handle: null }
 }
 
+// Validates and unpacks an already-parsed project object (the same shape
+// serializeProject() produces) into {features, formatVersion, sheet} —
+// pulled out of loadProjectFile below so cloudSave.js's account-load path
+// can run a project fetched as JSON (no File involved) through the exact
+// same validation/deserialization a local .trc file gets, rather than
+// duplicating it. Throws if `features` isn't present/an array.
+export function parseProjectData(data) {
+  if (!data || !Array.isArray(data.features)) throw new Error('Not a project file (no feature tree)')
+  return { features: data.features.map(deserializeFeature), formatVersion: data.formatVersion, sheet: data.sheet || null }
+}
+
 // Parses a .trc (or legacy-incompatible) file. Throws if `features` isn't
 // present/an array so callers can fall back to the old sketch-buffer-only
 // loadJSON() for files saved before this format existed.
@@ -229,11 +244,9 @@ export function loadProjectFile(file) {
     const reader = new FileReader()
     reader.onload = e => {
       try {
-        const data = JSON.parse(e.target.result)
-        if (!Array.isArray(data.features)) return reject(new Error('Not a project file (no feature tree)'))
-        resolve({ features: data.features.map(deserializeFeature), formatVersion: data.formatVersion, sheet: data.sheet || null })
-      } catch {
-        reject(new Error('Could not parse file'))
+        resolve(parseProjectData(JSON.parse(e.target.result)))
+      } catch (err) {
+        reject(err.message === 'Not a project file (no feature tree)' ? err : new Error('Could not parse file'))
       }
     }
     reader.onerror = () => reject(new Error('File read error'))

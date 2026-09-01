@@ -75,17 +75,30 @@ export default function AppShell() {
         {/* Wordmark — lives here (the one bar that's never in either app's own
             toolbar, so it can't get crowded out by tool groups) rather than
             inside App3D's sketch toolbar, which needed the width back. */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto', paddingRight: 16 }}>
-          <svg width="24" height="24" viewBox="0 0 20 20" fill="none">
-            <path d="M10 1.5l8 4.5v8l-8 4.5-8-4.5v-8l8-4.5z" stroke="#3ad6ff" strokeWidth="1.5" strokeLinejoin="round"/>
-            <path d="M2 6l8 4.5 8-4.5M10 10.5v8" stroke="#3ad6ff" strokeWidth="1.2" opacity="0.6"/>
-          </svg>
-          <span style={{ fontFamily: 'monospace', fontWeight: 'bold', fontSize: 18,
-            letterSpacing: '0.1em', whiteSpace: 'nowrap' }}>
-            <span style={{ color: '#FF9800', textShadow: '0 0 8px #FF9800' }}>RETRO</span>
-            {' '}
-            <span style={{ color: '#3ad6ff', textShadow: '0 0 10px #3ad6ff,0 0 20px #3ad6ff88' }}>CAD</span>
-          </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginLeft: 'auto', paddingRight: 16 }}>
+          <button
+            onClick={() => window.open('/retrocad-plus', '_blank')}
+            title="Learn about RetroCAD+"
+            style={{
+              background: 'transparent', border: '1px solid #333', borderRadius: 4,
+              color: '#999', fontFamily: 'monospace', fontSize: 11, letterSpacing: '0.05em',
+              padding: '4px 10px', cursor: 'pointer', whiteSpace: 'nowrap',
+            }}
+          >
+            More info
+          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <svg width="24" height="24" viewBox="0 0 20 20" fill="none">
+              <path d="M10 1.5l8 4.5v8l-8 4.5-8-4.5v-8l8-4.5z" stroke="#3ad6ff" strokeWidth="1.5" strokeLinejoin="round"/>
+              <path d="M2 6l8 4.5 8-4.5M10 10.5v8" stroke="#3ad6ff" strokeWidth="1.2" opacity="0.6"/>
+            </svg>
+            <span style={{ fontFamily: 'monospace', fontWeight: 'bold', fontSize: 18,
+              letterSpacing: '0.1em', whiteSpace: 'nowrap' }}>
+              <span style={{ color: '#FF9800', textShadow: '0 0 8px #FF9800' }}>RETRO</span>
+              {' '}
+              <span style={{ color: '#3ad6ff', textShadow: '0 0 10px #3ad6ff,0 0 20px #3ad6ff88' }}>CAD</span>
+            </span>
+          </div>
         </div>
       </div>
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>

@@ -86,7 +86,16 @@ export function computeExtendPreview(mouse, lines, circles, arcs, splines = []) 
     boundaryPt = { x: l.x1 + newT * dx, y: l.y1 + newT * dy }
     return {
       idx: target.idx, end: 1,
-      newLine: { x1: boundaryPt.x, y1: boundaryPt.y, x2: l.x2, y2: l.y2, ...(l.style?{style:l.style}:{}) },
+      // Spread the whole original line, not just x1/y1/x2/y2 + style — it
+      // also carries `plane`/`facePlane` (see planeTag() in App3D.jsx),
+      // which Viewport3D's pt2three() needs to place the line on the right
+      // 3D plane. Reconstructing a bare {x1,y1,x2,y2,style} object here
+      // silently dropped that tag, so an extended line always fell through
+      // to pt2three's `default` case (the XY/ground plane) regardless of
+      // which plane it was actually drawn on — invisible on the XY plane
+      // itself (XY *is* that default), but every extend on XZ/YZ visibly
+      // flattened the line onto the ground.
+      newLine: { ...l, x1: boundaryPt.x, y1: boundaryPt.y },
       extStart: boundaryPt, extEnd: { x: l.x1, y: l.y1 },
     }
   } else {
@@ -96,7 +105,7 @@ export function computeExtendPreview(mouse, lines, circles, arcs, splines = []) 
     boundaryPt = { x: l.x1 + newT * dx, y: l.y1 + newT * dy }
     return {
       idx: target.idx, end: 2,
-      newLine: { x1: l.x1, y1: l.y1, x2: boundaryPt.x, y2: boundaryPt.y, ...(l.style?{style:l.style}:{}) },
+      newLine: { ...l, x2: boundaryPt.x, y2: boundaryPt.y },
       extStart: { x: l.x2, y: l.y2 }, extEnd: boundaryPt,
     }
   }

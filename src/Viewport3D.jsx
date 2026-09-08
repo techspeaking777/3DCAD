@@ -429,15 +429,13 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   const dxfPickModeRef   = useRef(false)
   const dxfSelectedFacesRef = useRef([])
   // Extrude/cutout Phase 2/3 (a profile is picked, awaiting the commit
-  // click) — tracked separately from sketchArmedRef because the work-plane
-  // hover/click path below isn't gated by sketchArmedRef at all (a bare
-  // work-plane hit has no "sketch tool" concept the way a face hit does —
-  // see faceMeshHit just below). App3D's handlePlaneClick is what actually
-  // decides whether a plane click does anything (it now requires
-  // extrudeTool to be the active tool, since planes have no occlusion check
-  // and are always hit-testable — see that function's own comment); this
-  // ref only needs to stay false long enough for that decision to happen,
-  // true only to block Phase 2/3's own stray clicks.
+  // click) — tracked separately from sketchArmedRef because the two mean
+  // different things: sketchArmedRef gates "is some tool armed for a plane/
+  // face pick at all" (extrudeTool active / Mirror3D step 2 / Loft3D step
+  // 1 — see the work-plane hover/click gates below, which AND the two
+  // together), while this one specifically blocks Phase 2/3's OWN stray
+  // clicks once a profile is already picked and sketchArmed itself may
+  // still read true for an unrelated reason.
   const extrudeArmedRef  = useRef(false)
   // Tab-cycled bottom-edge override (see cycleFaceBottomEdge) — null means
   // "follow the cursor" (previewBottomEdge), a number is an index into that
@@ -1208,24 +1206,26 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     }
 
     // ── Work plane hover (disabled once an extrude/cutout profile is armed,
-    // Phase 2/3 — NOT gated by sketchArmedRef, since a plain work-plane hit
-    // has no "sketch tool" concept the way a face hit does; App3D's
-    // handlePlaneClick is what decides whether the eventual click does
-    // anything, requiring extrudeTool to be the active tool — a plane hover
-    // with no tool active still lights up as hovered here, but clicking it
-    // is now a no-op there). Work planes have no occlusion check against
+    // Phase 2/3, AND gated by sketchArmedRef — a plain work-plane hit has no
+    // "sketch tool" concept the way a face hit does, but sketchArmedRef's
+    // own formula (extrudeTool active / Mirror3D step 2 / Loft3D step 1)
+    // already exactly matches the set of tools App3D's handlePlaneClick
+    // will actually act on; reusing it here means a plane no longer lights
+    // up as hovered when clicking it wouldn't do anything (e.g. no tool
+    // active at all), instead of hovering as if clickable and then silently
+    // doing nothing on click. Work planes have no occlusion check against
     // solids and are huge (see
-    // hitTestPlanes/WorkPlanes.js), so without this gate they'd keep
-    // registering hover hits — and therefore eating the commit click, see
-    // the click handler below — even when the cursor is visually over the
-    // solid, not a plane. ──
-    if (!extrudeArmedRef.current && s.workPlanes && showWorkPlanesRef.current && !s.tween?.active) {
+    // hitTestPlanes/WorkPlanes.js), so without the rest of this gate they'd
+    // keep registering hover hits — and therefore eating the commit click,
+    // see the click handler below — even when the cursor is visually over
+    // the solid, not a plane. ──
+    if (sketchArmedRef.current && !extrudeArmedRef.current && s.workPlanes && showWorkPlanesRef.current && !s.tween?.active) {
       const newId = (planeHit && !faceWins) ? planeHit.id : null
       if (newId !== hoveredPlaneRef.current) {
         hoveredPlaneRef.current = newId
         setPlaneHover(s.workPlanes, newId, mirrorPlanePickArmedRef.current ? 0xff9800 : undefined)
       }
-    } else if (extrudeArmedRef.current && hoveredPlaneRef.current) {
+    } else if (hoveredPlaneRef.current) {
       hoveredPlaneRef.current = null
       setPlaneHover(s.workPlanes, null)
     }
@@ -1274,9 +1274,9 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       }
     }
 
-    // ── Work plane click (same extrudeArmedRef gate as hover above — belt
-    // and suspenders in case hoveredPlaneRef is still set from a moment ago) ──
-    if (!extrudeArmedRef.current && s?.workPlanes && showWorkPlanesRef.current && hoveredPlaneRef.current && !s.tween?.active) {
+    // ── Work plane click (same gate as hover above — belt and suspenders
+    // in case hoveredPlaneRef is still set from a moment ago) ──
+    if (sketchArmedRef.current && !extrudeArmedRef.current && s?.workPlanes && showWorkPlanesRef.current && hoveredPlaneRef.current && !s.tween?.active) {
       const entry = s.workPlanes[hoveredPlaneRef.current]
       if (entry && onPlaneClick) {
         onPlaneClick({ id: entry.def.id, def: entry.def })

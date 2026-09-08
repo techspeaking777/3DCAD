@@ -40,6 +40,7 @@ import ResizeScalePanel from './tools/ResizeScalePanel.jsx'
 import MirrorPanel from './tools/MirrorPanel.jsx'
 import CenterPanel from './tools/CenterPanel.jsx'
 import FilletRadiusPanel from './tools/FilletRadiusPanel.jsx'
+import CutoutTargetPicker from './tools/CutoutTargetPicker.jsx'
 import OffsetDistPanel from './tools/OffsetDistPanel.jsx'
 import SelectDimPanel from './tools/SelectDimPanel.jsx'
 import { useDraggablePanel, DragHandle } from './tools/useDraggablePanel.jsx'
@@ -6751,6 +6752,74 @@ const App3D = forwardRef(function App3D(props, ref) {
   const extrudeStateRef = useRef(null)
   useEffect(() => { extrudeStateRef.current = extrudeState }, [extrudeState])
 
+  // Cutout target-body picker: shown when a brand-new cutout's swept volume
+  // overlaps more than one solid (see commitExtrude's cutout branch), as a
+  // 4th SmartStepBar step ("Pick Target(s)") rather than a blocking modal —
+  // so the viewport stays fully interactive: candidate bodies can be clicked
+  // directly to toggle them (same pattern as Mirror3D/Export STL's body
+  // picking), highlighted light-blue when selected and orange on hover via
+  // the same highlightJoinMembers/hoverSolid pair those tools use. A hidden
+  // candidate can't be clicked (nothing to click on), so CutoutTargetPicker.jsx
+  // renders a small non-blocking list alongside as the fallback path for
+  // those — same `selected` state either way. Everything the eventual
+  // confirm/cancel needs to finish or discard the cutout is parked in a ref
+  // (not React state) so it survives untouched across whatever re-renders
+  // happen while the user is picking.
+  const [cutoutTargetPicker, setCutoutTargetPicker] = useState(null) // {candidates, selected:Set} | null
+  const [cutoutTargetHoverId, setCutoutTargetHoverId] = useState(null)
+  const pendingCutoutCtxRef = useRef(null)
+
+  function toggleCutoutTarget(id) {
+    setCutoutTargetPicker(prev => {
+      if (!prev) return prev
+      const next = new Set(prev.selected)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return { ...prev, selected: next }
+    })
+  }
+
+  // Viewport click while the picker is active — same raycastSolidFace body
+  // pick Mirror3D/Export STL use, restricted to this cutout's own candidate
+  // list (clicking an unrelated body elsewhere in the model is a no-op).
+  function handleCutoutTargetClick(e) {
+    if (!cutoutTargetPicker) return
+    const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
+    if (!hit || hit.solidId == null) return
+    if (!cutoutTargetPicker.candidates.some(c => c.id === hit.solidId)) return
+    toggleCutoutTarget(hit.solidId)
+  }
+
+  // Live hover glow while picking — mirrors handleMirror3DHover, restricted
+  // to this cutout's own candidates the same way the click handler above is.
+  function handleCutoutTargetHover(e) {
+    if (!cutoutTargetPicker) return
+    const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
+    const solidId = hit?.solidId ?? null
+    const valid = (solidId != null && cutoutTargetPicker.candidates.some(c => c.id === solidId)) ? solidId : null
+    setCutoutTargetHoverId(prev => prev === valid ? prev : valid)
+  }
+
+  // Keeps every selected candidate glowing light blue, live as the picker's
+  // selection changes — same effect shape as Mirror3D/Join3D/Export STL.
+  useEffect(() => {
+    if (!cutoutTargetPicker) { viewport3dRef.current?.clearJoinHighlight(); return }
+    viewport3dRef.current?.highlightJoinMembers([...cutoutTargetPicker.selected])
+  }, [cutoutTargetPicker])
+
+  // Keeps the hovered candidate glowing orange — from either a direct
+  // viewport hover (handleCutoutTargetHover) or hovering its row in the
+  // CutoutTargetPicker list (see onHoverRow below), sharing one state so
+  // whichever the user is using drives the same highlight. Skips a body
+  // already selected so hover never fights the light-blue selected glow,
+  // same guard handleMirror3DHover's effect uses.
+  useEffect(() => {
+    if (!cutoutTargetPicker || cutoutTargetHoverId == null || cutoutTargetPicker.selected.has(cutoutTargetHoverId)) {
+      viewport3dRef.current?.clearSolidHover()
+      return
+    }
+    viewport3dRef.current?.hoverSolid(cutoutTargetHoverId)
+  }, [cutoutTargetHoverId, cutoutTargetPicker])
+
   function handleExtrudeDepthKey(e) {
     if (!extrudeStateRef.current) return
     if (e.key === 'Enter') {
@@ -6838,6 +6907,102 @@ const App3D = forwardRef(function App3D(props, ref) {
       })
     }
     return newSolids
+  }
+
+  // The actual per-target cutout work — shared by commitExtrude's normal
+  // (single-candidate, no picker needed) path and confirmCutoutTargets
+  // (once the user has picked which bodies a multi-candidate cutout should
+  // affect). Cuts every profile in ctx.cutProfiles into every solid in
+  // `targets`, sequentially per target (the worker's shapeStore threads
+  // each solid's running result between subtract calls), and (re)creates
+  // one cutout feature per (target, profile) pair sharing one groupId.
+  async function applyCutoutToTargets(targets, ctx) {
+    const {
+      oldMembers, editingFeat, editingId, cutProfiles, profileBoxes, buildCut,
+      lastSketch, sketchGeom, depthMm, cutDepthMm, cutDirection, extentMode, color,
+      planeId, facePlane, revolveAxis, angleDeg, revolveReverse,
+    } = ctx
+
+    // Preserve the edited feature's own id in the common case (single
+    // target, single profile, wasn't already a group) — matters for
+    // anything that stored a reference to this exact feature id. Every
+    // other case (grouped, or the profile count changed) mints fresh ids,
+    // same as the whole-word text-extrude re-edit already does.
+    const reuseId = editingId && !editingFeat.groupId && targets.length === 1 && cutProfiles.length === 1
+
+    const groupId = `cutgroup-${Date.now()}`
+    const newFeats = []
+    for (let target of targets) {
+      // Re-sketch: rebuild this target clean of just the OLD group's cuts
+      // on it (everything else — other cutouts/fillets — replays as-is),
+      // THEN apply the fresh cuts below on top of that result.
+      const idsToSkipHere = oldMembers.filter(m => m.solidId === target.id).map(m => m.id)
+      if (idsToSkipHere.length) {
+        const meshData = await rebuildSolidChain(target, { skipIds: idsToSkipHere })
+        target = { ...target, group: replicadMeshToThree(meshData, target.color, target.id) }
+        setSolids(prev => prev.map(s => s.id === target.id ? target : s))
+      }
+      const targetBox = new THREE.Box3().setFromObject(target.group)
+      const targetBaseParams = buildBaseWorkerParams(target)
+      for (let i = 0; i < cutProfiles.length; i++) {
+        if (!profileBoxes[i].intersectsBox(targetBox)) continue
+        const p = cutProfiles[i]
+        const meshData = await cadEngine.subtract({ baseSolidId: target.id, cut: buildCut(p), base: targetBaseParams })
+        const group = replicadMeshToThree(meshData, target.color, target.id)
+        target = { ...target, group }
+        setSolids(prev => prev.map(s => s.id === target.id ? target : s))
+        newFeats.push({
+          id: reuseId ? editingId : `cutout-${target.id}-${Date.now()}-${newFeats.length}`,
+          type: 'extrude', name: editingFeat?.name || nextCutoutName(), groupId,
+          solidId: target.id, sketchId: lastSketch?.id || null,
+          depthMm, cutDepthMm, cutDirection, extentMode, color, operation: 'cutout', planeId, profilePts: p, facePlane,
+          revolveAxis, angleDeg, revolveReverse, ...sketchGeom,
+        })
+      }
+      await rebuildDependentMirrors(target)
+    }
+    const oldMemberIds = oldMembers.map(m => m.id)
+    setFeatures(prev => [...prev.filter(f => !oldMemberIds.includes(f.id)), ...newFeats])
+  }
+
+  // Resumes a cutout that was paused for CutoutTargetPicker (see
+  // commitExtrude's cutout branch) once the user confirms which bodies it
+  // should apply to. Mirrors commitExtrude's own success/failure handling
+  // (commit(snapshot()) / setCadError) since this is picking up exactly
+  // where that function left off.
+  async function confirmCutoutTargets() {
+    const ctx = pendingCutoutCtxRef.current
+    const selected = cutoutTargetPicker?.selected
+    pendingCutoutCtxRef.current = null
+    setCutoutTargetPicker(null)
+    setCutoutTargetHoverId(null)
+    if (!ctx || !selected || selected.size === 0) return
+    const targets = ctx.candidates.filter(s => selected.has(s.id))
+    if (targets.length === 0) return
+    try {
+      await applyCutoutToTargets(targets, ctx)
+      commit(snapshot())
+    } catch (err) {
+      console.error('CAD operation failed:', err)
+      setCadError(`Cutout failed: ${err.message || String(err)}`)
+      setTimeout(() => setCadError(null), 8000)
+    }
+  }
+
+  function cancelCutoutTargetPicker() {
+    pendingCutoutCtxRef.current = null
+    setCutoutTargetPicker(null)
+    setCutoutTargetHoverId(null)
+  }
+
+  // Display name for a solid in the target picker — same "which operations
+  // own an independent body" rule FeatureTree uses (isBodyOwner), just
+  // evaluated here against a solidId instead of while rendering a row.
+  function solidLabel(solidId) {
+    const feat = features.find(f => f.type === 'extrude' && !f.joinedInto &&
+      ['extrude','revolve','loft','mirror','join','import'].includes(f.operation || 'extrude') &&
+      f.solidId === solidId)
+    return feat?.name || `Body ${solidId}`
   }
 
   async function commitExtrude(overrideState=null) {
@@ -7009,53 +7174,50 @@ const App3D = forwardRef(function App3D(props, ref) {
             // OCC does the real, precise boolean cut below — this is only a
             // candidate filter.
             const candidates = solids.filter(s => s.operation !== 'cutout' && s.group)
-            targets = candidates.filter(s => {
+            const bboxTargets = candidates.filter(s => {
               const sBox = new THREE.Box3().setFromObject(s.group)
               return profileBoxes.some(pb => pb.intersectsBox(sBox))
             })
-            if (targets.length === 0) throw new Error('No base solid to cut from')
+            if (bboxTargets.length === 0) throw new Error('No base solid to cut from')
+
+            if (bboxTargets.length > 1) {
+              // More than one body legitimately overlaps this cut — don't
+              // silently cut all of them (the original bug report: a hole
+              // meant for one body also chewed into a DIFFERENT body's
+              // already-modeled geometry that just happens to occupy the
+              // same space by design, e.g. a pin joint's pin). Default from
+              // which face the sketch was actually drawn on when that's
+              // known (facePlane.solidId, stamped in Viewport3D.jsx on a
+              // face click); fall back to every candidate — today's exact
+              // prior behavior — when sketched on a raw work plane instead,
+              // so nothing narrows without a real signal for it. Either way,
+              // let the user confirm/adjust via CutoutTargetPicker, then
+              // bail out here — commitExtrude resumes via
+              // confirmCutoutTargets() once they decide. Everything this
+              // needs to finish the cutout goes in a ref, not state, so it
+              // can't go stale across whatever re-renders happen while the
+              // picker is up.
+              const sketchedOnId = facePlane?.solidId
+              const defaultIds = (sketchedOnId != null && bboxTargets.some(s => s.id === sketchedOnId))
+                ? [sketchedOnId]
+                : bboxTargets.map(s => s.id)
+              pendingCutoutCtxRef.current = {
+                candidates: bboxTargets, oldMembers, editingFeat, editingId,
+                cutProfiles, profileBoxes, buildCut, lastSketch, sketchGeom,
+                depthMm, cutDepthMm, cutDirection, extentMode, color,
+                planeId, facePlane, revolveAxis, angleDeg, revolveReverse,
+              }
+              setCutoutTargetPicker({ candidates: bboxTargets, selected: new Set(defaultIds) })
+              return
+            }
+            targets = bboxTargets
           }
 
-          // Preserve the edited feature's own id in the common case (single
-          // target, single profile, wasn't already a group) — matters for
-          // anything that stored a reference to this exact feature id.
-          // Every other case (grouped, or the profile count changed) mints
-          // fresh ids, same as the whole-word text-extrude re-edit already does.
-          const reuseId = editingId && !editingFeat.groupId && targets.length === 1 && cutProfiles.length === 1
-
-          const groupId = `cutgroup-${Date.now()}`
-          const newFeats = []
-          for (let target of targets) {
-            // Re-sketch: rebuild this target clean of just the OLD group's
-            // cuts on it (everything else — other cutouts/fillets — replays
-            // as-is), THEN apply the fresh cuts below on top of that result.
-            const idsToSkipHere = oldMembers.filter(m => m.solidId === target.id).map(m => m.id)
-            if (idsToSkipHere.length) {
-              const meshData = await rebuildSolidChain(target, { skipIds: idsToSkipHere })
-              target = { ...target, group: replicadMeshToThree(meshData, target.color, target.id) }
-              setSolids(prev => prev.map(s => s.id === target.id ? target : s))
-            }
-            const targetBox = new THREE.Box3().setFromObject(target.group)
-            const targetBaseParams = buildBaseWorkerParams(target)
-            for (let i = 0; i < cutProfiles.length; i++) {
-              if (!profileBoxes[i].intersectsBox(targetBox)) continue
-              const p = cutProfiles[i]
-              const meshData = await cadEngine.subtract({ baseSolidId: target.id, cut: buildCut(p), base: targetBaseParams })
-              const group = replicadMeshToThree(meshData, target.color, target.id)
-              target = { ...target, group }
-              setSolids(prev => prev.map(s => s.id === target.id ? target : s))
-              newFeats.push({
-                id: reuseId ? editingId : `cutout-${target.id}-${Date.now()}-${newFeats.length}`,
-                type: 'extrude', name: editingFeat?.name || nextCutoutName(), groupId,
-                solidId: target.id, sketchId: lastSketch?.id || null,
-                depthMm, cutDepthMm, cutDirection, extentMode, color, operation: 'cutout', planeId, profilePts: p, facePlane,
-                revolveAxis, angleDeg, revolveReverse, ...sketchGeom,
-              })
-            }
-            await rebuildDependentMirrors(target)
-          }
-          const oldMemberIds = oldMembers.map(m => m.id)
-          setFeatures(prev => [...prev.filter(f => !oldMemberIds.includes(f.id)), ...newFeats])
+          await applyCutoutToTargets(targets, {
+            oldMembers, editingFeat, editingId, cutProfiles, profileBoxes, buildCut,
+            lastSketch, sketchGeom, depthMm, cutDepthMm, cutDirection, extentMode, color,
+            planeId, facePlane, revolveAxis, angleDeg, revolveReverse,
+          })
         }
 
       } else if (revolveAxis) {
@@ -7118,6 +7280,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           for (const holePts of (memberPts.holes || [])) {
             const holeCut = {
               pts: holePts, depthMm: depthMm*4+10, planeId: member.planeId, direction: 'both',
+              circle: holePts.circleMeta || null,
               ...(member.facePlane ? {
                 normal: [member.facePlane.normal.x, member.facePlane.normal.y, member.facePlane.normal.z],
                 origin: [pxToMm(member.facePlane.origin.x), pxToMm(member.facePlane.origin.y), pxToMm(member.facePlane.origin.z)],
@@ -7145,10 +7308,11 @@ const App3D = forwardRef(function App3D(props, ref) {
       } else {
         // Fresh profile set: a brand new extrude, or a pencil re-sketch
         // (always an explicit overrideState) of an existing one — at any
-        // profile count, whole-word text included (letters are just profiles
-        // like any other; each already carries its own .holes from
-        // detectProfiles/resolveTextHoles). Extrudes every profile into its
-        // own solid and (re)creates one feature per profile sharing a single
+        // profile count, whole-word text and washer-shaped (nested-loop)
+        // sketches both included (each such profile already carries its own
+        // .holes from detectProfiles/resolveNestedHoles). Extrudes every
+        // profile into its own solid and (re)creates one feature per profile
+        // sharing a single
         // groupId — a group of exactly one member is harmless (FeatureTree
         // only shows the "N bodies" suffix when > 1).
         const groupId = editingFeat?.groupId || `profilegroup-${Date.now()}`
@@ -7211,6 +7375,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             holeIdx++
             const holeCut = {
               pts: holePts, depthMm: depthMm*4+10, planeId, direction: 'both',
+              circle: holePts.circleMeta || null,
               ...(facePlane ? {
                 normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z],
                 origin: [pxToMm(facePlane.origin.x), pxToMm(facePlane.origin.y), pxToMm(facePlane.origin.z)],
@@ -7985,6 +8150,12 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (wasDragRef.current){wasDragRef.current=false;return}
     lastClickClientRef.current = {x: e.clientX, y: e.clientY}
 
+    // Cutout target-picker step — takes priority over everything else below
+    // (extrudeTool/extrudeState are already null by this point, see
+    // commitExtrude's top-of-function reset, so there's no real conflict,
+    // but checking first keeps this robust regardless of that ordering).
+    if (cutoutTargetPicker) { handleCutoutTargetClick(e); return }
+
     const rawWorld=screenToWorld(e.clientX,e.clientY)
     // Geometric snap (endpoint/tangent/on-circle/intersection/etc.) takes
     // priority over grid snap — grid-snapping unconditionally here rounded
@@ -8726,6 +8897,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     // We just need world coordinates for tool logic.
     const sx=e.clientX,sy=e.clientY
 
+    // Cutout target-picker step — see handleClick's matching check.
+    if (cutoutTargetPicker) { handleCutoutTargetHover(e); return }
+
     // Fillet: raycasts solid edges directly (no sketch-plane projection involved)
     if (tool==='fillet3d') { handleFillet3DHover(e); return }
     if (tool==='measure') { handleMeasureHover(e); return }
@@ -8785,6 +8959,14 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   function handleKeyDown(e){
     if (showSplash) return
+    if (cutoutTargetPicker) {
+      // Unconditional on `tool` (extrudeTool/tool are already reset by the
+      // time this step is up) — same Enter-to-confirm/Escape-to-cancel role
+      // the SmartStepBar's own ✓ Confirm/✕ Cancel buttons play.
+      if (e.key==='Enter' && cutoutTargetPicker.selected.size>0) { e.preventDefault(); confirmCutoutTargets(); return }
+      if (e.key==='Escape') { cancelCutoutTargetPicker(); return }
+      return
+    }
     if ((e.key==='t'||e.key==='T')&&!e.ctrlKey&&!e.shiftKey&&(tool==='line'||tool==='circle')){setTKeyDown(p=>!p);return}
     if ((e.key==='p'||e.key==='P')&&!e.ctrlKey&&!e.shiftKey&&tool==='line'){setPKeyDown(p=>!p);return}
     if ((e.key==='d'||e.key==='D')&&!e.ctrlKey&&!e.shiftKey){
@@ -10176,6 +10358,30 @@ const App3D = forwardRef(function App3D(props, ref) {
             }}
           />
 
+          {/* ── SmartStep bar: overlays bottom of viewport during Cutout's
+              target-body pick — a 4th step tacked onto Cutout's own bar
+              (Pick Plane/Draw Profile/Set Depth already ran; extrudeTool is
+              null by now, see commitExtrude's top-of-function reset, so this
+              is its own bar rather than a 4th case of the one above). Click
+              a candidate body directly in the viewport to toggle it (see
+              handleCutoutTargetClick/Hover — highlighted the same light-blue/
+              orange as Mirror3D/Export STL's own body picks), or use
+              CutoutTargetPicker's small list alongside for anything hidden. ── */}
+          <SmartStepBar
+            op={cutoutTargetPicker ? 'CUTOUT' : null}
+            steps={[...EXTRUDE_STEPS, { id: 4, label: 'Pick Target(s)' }]}
+            currentStep={4}
+            color="#e05a4e"
+            hint={cutoutTargetPicker
+              ? `${cutoutTargetPicker.selected.size} of ${cutoutTargetPicker.candidates.length} selected — click bodies in the viewport, or use the list`
+              : null}
+            action={[
+              { label: '✓ Confirm', enabled: !!cutoutTargetPicker && cutoutTargetPicker.selected.size > 0, onClick: confirmCutoutTargets },
+              { label: '✕ Cancel', enabled: true, onClick: cancelCutoutTargetPicker },
+            ]}
+            onStepBack={() => {}}
+          />
+
           {/* ── SmartStep bar: overlays bottom of viewport during Export STL/STEP —
               shared between the two exactly like Loft/Loft Cutout share one bar,
               since the selection/hint/action shape is identical either way. ── */}
@@ -11016,6 +11222,20 @@ const App3D = forwardRef(function App3D(props, ref) {
           </div>
         </div>
         </div>
+      )}
+
+      {/* ── Cutout target-body picker — non-blocking list alongside the
+          SmartStepBar's own Pick Target(s) step (see commitExtrude's cutout
+          branch); the viewport itself is the primary way to pick — this list
+          is the fallback for candidates too hidden to click on. ──────────── */}
+      {cutoutTargetPicker && (
+        <CutoutTargetPicker
+          candidates={cutoutTargetPicker.candidates}
+          selected={cutoutTargetPicker.selected}
+          solidLabel={solidLabel}
+          onToggle={toggleCutoutTarget}
+          onHoverRow={setCutoutTargetHoverId}
+        />
       )}
 
       {/* ── Loft: unified between-profiles panel ─────────────────────────────

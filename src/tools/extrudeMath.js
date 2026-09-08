@@ -275,9 +275,11 @@ export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
   // Closed splines (currently only produced by the Text tool's font-outline
   // import, see TextPanel.jsx) are already closed loops — use their points
   // directly for polyline splines, or sample the Catmull-Rom curve for
-  // hand-drawn closed splines. Tag with textId so resolveTextHoles() below can
-  // find each letter's own hole contour (the counter in O/A/8/etc.) without
-  // touching unrelated hand-drawn geometry elsewhere in the sketch.
+  // hand-drawn closed splines. resolveNestedHoles below now finds a hole
+  // contour (e.g. a letter's counter in O/A/8/etc.) by pure geometric
+  // containment across the whole sketch, not by a shared textId tag — the
+  // tag itself is left in place below (still stamped at import time in
+  // App3D.jsx) since nothing currently depends on removing it.
   planeSplines.forEach(sp => {
     if (sp.points.length < 2) return
     const pts = sp.polyline ? sp.points.map(p=>({...p})) : sampleSpline(sp.points, true, 16)
@@ -294,54 +296,47 @@ export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
     profiles.push(pts)
   })
 
-  return resolveTextHoles(profiles)
+  return resolveNestedHoles(profiles)
 }
 
-// Letters like O/A/B/D/P/Q/0/4/6/8/9 produce two (or more) closed contours from
-// one glyph: an outer boundary and one or more inner "counters". Group profiles
-// that share a textId (one text-import batch — see TextPanel.jsx/App3D.jsx),
-// then use even-odd containment counting to tell holes from outer boundaries:
-// a contour is a hole if it's contained by an ODD number of other contours in
-// the same group. Each hole gets attached to its tightest (smallest-area)
-// container as `.holes`, and is removed from the flat returned list — a hole
-// isn't its own selectable/extrudable shape.
-function resolveTextHoles(profiles) {
-  const byText = new Map()
-  profiles.forEach((pts, idx) => {
-    if (!pts.textId) return
-    if (!byText.has(pts.textId)) byText.set(pts.textId, [])
-    byText.get(pts.textId).push(idx)
-  })
-  if (byText.size === 0) return profiles
+// Fusion-style hole recognition: a closed loop fully nested inside another
+// closed loop on the same plane/sketch (e.g. a washer's inner circle, or a
+// letter's counter in O/A/8/etc.) is a HOLE of the outer loop, not its own
+// separate solid. Uses even-odd containment counting across every profile on
+// this plane: a contour is a hole if it's contained by an ODD number of other
+// contours. Each hole gets attached to its tightest (smallest-area) container
+// as `.holes`, and is removed from the flat returned list — a hole isn't its
+// own selectable/extrudable shape. Two profiles that DON'T nest (e.g. two
+// side-by-side rectangles) never trigger this — containment is a strict
+// geometric test (one profile's own point literally falling inside another),
+// independent of how/when either was drawn.
+function resolveNestedHoles(profiles) {
+  const n = profiles.length
+  if (n < 2) return profiles
+
+  const areas = profiles.map(p => polygonArea(p))
+  const containmentCount = new Array(n).fill(0)
+  const containerOf = new Array(n).fill(-1)
+  for (let a = 0; a < n; a++) {
+    let bestArea = Infinity
+    for (let b = 0; b < n; b++) {
+      if (a === b) continue
+      if (pointInPolygon(profiles[a][0], profiles[b])) {
+        containmentCount[a]++
+        if (areas[b] < bestArea) { bestArea = areas[b]; containerOf[a] = b }
+      }
+    }
+  }
 
   const toRemove = new Set()
-  byText.forEach(indices => {
-    const n = indices.length
-    if (n < 2) return
-    const areas = indices.map(i => polygonArea(profiles[i]))
-    const containmentCount = new Array(n).fill(0)
-    const containerOf = new Array(n).fill(-1)
-    for (let a = 0; a < n; a++) {
-      let bestArea = Infinity
-      for (let b = 0; b < n; b++) {
-        if (a === b) continue
-        if (pointInPolygon(profiles[indices[a]][0], profiles[indices[b]])) {
-          containmentCount[a]++
-          if (areas[b] < bestArea) { bestArea = areas[b]; containerOf[a] = b }
-        }
-      }
+  for (let i = 0; i < n; i++) {
+    if (containmentCount[i] % 2 === 1 && containerOf[i] !== -1) {
+      const outer = profiles[containerOf[i]]
+      if (!outer.holes) outer.holes = []
+      outer.holes.push(profiles[i])
+      toRemove.add(i)
     }
-    for (let i = 0; i < n; i++) {
-      if (containmentCount[i] % 2 === 1 && containerOf[i] !== -1) {
-        const outerIdx = indices[containerOf[i]]
-        const outer = profiles[outerIdx]
-        if (!outer.holes) outer.holes = []
-        outer.holes.push(profiles[indices[i]])
-        toRemove.add(indices[i])
-      }
-    }
-  })
-
+  }
   return profiles.filter((_, idx) => !toRemove.has(idx))
 }
 

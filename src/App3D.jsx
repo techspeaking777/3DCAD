@@ -3722,6 +3722,15 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   // ── Phase 2 Step 3b: Sketch on face ──────────────────────────────────────
   function handleFaceClick(facePlane) {
+    // Cutout target-picker step — a face click here is a stray hit that
+    // slipped past sketchArmed being false (extrudeTool is already null by
+    // this point, see commitExtrude's top-of-function reset); the actual
+    // toggle happens in handleClick's own handleCutoutTargetClick, via the
+    // generic raycastSolidFace path, so this must be a plain no-op, not a
+    // second independent toggle — same convention Mirror3D/Join3D/Loft3D/
+    // Export Face DXF already follow for their own picking-phase steps, and
+    // must NOT fall through to enterSketch below either way.
+    if (cutoutTargetPicker) return
     if (tool==='mirror3d' && mirror3dSelectionDone) { handleMirror3DPlanePick({ kind:'face', facePlane }); return }
     // Mirror step 1 (still picking bodies) — a face click here is a stray
     // hit that slipped past sketchArmed being false; must NOT fall through
@@ -3739,6 +3748,10 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   function handlePlaneClick({ id }) {
+    // Cutout target-picker step — a raw work plane is never a cutout
+    // candidate, so this is a plain no-op, same reasoning as
+    // handleFaceClick's own guard just above.
+    if (cutoutTargetPicker) return
     if (tool==='mirror3d' && mirror3dSelectionDone) { handleMirror3DPlanePick({ kind:'workplane', planeId:id }); return }
     if (tool==='loft3d' && !loftState) { startLoftProfile1({ kind:'workplane', planeId:id }); return }
     if (extrudeTool && extrudeOffsetMode) { handleExtrudeOffsetPlanePick({ kind:'workplane', planeId:id }); return }
@@ -10260,7 +10273,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             dxfPickMode={tool==='exportfacedxf'}
             dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : []}
             extrudeArmed={!!extrudeState || (!!loftState && !sketchMode)}
-            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && tool!=='movecopy3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hidePlanesForExtrude && (tool==='extrude' || tool==='cutout'))}
+            showWorkPlanes={!sketchMode && !cutoutTargetPicker && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && tool!=='movecopy3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hidePlanesForExtrude && (tool==='extrude' || tool==='cutout'))}
             activePlane={activePlane}
             sketchMode={sketchMode}
             gridVisible={gridVisible}

@@ -149,6 +149,36 @@ function deserializePts(obj) {
   return arr
 }
 
+// A sketch entity (line/circle/arc/spline) drawn on a face carries its own
+// `.facePlane` — every draw tool tags it via planeTag() in App3D.jsx, not
+// just the feature-level one handled above. Left as a raw FacePlane class
+// instance, a plain JSON.stringify still "succeeds" (no error) but silently
+// flattens it to a dead plain object — origin/normal/etc. survive as {x,y,z}
+// but the prototype (sketchToWorld) is gone. pt2three() in Viewport3D.jsx
+// checks `facePlane.sketchToWorld` before using it, so this doesn't crash or
+// even show up while the project is still open — it only surfaces after a
+// save/reload, when every face-sketched entity's points silently render at
+// the wrong (default XY-at-origin) position while the entity's own 2D data
+// (and the FEATURE's own facePlane, correctly reconstructed above) stays
+// perfectly fine, which is exactly why the camera and the FEATURE outline
+// snap to the right place but the individual sketch lines/circles drift off
+// as you orbit away from square-on. Same fix shape as serializeFacePlane
+// above, just applied per-entity across a whole array.
+function serializeSketchEntities(arr) {
+  if (!arr) return arr
+  return arr.map(e => e.facePlane ? { ...e, facePlane: serializeFacePlane(e.facePlane) } : e)
+}
+function deserializeSketchEntities(arr) {
+  if (!arr) return arr
+  return arr.map(e => e.facePlane ? { ...e, facePlane: deserializeFacePlane(e.facePlane) } : e)
+}
+
+// Every array of raw sketch entities that might carry a per-entity
+// .facePlane — the standalone-sketch field names (lines/circles/arcs/
+// splines) and the extrude/cutout saved-sketch-buffer names (sketchLines/
+// sketchCircles/sketchArcs/sketchSplines) both need it.
+const SKETCH_ENTITY_FIELDS = ['lines', 'circles', 'arcs', 'splines', 'sketchLines', 'sketchCircles', 'sketchArcs', 'sketchSplines']
+
 // `hidden` is passed in explicitly (from the matching `solids` entry) since
 // it lives on solid state, not the feature itself — see saveProjectFileAs.
 export function serializeFeature(feat, hidden = false) {
@@ -156,6 +186,9 @@ export function serializeFeature(feat, hidden = false) {
   if (feat.facePlane) out.facePlane = serializeFacePlane(feat.facePlane)
   if (feat.profilePts) out.profilePts = serializePts(feat.profilePts)
   if (feat.profiles) out.profiles = feat.profiles.map(p => ({ ...p, pts: serializePts(p.pts) }))
+  for (const key of SKETCH_ENTITY_FIELDS) {
+    if (feat[key]) out[key] = serializeSketchEntities(feat[key])
+  }
   return out
 }
 export function deserializeFeature(obj) {
@@ -163,6 +196,9 @@ export function deserializeFeature(obj) {
   if (obj.facePlane) out.facePlane = deserializeFacePlane(obj.facePlane)
   if (obj.profilePts) out.profilePts = deserializePts(obj.profilePts)
   if (obj.profiles) out.profiles = obj.profiles.map(p => ({ ...p, pts: deserializePts(p.pts) }))
+  for (const key of SKETCH_ENTITY_FIELDS) {
+    if (obj[key]) out[key] = deserializeSketchEntities(obj[key])
+  }
   return out
 }
 

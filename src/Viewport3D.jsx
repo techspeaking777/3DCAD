@@ -429,10 +429,15 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   const dxfPickModeRef   = useRef(false)
   const dxfSelectedFacesRef = useRef([])
   // Extrude/cutout Phase 2/3 (a profile is picked, awaiting the commit
-  // click) — see the work-plane hover/click gates below for why this is
-  // tracked separately from sketchArmedRef (that one also covers the
-  // legitimate "no tool active, click a bare work plane to start a fresh
-  // sketch" case, which must NOT be blocked the way Phase 2/3 needs to be).
+  // click) — tracked separately from sketchArmedRef because the work-plane
+  // hover/click path below isn't gated by sketchArmedRef at all (a bare
+  // work-plane hit has no "sketch tool" concept the way a face hit does —
+  // see faceMeshHit just below). App3D's handlePlaneClick is what actually
+  // decides whether a plane click does anything (it now requires
+  // extrudeTool to be the active tool, since planes have no occlusion check
+  // and are always hit-testable — see that function's own comment); this
+  // ref only needs to stay false long enough for that decision to happen,
+  // true only to block Phase 2/3's own stray clicks.
   const extrudeArmedRef  = useRef(false)
   // Tab-cycled bottom-edge override (see cycleFaceBottomEdge) — null means
   // "follow the cursor" (previewBottomEdge), a number is an index into that
@@ -1203,10 +1208,13 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     }
 
     // ── Work plane hover (disabled once an extrude/cutout profile is armed,
-    // Phase 2/3 — NOT gated by sketchArmedRef, since that would also block
-    // the legitimate "no tool active, click a bare work plane to start a
-    // fresh sketch" flow, which isn't broken and shouldn't be touched).
-    // Work planes have no occlusion check against solids and are huge (see
+    // Phase 2/3 — NOT gated by sketchArmedRef, since a plain work-plane hit
+    // has no "sketch tool" concept the way a face hit does; App3D's
+    // handlePlaneClick is what decides whether the eventual click does
+    // anything, requiring extrudeTool to be the active tool — a plane hover
+    // with no tool active still lights up as hovered here, but clicking it
+    // is now a no-op there). Work planes have no occlusion check against
+    // solids and are huge (see
     // hitTestPlanes/WorkPlanes.js), so without this gate they'd keep
     // registering hover hits — and therefore eating the commit click, see
     // the click handler below — even when the cursor is visually over the

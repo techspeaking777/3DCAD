@@ -789,7 +789,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
       {displayFeatures.length === 0 && (
         <div style={{margin:12, padding:'20px 12px', color:'#5a6b85', textAlign:'center',
           fontSize:11, letterSpacing:'0.04em', border:'1px dashed #2a2a4a', borderRadius:4}}>
-          No features yet.<br/>Click a work plane<br/>to start sketching.
+          No features yet.<br/>Click EXTRUDE, then<br/>a work plane, to start.
         </div>
       )}
 
@@ -3771,6 +3771,19 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (tool==='mirror3d' && !mirror3dSelectionDone) return
     // Join (picking bodies the whole time it's active) — same guard.
     if (tool==='join3d') return
+    // Idle/select-tool clicks: work planes have no occlusion check and are
+    // always visible/clickable (see the comment above), so a plain click
+    // anywhere near one — with no tool active at all — used to fall through
+    // to here too, silently dropping the user into the sketch environment.
+    // A kid clicking around to explore the model, or just orbiting the
+    // camera, would end up with an empty "Sketch N" row left in the Feature
+    // Tree with no idea why. Starting a sketch from a bare plane click is
+    // only ever legitimate for Extrude/Cutout's own step 1 (Pick Plane) —
+    // every other tool that needs a plane/face click intercepts above this
+    // point instead of falling through — so require extrudeTool to be the
+    // active tool, matching sketchArmed's own gate for handleFaceClick's
+    // identical enterSketch call just above.
+    if (!extrudeTool) return
     enterSketch(id)
     viewport3dRef.current?.snapToPlane(id)
   }

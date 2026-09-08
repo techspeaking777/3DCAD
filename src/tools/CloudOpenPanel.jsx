@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { fetchMyClasses, listCloudProjects } from './cloudSave.js'
+import { fetchMyClasses, listCloudProjects, deleteCloudProject } from './cloudSave.js'
 
 // "Open from My Account" modal — same overlay/panel skeleton as
 // SaveAsPanel.jsx. Unlike CloudSavePanel (which receives an already-fetched
@@ -25,14 +25,34 @@ export default function CloudOpenPanel({ onOpen, onClose }) {
 
   const classNameById = new Map(classes.map(c => [c.id, c.name]))
 
+  // Deleting is scoped to whichever project's row triggered it, not the
+  // whole panel, so one delete failing (or a confirm being cancelled)
+  // never disturbs anything else in the list.
+  async function handleDelete(e, id) {
+    e.stopPropagation()
+    if (!window.confirm('Delete this project? This cannot be undone.')) return
+    try {
+      await deleteCloudProject(id)
+      setProjects(prev => (prev ?? []).filter(p => p.id !== id))
+    } catch (err) {
+      alert(err.message || "Couldn't delete that project")
+    }
+  }
+
   const s = {
-    overlay: { position:'fixed',inset:0,background:'rgba(0,0,0,0.6)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000 },
-    panel:   { background:'#1e1e1e',borderRadius:8,padding:24,width:420,maxWidth:'90vw',maxHeight:'80vh',display:'flex',flexDirection:'column',color:'#eee',fontFamily:'monospace',fontSize:13,boxShadow:'0 8px 40px #000a' },
-    select:  { background:'#2a2a2a',border:'1px solid #444',color:'#eee',borderRadius:4,padding:'6px 10px',fontFamily:'monospace',fontSize:12,marginBottom:12},
-    list:    { overflowY:'auto',flex:1,display:'flex',flexDirection:'column',gap:6},
-    row:     { background:'#2a2a2a',border:'1px solid #3a3a3a',borderRadius:6,padding:'10px 12px',cursor:'pointer',textAlign:'left'},
-    note:    { color:'#888',fontSize:11,lineHeight:1.4 },
-    btnGrey: { background:'#333',border:'none',color:'#aaa',borderRadius:6,padding:'8px 18px',cursor:'pointer',fontFamily:'monospace',fontSize:13,marginTop:16,alignSelf:'flex-end'},
+    overlay:   { position:'fixed',inset:0,background:'rgba(0,0,0,0.6)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000 },
+    panel:     { background:'#1e1e1e',borderRadius:8,padding:24,width:420,maxWidth:'90vw',maxHeight:'80vh',display:'flex',flexDirection:'column',color:'#eee',fontFamily:'monospace',fontSize:13,boxShadow:'0 8px 40px #000a' },
+    select:    { background:'#2a2a2a',border:'1px solid #444',color:'#eee',borderRadius:4,padding:'6px 10px',fontFamily:'monospace',fontSize:12,marginBottom:12},
+    list:      { overflowY:'auto',flex:1,display:'flex',flexDirection:'column',gap:6},
+    // A row's delete "✕" can't be a <button> nested inside the row's own
+    // open <button> (invalid HTML, and the click would bubble into both
+    // handlers) -- the row is a div instead, with an "open" button and a
+    // separate "delete" button as siblings.
+    row:       { background:'#2a2a2a',border:'1px solid #3a3a3a',borderRadius:6,padding:'10px 12px',display:'flex',alignItems:'center',gap:8},
+    rowOpen:   { flex:1,minWidth:0,background:'none',border:'none',padding:0,margin:0,textAlign:'left',cursor:'pointer',color:'inherit',font:'inherit'},
+    btnDelete: { flexShrink:0,background:'none',border:'none',color:'#888',fontSize:15,cursor:'pointer',padding:'2px 6px'},
+    note:      { color:'#888',fontSize:11,lineHeight:1.4 },
+    btnGrey:   { background:'#333',border:'none',color:'#aaa',borderRadius:6,padding:'8px 18px',cursor:'pointer',fontFamily:'monospace',fontSize:13,marginTop:16,alignSelf:'flex-end'},
   }
 
   return (
@@ -55,13 +75,16 @@ export default function CloudOpenPanel({ onOpen, onClose }) {
           {!error && projects === null && <p style={s.note}>Loading…</p>}
           {!error && projects?.length === 0 && <p style={s.note}>You haven't saved anything to your account yet.</p>}
           {!error && projects?.map(p => (
-            <button key={p.id} style={s.row} onClick={()=>onOpen(p.id)}>
-              <div style={{fontWeight:'bold',color:'#fff'}}>{p.name}</div>
-              <div style={{fontSize:11,color:'#888',marginTop:2}}>
-                Updated {new Date(p.updated_at).toLocaleString()}
-                {p.class_id && classNameById.has(p.class_id) ? ` · ${classNameById.get(p.class_id)}` : ''}
-              </div>
-            </button>
+            <div key={p.id} style={s.row}>
+              <button style={s.rowOpen} onClick={()=>onOpen(p.id)}>
+                <div style={{fontWeight:'bold',color:'#fff'}}>{p.name}</div>
+                <div style={{fontSize:11,color:'#888',marginTop:2}}>
+                  Updated {new Date(p.updated_at).toLocaleString()}
+                  {p.class_id && classNameById.has(p.class_id) ? ` · ${classNameById.get(p.class_id)}` : ''}
+                </div>
+              </button>
+              <button style={s.btnDelete} onClick={e=>handleDelete(e, p.id)} title="Delete project">✕</button>
+            </div>
           ))}
         </div>
 

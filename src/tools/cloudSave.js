@@ -96,3 +96,8 @@ export async function updateCloudProject(id, name, dataObj) {
 export async function loadCloudProject(id) {
   return (await request(`${BASE}/cad/projects/${encodeURIComponent(id)}`)).json()
 }
+
+/** Permanently deletes a saved project. Owner-only, enforced server-side by RLS. */
+export async function deleteCloudProject(id) {
+  await request(`${BASE}/cad/projects/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}

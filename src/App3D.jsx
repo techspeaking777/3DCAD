@@ -183,6 +183,17 @@ function buildCutWorkerParams(cutFeat) {
   }
 }
 
+// Face-plane fields shared by buildBaseWorkerParams and rebuildBaseMesh's
+// own hole-punching loop below — hoisted to module scope so both can use
+// the identical conversion rather than duplicating it.
+function facePlaneParams(fp) {
+  return fp ? {
+    normal: [fp.normal.x, fp.normal.y, fp.normal.z],
+    origin: [pxToMm(fp.origin.x), pxToMm(fp.origin.y), pxToMm(fp.origin.z)],
+    uAxis:  [fp.uAxis.x, fp.uAxis.y, fp.uAxis.z],
+  } : {}
+}
+
 // Builds cadWorker params to rebuild a solid's OWN base shape from scratch
 // (no cuts/fillets applied) — linear extrude or revolve, mirroring
 // buildCutWorkerParams. Shared by every "rebuild clean, then replay features
@@ -213,11 +224,6 @@ function buildBaseWorkerParams(solid) {
       normal: solid.normal, origin: solid.origin, uAxis: solid.uAxis, ruled: !!solid.ruled,
     }
   }
-  const facePlaneParams = fp => fp ? {
-    normal: [fp.normal.x, fp.normal.y, fp.normal.z],
-    origin: [pxToMm(fp.origin.x), pxToMm(fp.origin.y), pxToMm(fp.origin.z)],
-    uAxis:  [fp.uAxis.x, fp.uAxis.y, fp.uAxis.z],
-  } : {}
   if (solid.operation === 'revolve') {
     return {
       pts: solid.profilePts, planeId: solid.planeId,
@@ -313,7 +319,7 @@ function buildSolidOpsForWorker(solid, features) {
 // for subsequent subtract/fillet3d calls on this solidId).
 async function rebuildBaseMesh(solid) {
   const baseWorkerParams = buildBaseWorkerParams(solid)
-  const meshData = solid.operation === 'revolve'
+  let meshData = solid.operation === 'revolve'
     ? await cadEngine.revolve({ solidId: solid.id, ...baseWorkerParams })
     // Loft's base params are shaped like {profiles,normal,origin,uAxis,ruled}
     // (see buildBaseWorkerParams' loft branch) — routing those through
@@ -329,6 +335,27 @@ async function rebuildBaseMesh(solid) {
     : solid.operation === 'import'
     ? await cadEngine.importStep({ solidId: solid.id, ...baseWorkerParams })
     : await cadEngine.extrude({ solidId: solid.id, ...baseWorkerParams })
+  // Punch any nested-loop holes belonging to this profile (see
+  // resolveNestedHoles/detectProfiles in extrudeMath.js and commitExtrude's
+  // own matching hole-consumption loop at creation time) — the single
+  // extrude call above only ever builds the OUTER profile; holes are
+  // separate boolean subtracts, so a cold rebuild (project load, or editing
+  // an unrelated cutout/fillet on this same solid) has to replay them here
+  // too, or they'd silently come back solid every time. Revolve/loft/import
+  // never punch holes even at creation time (see commitExtrude), so this
+  // only applies to a plain extrude.
+  const holes = solid.operation !== 'revolve' && solid.operation !== 'loft' && solid.operation !== 'import'
+    ? solid.profilePts?.holes : null
+  if (holes && holes.length) {
+    for (const holePts of holes) {
+      const holeCut = {
+        pts: holePts, depthMm: (solid.depthMm || 20) * 4 + 10, planeId: solid.planeId, direction: 'both',
+        circle: holePts.circleMeta || null,
+        ...facePlaneParams(solid.facePlane),
+      }
+      meshData = await cadEngine.subtract({ baseSolidId: solid.id, cut: holeCut, base: baseWorkerParams })
+    }
+  }
   return { meshData, baseWorkerParams }
 }
 

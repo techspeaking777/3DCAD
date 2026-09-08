@@ -121,18 +121,31 @@ function deserializeFacePlane(obj) {
   return new FacePlane(arrToVec3(obj.origin), arrToVec3(obj.normal), arrToVec3(obj.uAxis), arrToVec3(obj.vAxis))
 }
 
-// Packs a profile-points array (possibly carrying .circleMeta/.curveSegments)
-// into a plain, fully JSON-safe object. `pts` itself is undefined for
-// features that never had a profile (e.g. mirror/join) — pass through null.
+// Packs a profile-points array (possibly carrying .circleMeta/.curveSegments/
+// .holes) into a plain, fully JSON-safe object. `pts` itself is undefined
+// for features that never had a profile (e.g. mirror/join) — pass through
+// null. `.holes` (nested closed loops resolved as holes of this profile —
+// see resolveNestedHoles in extrudeMath.js) is itself an array of pts-arrays
+// that can carry their OWN circleMeta/curveSegments (e.g. a round hole), so
+// it's packed recursively through this same function rather than as a bare
+// array — a plain `pts.holes` was silently dropped entirely by
+// JSON.stringify same as circleMeta/curveSegments, since it's a non-index
+// array property, which meant every nested hole vanished on save/reload.
 function serializePts(pts) {
   if (!pts) return null
-  return { arr: pts.map(p => ({ ...p })), circleMeta: pts.circleMeta || null, curveSegments: pts.curveSegments || null }
+  return {
+    arr: pts.map(p => ({ ...p })),
+    circleMeta: pts.circleMeta || null,
+    curveSegments: pts.curveSegments || null,
+    holes: pts.holes ? pts.holes.map(serializePts) : null,
+  }
 }
 function deserializePts(obj) {
   if (!obj) return null
   const arr = obj.arr.map(p => ({ ...p }))
   if (obj.circleMeta) arr.circleMeta = obj.circleMeta
   if (obj.curveSegments) arr.curveSegments = obj.curveSegments
+  if (obj.holes) arr.holes = obj.holes.map(deserializePts)
   return arr
 }
 

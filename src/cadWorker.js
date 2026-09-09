@@ -122,8 +122,16 @@ function projectEdge(edge, project, lines, circles, arcs, splines, viewNormal) {
       circNormal = new Vector([ax.X(), ax.Y(), ax.Z()])
       cosAngle = Math.abs(circNormal.dot(viewNormal))
     }
+    // edge.isClosed (OCC's topological "is this edge a full loop" flag) can
+    // misreport true for a genuine partial arc with a large sweep — e.g. a
+    // fillet on a narrow/obtuse corner, where the trimmed circle's start and
+    // end parameters sit close to a full period even though they're distinct
+    // points. Trust the actual 3D start/end points instead: real coincidence
+    // means a true full circle, anything else is a partial arc no matter
+    // what isClosed claims.
+    const reallyClosed = edge.startPoint.sub(edge.endPoint).Length < 1e-6
     if (cosAngle > 0.999) {
-      if (edge.isClosed) {
+      if (reallyClosed) {
         circles.push({ cx: center.x, cy: center.y, r })
       } else {
         const sp = project(edge.startPoint), ep = project(edge.endPoint)
@@ -135,7 +143,7 @@ function projectEdge(edge, project, lines, circles, arcs, splines, viewNormal) {
       }
       return
     }
-    if (edge.isClosed) {
+    if (reallyClosed) {
       // Not view-parallel: the true projection of a full circle is a line
       // (edge-on) or an ellipse (oblique) — this app has no ellipse
       // primitive, so sample the real 3D circle and emit a closed polyline
@@ -535,6 +543,20 @@ self.onmessage = async function(e) {
         ))
       } catch(e) {
         throw new Error(`Fillet failed: ${e.message}`)
+      }
+      // BRepFilletAPI_MakeFillet can report success while the blend actually
+      // self-intersects (radius too large for the local edge run — e.g. two
+      // concave corners close enough together that their fillets overlap).
+      // Left unchecked, this bakes an invalid solid into shapeStore that
+      // looks fine at a glance but produces garbage later (e.g. a closed
+      // circular edge instead of an arc on DXF face export). Catch it here,
+      // at the point the user picked the radius, instead of downstream.
+      {
+        const oc = getOC()
+        const analyzer = new oc.BRepCheck_Analyzer(shape.wrapped, true, false)
+        const valid = analyzer.IsValid_2()
+        analyzer.delete()
+        if (!valid) throw new Error('Fillet failed: radius too large for the selected edge(s) — try a smaller radius')
       }
       shapeStore.set(params.solidId, shape)
     } else if (type==='subtract') {

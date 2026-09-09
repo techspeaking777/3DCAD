@@ -135,11 +135,23 @@ function projectEdge(edge, project, lines, circles, arcs, splines, viewNormal) {
         circles.push({ cx: center.x, cy: center.y, r })
       } else {
         const sp = project(edge.startPoint), ep = project(edge.endPoint)
-        arcs.push({
-          cx: center.x, cy: center.y, r,
-          startAngle: Math.atan2(sp.y - center.y, sp.x - center.x),
-          endAngle:   Math.atan2(ep.y - center.y, ep.x - center.x),
-        })
+        let startAngle = Math.atan2(sp.y - center.y, sp.x - center.x)
+        let endAngle   = Math.atan2(ep.y - center.y, ep.x - center.x)
+        // A DXF ARC entity always sweeps CCW from startAngle to endAngle —
+        // atan2 on the endpoints alone doesn't say whether that CCW sweep is
+        // the short way (through the real material) or the long way around
+        // (an obtuse-corner fillet's short sweep can easily be the CW one).
+        // Verify against the edge's true midpoint and swap start/end if the
+        // naive CCW sweep would miss it, so the arc always traces where the
+        // actual curve is instead of doubling back over other geometry.
+        const mid = project(edge.pointAt(0.5))
+        const midAngle = Math.atan2(mid.y - center.y, mid.x - center.x)
+        const TWO_PI = Math.PI * 2
+        const norm = a => ((a % TWO_PI) + TWO_PI) % TWO_PI
+        if (norm(midAngle - startAngle) > norm(endAngle - startAngle)) {
+          ;[startAngle, endAngle] = [endAngle, startAngle]
+        }
+        arcs.push({ cx: center.x, cy: center.y, r, startAngle, endAngle })
       }
       return
     }
@@ -672,6 +684,23 @@ self.onmessage = async function(e) {
       const solidCount = [...shape._iterTopo('solid')].length
       if (solidCount > 1) {
         throw new Error('The selected bodies don’t touch or overlap — move them so they intersect or share a face before joining.')
+      }
+      // Each fuseTolerant() step already runs SimplifyResult on its OWN
+      // pairwise result, but chaining many members (reduce() above) means a
+      // seam between, say, member 1 and member 10 only becomes exactly
+      // coincident once every fuse in between has run — no single step's
+      // cleanup ever gets a chance to catch it. Left alone this bakes in
+      // redundant coincident edges/faces along those seams, which later
+      // surfaces as literal duplicate overlapping lines when the joined
+      // solid's edges get walked one-by-one (DXF export, ortho drawings,
+      // "include edge"). One more unify pass over the FINAL shape catches
+      // what the per-step passes couldn't.
+      {
+        const oc = getOC()
+        const unifier = new oc.ShapeUpgrade_UnifySameDomain_2(shape.wrapped, true, true, false)
+        unifier.Build()
+        shape = cast(unifier.Shape())
+        unifier.delete()
       }
       if (params.solidId) shapeStore.set(params.solidId, shape)
     } else if (type==='transformShape') {

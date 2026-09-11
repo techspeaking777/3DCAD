@@ -573,14 +573,19 @@ export function parseDXF(dxfText, scale=2) {
     }
   }
 
-  // LWPOLYLINE and SPLINE need special treatment — re-parse with multi-vertex support
+  // LWPOLYLINE and SPLINE need special treatment — re-parse with multi-vertex
+  // support. parseDXFMultiVertex's own LINE/CIRCLE/ARC branches exist only
+  // because it shares one raw-pairs walk with the vertex-entity handling —
+  // its results for those three are otherwise identical to lines_out/
+  // circles_out/arcs_out above, so only its splines are actually new data;
+  // merging its lines/circles/arcs too would double every plain entity.
   const betterResult = parseDXFMultiVertex(dxfText, scale)
 
   return {
-    lines: [...lines_out, ...betterResult.lines],
-    circles: [...circles_out, ...betterResult.circles],
-    arcs: [...arcs_out, ...betterResult.arcs],
-    splines: [...betterResult.splines],
+    lines: lines_out,
+    circles: circles_out,
+    arcs: arcs_out,
+    splines: betterResult.splines,
   }
 }
 

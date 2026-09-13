@@ -97,7 +97,7 @@ class CadEngine {
     return this._send('cutout', params)
   }
 
-  /** Round one or more edges of an existing solid — params: {solidId, edgePoints:[[x,y,z],...] (mm), radius, base?}. */
+  /** Round (or bevel) one or more edges of an existing solid — params: {solidId, edgePoints:[[x,y,z],...] (mm), radius, operation:'fillet'|'chamfer' (defaults to 'fillet'), base?}. */
   async fillet3d(params) {
     return this._send('fillet3d', params)
   }

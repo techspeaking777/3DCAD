@@ -308,7 +308,7 @@ function buildSolidOpsForWorker(solid, features) {
   return features
     .filter(f => f.solidId === solid.id && (f.operation === 'cutout' || f.type === 'fillet'))
     .map(f => f.type === 'fillet'
-      ? { type: 'fillet', radius: f.radius, edgePoints: f.edgePoints }
+      ? { type: 'fillet', operation: f.operation ?? 'fillet', radius: f.radius, edgePoints: f.edgePoints }
       : { type: 'cut', params: buildCutWorkerParams(f) })
 }
 
@@ -432,6 +432,12 @@ const EXTRUDE_STEPS = [
   { id: 2, label: 'Draw Profile' },
   { id: 3, label: 'Set Depth' },
 ]
+
+// Chamfer's distinct accent — used everywhere the fillet3d tool's UI shows
+// color while in Chamfer mode (ribbon bar, edge-pick markers, radius/
+// distance popup), so it's visually obvious which mode is active while
+// picking edges. Fillet mode keeps its existing purple (#9c6ade) inline.
+const FILLET3D_CHAMFER_COLOR = '#c9793f'
 
 // Live numeric input, anchored (via the parent action button's own
 // position:relative wrapper in SmartStepBar — see the `popover` field on an
@@ -1011,7 +1017,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                   {isFillet && (
                     <>
                       {!sketchMode && (
-                        <button title="Edit fillet radius"
+                        <button title={feat.operation==='chamfer' ? 'Edit chamfer distance' : 'Edit fillet radius'}
                           onClick={e=>{e.stopPropagation(); onEditFilletRadius(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
                             padding:'1px 3px', display:'flex', alignItems:'center'}}
@@ -1125,7 +1131,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                     <div style={{width:8,height:8,borderRadius:'50%',
                       background:feat.color||'#9c6ade', flexShrink:0}}/>
                     <span style={{color:'#8fa0b8', fontSize:10}}>
-                      R{feat.radius}mm · fillet{feat.edgePoints?.length > 1 ? ` · ${feat.edgePoints.length} edges` : ''}
+                      R{feat.radius}mm · {feat.operation==='chamfer' ? 'chamfer' : 'fillet'}{feat.edgePoints?.length > 1 ? ` · ${feat.edgePoints.length} edges` : ''}
                     </span>
                   </div>
                 </div>
@@ -1262,7 +1268,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }, [features])
   const [activeSketchId,setActiveSketchId]=useState(null)  // which sketch is being edited
-  const featureCountRef=useRef({sketch:0,extrude:0,cutout:0,fillet:0,mirror:0,join:0,loft:0})       // for auto-naming
+  const featureCountRef=useRef({sketch:0,extrude:0,cutout:0,fillet:0,chamfer:0,mirror:0,join:0,loft:0})       // for auto-naming
   const [treeCollapsed,setTreeCollapsed]=useState(false)
 
   const viewport3dRef=useRef(null)
@@ -3689,6 +3695,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     featureCountRef.current.fillet += 1
     return `Fillet ${featureCountRef.current.fillet}`
   }
+  function nextChamferName() {
+    featureCountRef.current.chamfer += 1
+    return `Chamfer ${featureCountRef.current.chamfer}`
+  }
   function nextMirrorName() {
     featureCountRef.current.mirror += 1
     return `Mirror ${featureCountRef.current.mirror}`
@@ -4183,6 +4193,14 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [fillet3dAccepted, setFillet3dAccepted] = useState(false)
   const [fillet3dRadiusInput, setFillet3dRadiusInput] = useState('2')
   const [fillet3dHandlePos, setFillet3dHandlePos] = useState(null)
+  // Chamfer lives inside this same tool as a mode flag rather than a
+  // separate tool — it shares every piece of edge-pick/step-machine
+  // plumbing above and differs only in which OCC call gets made (see
+  // cadWorker.js's applyFilletOrChamfer) plus some display text/color.
+  // Not reset by resetFillet3D() (mid-session Esc-to-back-up) — only a
+  // fresh tool activation reverts to Fillet, so a chosen mode survives
+  // backing up one edge pick.
+  const [fillet3dMode, setFillet3dMode] = useState('fillet')   // 'fillet' | 'chamfer'
 
   function activateFillet3DTool() {
     resetSelection()
@@ -4207,6 +4225,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     setFillet3dHover(null)
     setFillet3dRadiusInput('2')
     setFillet3dHandlePos(null)
+    setFillet3dMode('fillet')
   }
 
   // ── Measure (3D) state machine ────────────────────────────────────────────
@@ -5992,13 +6011,12 @@ const App3D = forwardRef(function App3D(props, ref) {
   // real OCC recompute per keystroke the way the extrude/revolve ghosts avoid.
   // Radius-preview circles only show once accepted (drawn at every selected
   // point, so the size preview applies to the whole set).
-  function drawFillet3DMarkers(vp, selPoints, hoverPoint, radiusMm, accepted) {
+  function drawFillet3DMarkers(vp, selPoints, hoverPoint, radiusMm, accepted, color = '#9c6ade') {
     const oc = vp.getExtrudePreviewCanvas(); if (!oc) return
     const ctx = oc.getContext('2d')
     ctx.setTransform(1,0,0,1,0,0)
     ctx.clearRect(0,0,oc.width,oc.height)
     const SCALE = 2
-    const color = '#9c6ade'
     const toScreen = p => vp.worldToScreen(p[0]*SCALE, p[1]*SCALE, p[2]*SCALE)
 
     for (const point of selPoints) {
@@ -6072,9 +6090,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     const hoverPoint = (!fillet3dAccepted && fillet3dHover &&
       !fillet3dSel.some(e => e.solidId===fillet3dHover.solidId && e.edgeId===fillet3dHover.edgeId))
       ? fillet3dHover.point : null
-    drawFillet3DMarkers(vp, selPoints, hoverPoint, parseFloat(fillet3dRadiusInput)||0, fillet3dAccepted)
+    drawFillet3DMarkers(vp, selPoints, hoverPoint, parseFloat(fillet3dRadiusInput)||0, fillet3dAccepted, fillet3dMode==='chamfer' ? FILLET3D_CHAMFER_COLOR : '#9c6ade')
     return () => clearFillet3DMarker()
-  }, [tool, fillet3dSel, fillet3dHover, fillet3dRadiusInput, fillet3dAccepted])
+  }, [tool, fillet3dSel, fillet3dHover, fillet3dRadiusInput, fillet3dAccepted, fillet3dMode])
 
   // Keeps the 3D edge highlight (persistent orange) in sync with the selection set.
   useEffect(() => {
@@ -6119,6 +6137,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     setFillet3dSel(feat.edgePoints.map((point,i) => ({ solidId: feat.solidId, edgeId: feat.edgeIds?.[i] ?? null, point })))
     setFillet3dAccepted(true)
     setFillet3dRadiusInput(String(feat.radius))
+    setFillet3dMode(feat.operation ?? 'fillet')
     const vp = viewport3dRef.current
     const SCALE = 2
     const firstPt = feat.edgePoints[0]
@@ -6135,12 +6154,13 @@ const App3D = forwardRef(function App3D(props, ref) {
     const targetSolid = solids.find(s => s.id === solidId)
     if (!targetSolid) { resetFillet3D(); return }
     const editingId = editingFeatureId
+    const mode = fillet3dMode   // captured before resetFillet3D — see its own comment on why mode isn't reset there
     feat3d.commit(features)
     resetFillet3D()
     try {
       const meshData = editingId
         ? await rebuildSolidChain(targetSolid, { overrideId: editingId, overrideFilletRadius: radius })
-        : await cadEngine.fillet3d({ solidId, edgePoints: points, radius, base: buildBaseWorkerParams(targetSolid) })
+        : await cadEngine.fillet3d({ solidId, edgePoints: points, radius, operation: mode, base: buildBaseWorkerParams(targetSolid) })
       const group = replicadMeshToThree(meshData, targetSolid.color, solidId)
       const updatedSolid = { ...targetSolid, group }
       setSolids(prev => prev.map(s => s.id === solidId ? updatedSolid : s))
@@ -6148,14 +6168,16 @@ const App3D = forwardRef(function App3D(props, ref) {
         setFeatures(prev => prev.map(f => f.id === editingId ? { ...f, radius } : f))
       } else {
         setFeatures(prev => [...prev, {
-          id: `fillet-${solidId}-${Date.now()}`, type: 'fillet', name: nextFilletName(),
+          id: `fillet-${solidId}-${Date.now()}`, type: 'fillet', operation: mode,
+          name: mode === 'chamfer' ? nextChamferName() : nextFilletName(),
           solidId, edgePoints: points, edgeIds, radius, color: targetSolid.color,
         }])
       }
       await rebuildDependentMirrors(updatedSolid)
     } catch (err) {
-      console.error('Fillet failed:', err)
-      setCadError(`Fillet failed: ${err.message || String(err)} — try a smaller radius or different edges.`)
+      const opLabel = mode === 'chamfer' ? 'Chamfer' : 'Fillet'
+      console.error(`${opLabel} failed:`, err)
+      setCadError(`${opLabel} failed: ${err.message || String(err)} — try a smaller radius or different edges.`)
       setTimeout(() => setCadError(null), 6000)
     }
   }
@@ -6913,7 +6935,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (opFeat.id === skipId || skipSet?.has(opFeat.id)) continue
       if (opFeat.type === 'fillet') {
         const radius = opFeat.id === overrideId ? overrideFilletRadius : opFeat.radius
-        meshData = await cadEngine.fillet3d({ solidId: baseSolid.id, edgePoints: opFeat.edgePoints, radius, base: baseWorkerParams })
+        meshData = await cadEngine.fillet3d({ solidId: baseSolid.id, edgePoints: opFeat.edgePoints, radius, operation: opFeat.operation ?? 'fillet', base: baseWorkerParams })
       } else {
         const cutParams = opFeat.id === overrideId ? overrideCut : buildCutWorkerParams(opFeat)
         meshData = await cadEngine.subtract({ baseSolidId: baseSolid.id, cut: cutParams, base: baseWorkerParams })
@@ -7458,7 +7480,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             for (const opFeat of depOps) {
               try {
                 meshData = opFeat.type === 'fillet'
-                  ? await cadEngine.fillet3d({ solidId, edgePoints: opFeat.edgePoints, radius: opFeat.radius, base: memberWorkerParams })
+                  ? await cadEngine.fillet3d({ solidId, edgePoints: opFeat.edgePoints, radius: opFeat.radius, operation: opFeat.operation ?? 'fillet', base: memberWorkerParams })
                   : await cadEngine.subtract({ baseSolidId: solidId, cut: buildCutWorkerParams(opFeat), base: memberWorkerParams })
               } catch (e) {
                 console.error(`[extrude edit] replaying dependent op ${opFeat.id} failed:`, e)
@@ -7922,7 +7944,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         const ops = features
           .filter(f => f.solidId === solid.id && (f.operation === 'cutout' || f.type === 'fillet'))
           .map(f => f.type === 'fillet'
-            ? { type: 'fillet', radius: f.radius, edgePoints: f.edgePoints }
+            ? { type: 'fillet', operation: f.operation ?? 'fillet', radius: f.radius, edgePoints: f.edgePoints }
             : { type: 'cut', params: buildCutWorkerParams(f) })
         return { solidId: solid.id, base, ops }
       })
@@ -8007,7 +8029,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         const ops = features
           .filter(f => f.solidId === solid.id && (f.operation === 'cutout' || f.type === 'fillet'))
           .map(f => f.type === 'fillet'
-            ? { type: 'fillet', radius: f.radius, edgePoints: f.edgePoints }
+            ? { type: 'fillet', operation: f.operation ?? 'fillet', radius: f.radius, edgePoints: f.edgePoints }
             : { type: 'cut', params: buildCutWorkerParams(f) })
         return { solidId: solid.id, base, ops }
       })
@@ -10564,24 +10586,31 @@ const App3D = forwardRef(function App3D(props, ref) {
 
           {/* ── SmartStep bar: overlays bottom of viewport during Fillet3D ── */}
           <SmartStepBar
-            op={tool==='fillet3d' ? 'FILLET' : null}
-            steps={[{ id:1, label:'Select Edges' }, { id:2, label:'Set Radius' }]}
+            op={tool==='fillet3d' ? (fillet3dMode==='chamfer' ? 'CHAMFER' : 'FILLET') : null}
+            steps={[{ id:1, label:'Select Edges' }, { id:2, label: fillet3dMode==='chamfer' ? 'Set Distance' : 'Set Radius' }]}
             currentStep={fillet3dAccepted ? 2 : 1}
-            color="#9c6ade"
+            color={fillet3dMode==='chamfer' ? FILLET3D_CHAMFER_COLOR : '#9c6ade'}
             hint={
               fillet3dAccepted
-                ? `Radius for ${fillet3dSel.length} edge${fillet3dSel.length!==1?'s':''} — Enter to apply`
+                ? `${fillet3dMode==='chamfer' ? 'Distance' : 'Radius'} for ${fillet3dSel.length} edge${fillet3dSel.length!==1?'s':''} — Enter to apply`
                 : fillet3dSel.length>0
                   ? `${fillet3dSel.length} edge${fillet3dSel.length!==1?'s':''} selected — Enter to lock`
                   : 'Click an edge to select it'
             }
-            action={
-              !fillet3dAccepted && fillet3dSel.length>0
-                ? {label:'✓ Lock Edges', enabled:true, onClick:()=>setFillet3dAccepted(true)}
+            action={[
+              // Mode toggle — only meaningful before edges are locked (you
+              // can't convert an already-committed fillet into a chamfer in
+              // place); `enabled:false` here also covers the edit-existing-
+              // feature case for free, since handleEditFilletRadius sets
+              // fillet3dAccepted=true the instant its popup opens.
+              {label:'Fillet',  enabled: !fillet3dAccepted, active: fillet3dMode==='fillet',  onClick:()=>setFillet3dMode('fillet')},
+              {label:'Chamfer', enabled: !fillet3dAccepted, active: fillet3dMode==='chamfer', onClick:()=>setFillet3dMode('chamfer')},
+              ...(!fillet3dAccepted && fillet3dSel.length>0
+                ? [{label:'✓ Lock Edges', enabled:true, onClick:()=>setFillet3dAccepted(true)}]
                 : fillet3dAccepted
-                  ? {label:'✓ Apply', enabled:true, onClick:commitFillet3D}
-                  : null
-            }
+                  ? [{label:'✓ Apply', enabled:true, onClick:commitFillet3D}]
+                  : []),
+            ]}
             onStepBack={step => { if (step===1) resetFillet3D() }}
           />
 
@@ -11487,7 +11516,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           top:  fillet3dHandlePos.y,
           zIndex: 1000,
           background: 'rgba(15,20,40,0.95)',
-          border: '1.5px solid #9c6ade',
+          border: `1.5px solid ${fillet3dMode==='chamfer' ? FILLET3D_CHAMFER_COLOR : '#9c6ade'}`,
           borderRadius: 8,
           padding: '6px 12px',
           boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
@@ -11500,7 +11529,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           <button
             onClick={()=>setFillet3dAccepted(true)}
             style={{
-              padding:'3px 10px', background:'#9c6ade', color:'#fff',
+              padding:'3px 10px', background: fillet3dMode==='chamfer' ? FILLET3D_CHAMFER_COLOR : '#9c6ade', color:'#fff',
               border:'none', borderRadius:4, cursor:'pointer',
               fontFamily:'monospace', fontSize:11, fontWeight:'bold',
             }}
@@ -11517,7 +11546,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           top:  fillet3dHandlePos.y,
           zIndex: 1000,
           background: 'rgba(15,20,40,0.95)',
-          border: '1.5px solid #9c6ade',
+          border: `1.5px solid ${fillet3dMode==='chamfer' ? FILLET3D_CHAMFER_COLOR : '#9c6ade'}`,
           borderRadius: 8,
           padding: '10px 14px',
           minWidth: 180,
@@ -11550,14 +11579,14 @@ const App3D = forwardRef(function App3D(props, ref) {
             <button
               onClick={()=>commitFillet3D()}
               style={{
-                padding:'4px 10px', background:'#9c6ade', color:'#fff',
+                padding:'4px 10px', background: fillet3dMode==='chamfer' ? FILLET3D_CHAMFER_COLOR : '#9c6ade', color:'#fff',
                 border:'none', borderRadius:4, cursor:'pointer',
                 fontFamily:'monospace', fontSize:12, fontWeight:'bold',
               }}
             >↵</button>
           </div>
           <div style={{color:'#445566', fontSize:10, marginTop:6, textAlign:'center'}}>
-            Fillet radius{fillet3dSel.length>1 ? ` · ${fillet3dSel.length} edges` : ''} · ↵ to accept · Esc to cancel
+            {fillet3dMode==='chamfer' ? 'Chamfer distance' : 'Fillet radius'}{fillet3dSel.length>1 ? ` · ${fillet3dSel.length} edges` : ''} · ↵ to accept · Esc to cancel
           </div>
         </div>
       )}

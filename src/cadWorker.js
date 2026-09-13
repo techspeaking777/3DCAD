@@ -7,6 +7,16 @@ const SCALE = 2
 // generous enough for mesh-tessellation slop, tight enough to avoid grabbing
 // a neighboring edge. Shared by the fillet3d handler and STL export's fallback replay.
 const EDGE_PICK_TOL = 0.75
+// Shared by every "replay a fillet/chamfer op onto a cold-rebuilt base"
+// site (STL/STEP export's fallback rebuild, mirrorShape, joinShapes,
+// transformShape) — same edge-matching filter either operation call
+// accepts, just picking which OCC call to make based on the op's own
+// `operation` field (defaults to 'fillet' for ops saved before chamfer
+// support existed).
+function applyFilletOrChamfer(shape, op) {
+  const edgeFilter = e => e.either(op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt)))
+  return op.operation === 'chamfer' ? shape.chamfer(op.radius, edgeFilter) : shape.fillet(op.radius, edgeFilter)
+}
 // Fuzzy tolerance (mm) for boolean fuse — a face-sketched boss meant to sit
 // flush on another solid's face can end up a hair's-width off due to
 // floating-point round-tripping through the sketch's mm<->px conversions.
@@ -55,9 +65,7 @@ async function gatherAndFuseExportSolids(solidsParams) {
       shape = await buildBase(base)
       for (const op of ops) {
         if (op.type === 'fillet') {
-          shape = shape.fillet(op.radius, e => e.either(
-            op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
-          ))
+          shape = applyFilletOrChamfer(shape, op)
         } else {
           shape = cutTolerant(shape, buildCutShape(clampCutDepth(op.params, base)))
         }
@@ -549,26 +557,33 @@ self.onmessage = async function(e) {
         console.warn('[cadWorker] shapeStore miss — rebuilding base from params')
         base = await buildBase(params.base)
       }
+      // operation defaults to 'fillet' for older callers/saved ops that
+      // predate chamfer support — see App3D.jsx's `f.operation ?? 'fillet'`
+      // convention used at every op-builder call site.
+      const isChamferOp = params.operation === 'chamfer'
+      const opLabel = isChamferOp ? 'Chamfer' : 'Fillet'
       try {
-        shape = base.fillet(params.radius, e => e.either(
+        const edgeFilter = e => e.either(
           params.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
-        ))
+        )
+        shape = isChamferOp ? base.chamfer(params.radius, edgeFilter) : base.fillet(params.radius, edgeFilter)
       } catch(e) {
-        throw new Error(`Fillet failed: ${e.message}`)
+        throw new Error(`${opLabel} failed: ${e.message}`)
       }
-      // BRepFilletAPI_MakeFillet can report success while the blend actually
-      // self-intersects (radius too large for the local edge run — e.g. two
-      // concave corners close enough together that their fillets overlap).
-      // Left unchecked, this bakes an invalid solid into shapeStore that
-      // looks fine at a glance but produces garbage later (e.g. a closed
-      // circular edge instead of an arc on DXF face export). Catch it here,
-      // at the point the user picked the radius, instead of downstream.
+      // BRepFilletAPI_MakeFillet/MakeChamfer can report success while the
+      // blend actually self-intersects (radius too large for the local edge
+      // run — e.g. two concave corners close enough together that their
+      // fillets overlap). Left unchecked, this bakes an invalid solid into
+      // shapeStore that looks fine at a glance but produces garbage later
+      // (e.g. a closed circular edge instead of an arc on DXF face export).
+      // Catch it here, at the point the user picked the radius, instead of
+      // downstream.
       {
         const oc = getOC()
         const analyzer = new oc.BRepCheck_Analyzer(shape.wrapped, true, false)
         const valid = analyzer.IsValid_2()
         analyzer.delete()
-        if (!valid) throw new Error('Fillet failed: radius too large for the selected edge(s) — try a smaller radius')
+        if (!valid) throw new Error(`${opLabel} failed: radius too large for the selected edge(s) — try a smaller radius`)
       }
       shapeStore.set(params.solidId, shape)
     } else if (type==='subtract') {
@@ -627,9 +642,7 @@ self.onmessage = async function(e) {
       }
       for (const op of params.ops || []) {
         if (op.type === 'fillet') {
-          base = base.fillet(op.radius, e => e.either(
-            op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
-          ))
+          base = applyFilletOrChamfer(base, op)
         } else {
           base = cutTolerant(base, buildCutShape(clampCutDepth(op.params, params.base)))
         }
@@ -659,9 +672,7 @@ self.onmessage = async function(e) {
           s = await buildBase(m.base)
           for (const op of m.ops || []) {
             if (op.type === 'fillet') {
-              s = s.fillet(op.radius, e => e.either(
-                op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
-              ))
+              s = applyFilletOrChamfer(s, op)
             } else {
               s = cutTolerant(s, buildCutShape(clampCutDepth(op.params, m.base)))
             }
@@ -721,9 +732,7 @@ self.onmessage = async function(e) {
         base = await buildBase(params.base)
         for (const op of params.ops || []) {
           if (op.type === 'fillet') {
-            base = base.fillet(op.radius, e => e.either(
-              op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
-            ))
+            base = applyFilletOrChamfer(base, op)
           } else {
             base = cutTolerant(base, buildCutShape(clampCutDepth(op.params, params.base)))
           }

@@ -1071,32 +1071,81 @@ function buildLoft({ profiles, normal, origin, uAxis, ruled=false }) {
 }
 
 function buildExtrude({ pts, depthMm, planeId, direction='both',
-                        normal, origin, uAxis, vAxis, isCut=false, circle=null }) {
+                        normal, origin, uAxis, vAxis, isCut=false, circle=null,
+                        draftAngleDeg=0, draftDirection='out' }) {
   if (!circle && (!pts||pts.length<3)) throw new Error('Need ≥3 pts')
   const half = depthMm / 2
   // 1mm protrusion on the entry face prevents OCC coincident-face Boolean failures
   const OVH = isCut ? 1 : 0
 
+  let shape
   if (direction === 'front') {
     if (planeId === 'face' && isCut) {
       // Replicad face plane normal points OUTWARD; 'front' cut means INWARD.
       // Put profile depthMm inside the solid and extrude outward through the face + OVH.
-      return makeProfile(pts, planeId, -depthMm, normal, origin, uAxis, circle).extrude(depthMm + OVH)
+      shape = makeProfile(pts, planeId, -depthMm, normal, origin, uAxis, circle).extrude(depthMm + OVH)
+    } else {
+      // Work plane, or a regular (non-cut) extrude off a face: profile sits right at the
+      // face/plane and grows outward by depthMm. Applying the cutout's "profile inside,
+      // extrude back out to the face" math here for a plain extrude would build the new
+      // solid entirely inside the existing one — geometrically valid but invisible.
+      shape = makeProfile(pts, planeId, -OVH, normal, origin, uAxis, circle).extrude(depthMm + OVH)
     }
-    // Work plane, or a regular (non-cut) extrude off a face: profile sits right at the
-    // face/plane and grows outward by depthMm. Applying the cutout's "profile inside,
-    // extrude back out to the face" math here for a plain extrude would build the new
-    // solid entirely inside the existing one — geometrically valid but invisible.
-    return makeProfile(pts, planeId, -OVH, normal, origin, uAxis, circle).extrude(depthMm + OVH)
-  }
-
-  if (direction === 'back') {
+  } else if (direction === 'back') {
     // Profile stays at depth; extend extrude by OVH so exit face clears the solid boundary.
-    return makeProfile(pts, planeId, -depthMm, normal, origin, uAxis, circle).extrude(depthMm + OVH)
+    shape = makeProfile(pts, planeId, -depthMm, normal, origin, uAxis, circle).extrude(depthMm + OVH)
+  } else {
+    // 'both': sketch at -half, extrude +depth → symmetric around sketch plane (no coincident face)
+    shape = makeProfile(pts, planeId, -half, normal, origin, uAxis, circle).extrude(depthMm)
   }
 
-  // 'both': sketch at -half, extrude +depth → symmetric around sketch plane (no coincident face)
-  return makeProfile(pts, planeId, -half, normal, origin, uAxis, circle).extrude(depthMm)
+  if (draftAngleDeg) {
+    // Draft is a plain-extrude-only option (never applied for isCut) — a tapered
+    // pocket/hole isn't wired up yet, see the feature plan. The neutral plane is
+    // always the ORIGINAL sketch plane at offset 0, regardless of direction mode:
+    // buildProfilePlane with offsetMm=0 reproduces exactly where the user drew
+    // their profile, independent of the -OVH/-half/-depthMm shifts above that
+    // only exist for OCC boolean robustness.
+    const neutralPlane = buildProfilePlane(planeId, 0, normal, origin, uAxis)
+    // FaceFinder.atAngleWith(dir, 90) is sign-invariant (perpendicularity
+    // doesn't care which way `dir` points), so negating this vector for
+    // 'back' has zero effect on which faces get selected — it's only here
+    // to read naturally as "the direction the extrude grew".
+    const pull = direction === 'back' ? neutralPlane.zDir.multiply(-1) : neutralPlane.zDir
+    // OCC's actual taper direction is governed by neutralPlane's own normal
+    // (always +local-Z here, regardless of front/back) — NOT by the `pull`
+    // vector above. 'back' builds into -Z from the neutral plane (the
+    // opposite of 'front', which builds into +Z), so with an unflipped
+    // signedAngle "Out" would come out wider at the NEAR end (toward Z=0)
+    // instead of the far end — flip the sign for 'back' so "Out"/"In" mean
+    // the same visual thing (wider/narrower at the far end from the sketch)
+    // no matter which direction the extrude actually grew. Verified
+    // empirically: front+Out tapers wide-away-from-sketch correctly as-is;
+    // back+Out needed this flip to match (confirmed live, both directions).
+    let signedAngle = draftDirection === 'in' ? draftAngleDeg : -draftAngleDeg
+    if (direction === 'back') signedAngle = -signedAngle
+    try {
+      shape = shape.draft(signedAngle, f => f.atAngleWith(pull, 90), neutralPlane)
+    } catch(e) {
+      // OCC/replicad can throw a bare string or a non-Error exception here
+      // (confirmed live: an 85°-on-5mm draft threw something with no
+      // .message at all) — fall back to a message that's still actionable
+      // instead of surfacing "Draft failed: undefined".
+      throw new Error(`Draft failed: ${e?.message || 'angle too steep for this depth — try a smaller angle'}`)
+    }
+    // Shape.draft() has no built-in validity check (unlike fillet/chamfer, which
+    // throw on an empty edge selection) — it silently returns whatever OCC built
+    // even when the angle is steep enough to self-intersect a short wall. Same
+    // BRepCheck_Analyzer guard already used after fillet/chamfer, so a bad draft
+    // surfaces as a clean error instead of a corrupted solid.
+    const oc = getOC()
+    const analyzer = new oc.BRepCheck_Analyzer(shape.wrapped, true, false)
+    const valid = analyzer.IsValid_2()
+    analyzer.delete()
+    if (!valid) throw new Error('Draft failed: angle too steep for this depth — try a smaller angle')
+  }
+
+  return shape
 }
 
 // Rebuilds a solid's OWN base shape (no cuts/fillets applied) from its stored

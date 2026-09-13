@@ -238,6 +238,8 @@ function buildBaseWorkerParams(solid) {
     planeId: solid.planeId,
     direction: solid.direction || 'both',
     circle: solid.profilePts.circleMeta || null,
+    draftAngleDeg: solid.draftAngleDeg || 0,
+    draftDirection: solid.draftDirection || 'out',
     ...facePlaneParams(solid.facePlane),
   }
 }
@@ -5888,6 +5890,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     return {
       id: feat.solidId, operation: feat.operation, profilePts: feat.profilePts,
       depthMm: feat.depthMm, direction: feat.direction, planeId: feat.planeId, facePlane: feat.facePlane,
+      draftAngleDeg: feat.draftAngleDeg, draftDirection: feat.draftDirection,
       revolveAxis: feat.revolveAxis, angleDeg: feat.angleDeg, revolveReverse: feat.revolveReverse,
       // Loft has none of the above (no single profilePts/depthMm/planeId) —
       // its own basis + ordered profile list instead, same fields
@@ -6814,6 +6817,8 @@ const App3D = forwardRef(function App3D(props, ref) {
       armed: true,
       direction: 'front',
       extentMode: 'through',   // cutout: 'through' | 'value'; ignored for extrude
+      draftAngleInput: '0',    // plain-extrude-only option; ignored for cutout
+      draftDirection: 'out',
       centroid: best.centroid,
     })
     return true
@@ -7084,10 +7089,14 @@ const App3D = forwardRef(function App3D(props, ref) {
     const state = overrideState || extrudeStateRef.current || extrudeState
     if (!state) return
     const { profiles, planeId, pickedIdx, depthInput, direction='both', extentMode='through', revolveAxis=null, revolveReverse=false,
+            draftAngleInput='0', draftDirection='out',
             sketchLines:savedLines=[], sketchCircles:savedCircles=[], sketchArcs:savedArcs=[], sketchSplines:savedSplines=[] } = state
     const depthMm = parseFloat(depthInput) || 20
     const angleDeg = revolveAxis ? Math.min(360, Math.max(1, depthMm)) : null
     const isCutout = extrudeTool === 'cutout'
+    // Plain-extrude-only option (never applied for a cutout or a revolve, neither
+    // of which have the same "straight prismatic side wall" shape draft assumes).
+    const draftAngleDeg = (!isCutout && !revolveAxis) ? (parseFloat(draftAngleInput) || 0) : 0
     const color = isCutout ? '#e05a4e' : extrudeColor
     const pts = profiles[pickedIdx]
     const cached = cachedProfiles.find(p => p.pts === pts)
@@ -7342,7 +7351,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         for (const member of groupMembers) {
           const memberPts = member.profilePts
           const memberWorkerParams = {
-            pts: memberPts, depthMm, planeId: member.planeId, direction,
+            pts: memberPts, depthMm, planeId: member.planeId, direction, draftAngleDeg, draftDirection,
             circle: memberPts.circleMeta || null,  // true circle → real curve, not a polygon prism
             ...(member.facePlane ? {
               normal: [member.facePlane.normal.x, member.facePlane.normal.y, member.facePlane.normal.z],
@@ -7373,10 +7382,10 @@ const App3D = forwardRef(function App3D(props, ref) {
           // (which uses this same filter+push pattern) happened to re-add it.
           setSolids(prev => [...prev.filter(s => s.id !== member.solidId), {
             id: member.solidId, group, planeId: member.planeId, operation: 'extrude',
-            direction, depth: mmToPx(depthMm), depthMm,
+            direction, depth: mmToPx(depthMm), depthMm, draftAngleDeg, draftDirection,
             profilePts: memberPts, color: member.color, facePlane: member.facePlane,
           }])
-          updatedById.set(member.id, { ...member, depthMm, direction, extentMode })
+          updatedById.set(member.id, { ...member, depthMm, direction, extentMode, draftAngleDeg, draftDirection })
         }
         setFeatures(prev => prev.map(f => updatedById.get(f.id) || f))
 
@@ -7421,7 +7430,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           profIdx++
           const solidId = reuse ? editingFeat.solidId : Date.now() + Math.random()
           const memberWorkerParams = {
-            pts: profPts, depthMm, planeId, direction,
+            pts: profPts, depthMm, planeId, direction, draftAngleDeg, draftDirection,
             circle: profPts.circleMeta || null,  // true circle → real curve, not a polygon prism
             ...(facePlane ? {
               normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z],
@@ -7440,7 +7449,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           // filter+push: a reused solidId's old entry (or nothing, for a fresh one) gets replaced
           setSolids(prev => [...prev.filter(s => s.id !== solidId), {
             id: solidId, group: replicadMeshToThree(meshData, color, solidId), planeId, operation:'extrude',
-            direction, depth: mmToPx(depthMm), depthMm, profilePts: profPts, color, facePlane,
+            direction, depth: mmToPx(depthMm), depthMm, draftAngleDeg, draftDirection, profilePts: profPts, color, facePlane,
           }])
           // Punch each hole (the counter in O/A/8/etc., or any nested loop in
           // a plain profile) all the way through regardless of extrude
@@ -7495,7 +7504,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           newFeats.push({
             id: reuse ? editingId : `extrude-${solidId}`, type:'extrude', name: editingFeat?.name || nextExtrudeName(), groupId,
             solidId, sketchId: lastSketch?.id || null,
-            depthMm, direction, extentMode, color, operation:'extrude', planeId,
+            depthMm, direction, extentMode, draftAngleDeg, draftDirection, color, operation:'extrude', planeId,
             profilePts: profPts, facePlane, ...sketchGeom,
           })
           // Only the plain single-profile case supports dependent mirrors
@@ -7504,7 +7513,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           if (reuse) {
             await rebuildDependentMirrors({
               id: solidId, group: replicadMeshToThree(meshData, color, solidId), planeId, operation:'extrude',
-              direction, depth: mmToPx(depthMm), depthMm, profilePts: profPts, color, facePlane,
+              direction, depth: mmToPx(depthMm), depthMm, draftAngleDeg, draftDirection, profilePts: profPts, color, facePlane,
             })
           }
         }
@@ -7528,6 +7537,20 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (isCutout) {
         // Show error banner — do NOT create a confusing red solid for failed cutouts
         setCadError(`Cutout failed: ${err.message || String(err)}`)
+        setTimeout(() => setCadError(null), 8000)
+        return
+      }
+      if (draftAngleDeg) {
+        // Same reasoning as cutout/revolve below — the straight-walled
+        // Three.js fallback a couple lines down would silently swallow the
+        // failure (it has no concept of draft at all), leaving the user with
+        // an undrafted solid and no idea why their angle didn't apply.
+        // Confirmed live: an 85° draft on a too-short/too-large profile
+        // throws all the way up to here with no banner shown before this fix.
+        // cadWorker.js's draft branch already prefixes its own message with
+        // "Draft failed: ", so don't add a second one here.
+        const msg = err.message || String(err)
+        setCadError(msg.startsWith('Draft failed') ? msg : `Draft failed: ${msg}`)
         setTimeout(() => setCadError(null), 8000)
         return
       }
@@ -7673,6 +7696,10 @@ const App3D = forwardRef(function App3D(props, ref) {
       direction:     isCutoutFeat ? (feat.cutDirection || feat.direction || 'front') : (feat.direction || 'both'),
       // Fall back to inferring from cutDepthMm for cutouts saved before extentMode was persisted.
       extentMode:    feat.extentMode || (isCutoutFeat && feat.cutDepthMm >= 10000 ? 'through' : 'value'),
+      // Plain-extrude-only — irrelevant for cutout/revolve, defaults cover
+      // features saved before draft support existed.
+      draftAngleInput: String(feat.draftAngleDeg ?? 0),
+      draftDirection:  feat.draftDirection || 'out',
       armed:         true,
       centroid,
       sketchPlane:   feat.facePlane || feat.planeId,
@@ -11066,7 +11093,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                       color: extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff',
                       textShadow: `0 0 5px ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'}`,
                       fontFamily:'monospace', fontSize:16,
-                      fontWeight:'bold', width:70,
+                      fontWeight:'bold', flex:1, minWidth:0,
                     }}
                   />
                   <span style={{color:'#556', fontSize:12}}>°</span>
@@ -11123,6 +11150,69 @@ const App3D = forwardRef(function App3D(props, ref) {
                   )
                 })}
               </div>
+              {/* Draft angle — optional taper of this extrude's side walls, in/out
+                  from the sketch plane (0° = off, the default). No face-picking:
+                  the worker derives every side face and the neutral plane itself
+                  from the extrude's own direction/sketch plane (see buildExtrude's
+                  draft branch in cadWorker.js). */}
+              <div style={{display:'flex', alignItems:'center', gap:6, marginBottom:8}}>
+                <div style={{
+                  flex:1, background:'#000', border:'1px solid #3ad6ff55',
+                  borderRadius:2, padding:'4px 8px',
+                  display:'flex', alignItems:'center', justifyContent:'space-between',
+                }}>
+                  <input
+                    value={extrudeState.draftAngleInput}
+                    onChange={e=>setExtrudeState(prev=>{
+                      // Sync the ref synchronously — see the direction toggle's
+                      // own comment a few hundred lines up for why: commitExtrude()
+                      // prefers extrudeStateRef.current, which only otherwise
+                      // catches up via a useEffect that runs AFTER this render
+                      // commits, so pressing Enter right after typing could
+                      // silently commit the PRE-edit angle.
+                      const next = {...prev, draftAngleInput:e.target.value}
+                      extrudeStateRef.current = next
+                      return next
+                    })}
+                    onKeyDown={e=>{ e.stopPropagation(); if (e.key==='Enter') commitExtrude() }}
+                    title="Draft angle — 0 = straight walls"
+                    style={{
+                      background:'none', border:'none', outline:'none',
+                      color:'#3ad6ff', textShadow:'0 0 5px #3ad6ff',
+                      fontFamily:'monospace', fontSize:16,
+                      fontWeight:'bold', flex:1, minWidth:0,
+                    }}
+                  />
+                  <span style={{color:'#556', fontSize:12}}>°</span>
+                </div>
+                {[
+                  {k:'in',  label:'In'},
+                  {k:'out', label:'Out'},
+                ].map(({k,label}) => {
+                  const active = extrudeState.draftDirection===k
+                  return (
+                    <button key={k}
+                      onClick={()=>setExtrudeState(prev=>{
+                        // Same synchronous ref-sync as the angle input above —
+                        // clicking In/Out then hitting Enter right away must not
+                        // race the useEffect that otherwise syncs this ref.
+                        const next = {...prev, draftDirection:k}
+                        extrudeStateRef.current = next
+                        return next
+                      })}
+                      title={k==='in' ? 'Draft In — walls narrow away from the sketch' : 'Draft Out — walls flare away from the sketch'}
+                      style={{
+                        padding:'4px 10px', fontSize:12, cursor:'pointer',
+                        background: active ? '#3ad6ff' : '#050505',
+                        color: active ? '#000' : '#3ad6ff',
+                        border:'1px solid #3ad6ff',
+                        borderRadius: 2, fontFamily:'monospace', fontWeight:'bold',
+                        textShadow: active ? 'none' : '0 0 4px #3ad6ff',
+                      }}
+                    >{label}</button>
+                  )
+                })}
+              </div>
               {/* Distance display + input */}
               <div style={{display:'flex', alignItems:'center', gap:8}}>
                 <div style={{
@@ -11139,7 +11229,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                       background:'none', border:'none', outline:'none',
                       color:'#3ad6ff', textShadow:'0 0 5px #3ad6ff',
                       fontFamily:'monospace', fontSize:16,
-                      fontWeight:'bold', width:70,
+                      fontWeight:'bold', flex:1, minWidth:0,
                     }}
                   />
                   <span style={{color:'#556', fontSize:12}}>mm</span>
@@ -11273,7 +11363,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                       background:'none', border:'none', outline:'none',
                       color: extrudeState.extentMode==='through' ? '#553' : '#FF3B5C',
                       textShadow: extrudeState.extentMode==='through' ? 'none' : '0 0 5px #FF3B5C',
-                      fontFamily:'monospace', fontSize:16, fontWeight:'bold', width:70,
+                      fontFamily:'monospace', fontSize:16, fontWeight:'bold', flex:1, minWidth:0,
                     }}
                   />
                   <span style={{color:'#556', fontSize:12}}>mm</span>
@@ -11401,7 +11491,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                       background:'none', border:'none', outline:'none',
                       color: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D',
                       textShadow: `0 0 5px ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}`,
-                      fontFamily:'monospace', fontSize:16, fontWeight:'bold', width:70,
+                      fontFamily:'monospace', fontSize:16, fontWeight:'bold', flex:1, minWidth:0,
                     }}
                   />
                   <span style={{color:'#556', fontSize:12}}>mm</span>
@@ -11571,7 +11661,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                 style={{
                   background:'none', border:'none', outline:'none',
                   color:'#dce8ff', fontFamily:'monospace', fontSize:16,
-                  fontWeight:'bold', width:70,
+                  fontWeight:'bold', flex:1, minWidth:0,
                 }}
               />
               <span style={{color:'#6688aa', fontSize:12}}>mm</span>

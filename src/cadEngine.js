@@ -116,6 +116,15 @@ class CadEngine {
     return this._send('loft', params)
   }
 
+  /**
+   * Sweep a closed profile (sketched on a plane auto-placed at the path's
+   * start) along an open or closed path curve. params: {solidId, pathPts,
+   * planeId, normal, origin, uAxis, profilePts, profileCircle?}.
+   */
+  async sweep(params) {
+    return this._send('sweep', params)
+  }
+
   /** Rebuild a base extrude and subtract one or more cut volumes. */
   async subtract(params) {
     return this._send('subtract', params)

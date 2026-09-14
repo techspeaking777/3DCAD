@@ -384,6 +384,21 @@ export function IconMeasure3D({ color = '#4FC3F7', size = 70 }) {
   )
 }
 
+export function IconSweep3D({ color = '#7ED957', size = 70 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>
+      {/* swept tube — a thickened translucent band following the path */}
+      <path d="M10 52 Q10 28 35 22 Q52 18 52 8" fill="none" stroke={color} strokeWidth="7" strokeOpacity="0.3" strokeLinecap="round"/>
+      {/* dashed guide path the profile travels along */}
+      <path d="M14 52 Q14 30 35 26 Q56 22 56 8" fill="none" stroke={color} strokeWidth="1.5" strokeDasharray="2 3"/>
+      {/* profile — the closed cross-section shape being swept, at the path's start */}
+      <ellipse cx="14" cy="52" rx="8" ry="5" fill={color} fillOpacity="0.35" stroke={color} strokeWidth="1.75"/>
+      {/* arrowhead at the path's far end, showing sweep direction */}
+      <path d="M50 4 L56 8 L50 12" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  )
+}
+
 // ── MOVE ──────────────────────────────────────────────────────────────────────
 // x=c*3, y=r*3 from original raw pixel array
 export function IconMove({ active }) {

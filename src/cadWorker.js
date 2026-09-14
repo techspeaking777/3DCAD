@@ -544,6 +544,9 @@ self.onmessage = async function(e) {
     } else if (type==='loft') {
       shape = buildLoft(params)
       if (params.solidId) shapeStore.set(params.solidId, shape)
+    } else if (type==='sweep') {
+      shape = buildSweep(params)
+      if (params.solidId) shapeStore.set(params.solidId, shape)
     } else if (type==='fillet3d') {
       // Edge-pick fillet: applies to whatever this solid currently looks like
       // (shapeStore holds cuts/prior fillets already baked in). edgePoints is
@@ -924,7 +927,10 @@ function emitArc(sketcher, seg, snapEndTo=null) {
 // says so — see detectProfiles() in extrudeMath.js for how these get
 // attached. `i` jumps forward by a segment's `count` after emitting its
 // curve, skipping the now-redundant polygon-sampled points for that span.
-function buildMixedProfile(sketcher, pts, curveSegments) {
+// close=false (Sweep's path only — see makePath) skips the anchor-snap on a
+// trailing arc (there's no closing point to snap onto) and finishes with
+// .done() instead of .close(), leaving the wire open exactly as drawn.
+function buildMixedProfile(sketcher, pts, curveSegments, close=true) {
   const segs = [...curveSegments].sort((a,b)=>a.startIdx-b.startIdx)
   const n = pts.length
   const anchor = toMm(pts[0])
@@ -937,8 +943,8 @@ function buildMixedProfile(sketcher, pts, curveSegments) {
       else if (seg.type === 'arc') {
         // Last segment overall, and its jump reaches (or passes) the end of
         // pts — nothing but close() follows, so this arc's end IS the wire's
-        // closing point back onto anchor.
-        const isLastBeforeClose = segPtr === segs.length - 1 && (seg.startIdx + seg.count) >= n
+        // closing point back onto anchor. Never true when close=false.
+        const isLastBeforeClose = close && segPtr === segs.length - 1 && (seg.startIdx + seg.count) >= n
         emitArc(sketcher, seg, isLastBeforeClose ? anchor : null)
       }
       i = seg.startIdx + seg.count
@@ -948,42 +954,64 @@ function buildMixedProfile(sketcher, pts, curveSegments) {
       if (i < n) sketcher.lineTo(toMm(pts[i]))
     }
   }
-  return sketcher.close()
+  return close ? sketcher.close() : sketcher.done()
 }
 
-function makeProfile(pts, planeId, offsetMm, normal, origin, uAxis, circle=null) {
+// close=false builds an OPEN wire (via Sketcher.done(), no forced closure) —
+// used only by makePath (Sweep's path curve). Every other caller keeps the
+// default close=true (unchanged behavior).
+function makeProfile(pts, planeId, offsetMm, normal, origin, uAxis, circle=null, close=true) {
+  const plane = buildProfilePlane(planeId, offsetMm, normal, origin, uAxis)
+  const sketch = makeProfileOnPlane(pts, plane, close, circle)
+  plane.delete()
+  return sketch
+}
+
+// The part of makeProfile that only needs an already-built Plane object —
+// factored out so buildSweep's profile callback (which receives its plane
+// straight from replicad's own sweepSketch, see buildSweep below) can share
+// this instead of duplicating the Sketcher/curve-emission/circle logic.
+// Never deletes `plane` — ownership stays with the caller (makeProfile
+// deletes its own right after; buildSweep's callback doesn't own its
+// replicad-provided plane at all).
+function makeProfileOnPlane(pts, plane, close=true, circle=null) {
   if (circle) {
-    // True circular curve — a plain circle/hole should have 2 rim edges + 1 seam,
-    // not the ~60 straight facets the point-sampled polygon path below produces.
-    // pts (the polygon approximation) still gets sent alongside `circle` for
-    // preview/profile-detection code that just wants points; only the actual
-    // solid-building path here needs the real curve.
-    const plane = buildProfilePlane(planeId, offsetMm, normal, origin, uAxis)
-    // Sketch-space (px, Y-down) → plane-local mm (Y-up) — same convention as toRep().
+    // True circular curve — a plain circle/hole should have 2 rim edges + 1
+    // seam, not the ~60 straight facets the point-sampled polygon path
+    // below produces. pts (the polygon approximation) still gets sent
+    // alongside `circle` for preview/profile-detection code that just wants
+    // points; only the actual solid-building path here needs the real
+    // curve. A circle is inherently closed — `close` doesn't apply to it
+    // (Sweep never sends a circle as its path, only as its profile).
     const cx = circle.cx / SCALE
     const cy = -circle.cy / SCALE
     const centered = plane.translate(plane.xDir.multiply(cx).add(plane.yDir.multiply(cy)))
-    plane.delete()
     const sketch = sketchCircle(circle.r / SCALE, { plane: centered })
     centered.delete()
     return sketch
   }
 
-  const plane = buildProfilePlane(planeId, offsetMm, normal, origin, uAxis)
   const sketcher = new Sketcher(plane)
-  plane.delete()
 
-  // Real curve segments (splines/arcs — see detectProfiles in extrudeMath.js)
-  // build a mixed sketch of straight lines + real curves; everything else
-  // (plain line/arc-only profiles) keeps the exact original polygon path.
+  // Real curve segments (splines/arcs — see detectProfiles/detectPath in
+  // extrudeMath.js) build a mixed sketch of straight lines + real curves;
+  // everything else (plain line/arc-only profiles) keeps the exact original
+  // polygon path.
   if (pts.curveSegments && pts.curveSegments.length > 0) {
-    return buildMixedProfile(sketcher, pts, pts.curveSegments)
+    return buildMixedProfile(sketcher, pts, pts.curveSegments, close)
   }
 
   const rep = dedupeRep(toRep(pts))
   sketcher.movePointerTo(rep[0])
   for (let i=1; i<rep.length; i++) sketcher.lineTo(rep[i])
-  return sketcher.close()
+  return close ? sketcher.close() : sketcher.done()
+}
+
+// Sweep's path curve — same point/curve data shape as a profile (see
+// detectPath in extrudeMath.js) but built as an OPEN wire (close=false),
+// never force-closed back to its own start the way a normal profile is.
+function makePath(pts, planeId, normal, origin, uAxis) {
+  return makeProfile(pts, planeId, 0, normal, origin, uAxis, null, false)
 }
 
 /**
@@ -1068,6 +1096,33 @@ function buildLoft({ profiles, normal, origin, uAxis, ruled=false }) {
     segments.push(buildSketch(profiles[i]).loftWith([buildSketch(profiles[i + 1])], { ruled }))
   }
   return segments.length === 1 ? segments[0] : segments.reduce((a, b) => fuseTolerant(a, b))
+}
+
+/**
+ * Sweep a closed profile along a path curve (open or closed — see
+ * detectPath in extrudeMath.js; a path is never force-closed either way).
+ * The path is built as an open wire (makePath, close=false) on its own
+ * sketch plane; replicad's Sketch.sweepSketch then computes the profile's
+ * plane ITSELF from the path wire's own start point + start tangent and
+ * hands it to the callback below — profilePts must already be consistent
+ * with whatever plane App3D.jsx showed the user while they sketched the
+ * profile (see App3D.jsx's computeSweepProfilePlane), or the swept solid
+ * comes out subtly rotated/twisted relative to what they saw on screen.
+ */
+function buildSweep({ pathPts, planeId, normal, origin, uAxis, profilePts, profileCircle }) {
+  const pathSketch = makePath(pathPts, planeId, normal, origin, uAxis)
+  const shape = pathSketch.sweepSketch((plane) => makeProfileOnPlane(profilePts, plane, true, profileCircle))
+  // sweepSketch has no built-in validity check (unlike fillet/chamfer,
+  // which throw on an empty edge selection) — same BRepCheck_Analyzer guard
+  // already used after fillet/chamfer/draft, so a self-intersecting
+  // path/profile combination surfaces as a clean error instead of a
+  // corrupted solid.
+  const oc = getOC()
+  const analyzer = new oc.BRepCheck_Analyzer(shape.wrapped, true, false)
+  const valid = analyzer.IsValid_2()
+  analyzer.delete()
+  if (!valid) throw new Error('Sweep failed: could not build a valid solid from this path and profile')
+  return shape
 }
 
 function buildExtrude({ pts, depthMm, planeId, direction='both',

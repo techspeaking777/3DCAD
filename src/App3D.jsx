@@ -21,7 +21,7 @@ import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewL
 import { useHistory } from './tools/history.js'
 import { saveJSON, loadJSON, exportDXF, parseDXF, saveProjectAs, canPickSaveLocation, exportFaceDXF as writeFaceDXF, saveBlobAs, saveProjectFileAs, loadProjectFile, serializeProject, parseProjectData } from './tools/saveLoad.js'
 import { getAuthState, fetchMyClasses, saveNewCloudProject, updateCloudProject, loadCloudProject } from './tools/cloudSave.js'
-import { detectProfiles, buildSolid, pickProfile } from './tools/extrudeMath.js'
+import { detectProfiles, detectPath, buildSolid, pickProfile } from './tools/extrudeMath.js'
 import { cadEngine } from './cadEngine.js'
 import { replicadMeshToThree } from './cadMesh.js'
 import TracerPanel from './tools/TracerPanel.jsx'
@@ -49,7 +49,7 @@ import {
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
   IconUndo, IconRedo, IconFitView, IconReframe, IconNew, IconSave, IconLoad, IconCloudSave, IconCloudLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
   IconIncludeEdge,
-  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D,
+  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D,
 } from './draw/ToolIcons.jsx'
 import { glowStroke, glowFill } from './draw/vectorTheme.js'
 
@@ -59,6 +59,7 @@ import { glowStroke, glowFill } from './draw/vectorTheme.js'
 const SOLID_ICON_COMPONENTS = {
   extrude: IconExtrude3D, cutout: IconCutout3D, fillet3d: IconFillet3D,
   mirror3d: IconMirror3D, loft3d: IconLoft3D, join3d: IconJoin3D, movecopy3d: IconMoveCopy3D,
+  sweep3d: IconSweep3D,
   // Reuses the additive Loft icon's shape, rendered in Cutout's color (see
   // the button color below) — same "one glyph, color signals cut variant"
   // convention Extrude/Cutout already lean on, no separate icon needed.
@@ -232,6 +233,19 @@ function buildBaseWorkerParams(solid) {
       ...facePlaneParams(solid.facePlane),
     }
   }
+  // Sweep has no single depthMm/direction either — its "base" is the path
+  // curve it was swept along plus the profile sketched on the plane
+  // auto-computed from that path's start (see commitSweep/
+  // computeSweepProfilePlane), rebuilt via cadWorker.js's buildSweep.
+  // planeId is always 'face' (see commitSweep) — normal/origin/uAxis are
+  // the path's own sketch plane, always sufficient on their own.
+  if (solid.operation === 'sweep') {
+    return {
+      pathPts: solid.pathPts, planeId: solid.planeId,
+      normal: solid.normal, origin: solid.origin, uAxis: solid.uAxis,
+      profilePts: solid.profilePts, profileCircle: solid.profileCircle,
+    }
+  }
   return {
     pts: solid.profilePts,
     depthMm: solid.depthMm,
@@ -301,6 +315,60 @@ function buildLoftFacePlane(basis, offsetMm) {
   return new FacePlane(origin, basis.viewNormal || basis.normal, basis.uAxis, basis.vAxis)
 }
 
+// Sweep's profile plane has no user pick at all — it's derived purely from
+// the path curve's own start point + start tangent, mirroring EXACTLY what
+// replicad's Sketch.sweepSketch computes internally at commit time
+// (node_modules/replicad/dist/replicad.js — origin=path.wire.startPoint,
+// normal=-tangentAt(start), xDir=normal×pathPlaneNormal×-1). Both
+// computations must agree, or the swept profile comes out subtly rotated
+// relative to what the user saw while sketching it (invisible for a
+// circular profile, visible for anything else) — see the Sweep plan's "key
+// technical findings" for why, and verify live per its verification steps.
+//
+// The tangent must be EXACT (not a chord approximation) for line/arc
+// starts, where an exact formula is trivial; splines use the first
+// control-polygon edge as a close, standard approximation to the true
+// Catmull-Rom tangent — flagged in the plan as the one case most worth
+// re-checking live if a twist ever shows up.
+function sweepPathStartTangent(path) {
+  const seg0 = path.curveSegments?.[0]
+  if (seg0 && seg0.startIdx === 0) {
+    if (seg0.type === 'arc') {
+      // Circle parametrized as (cx+r·cosθ, cy+r·sinθ) — derivative w.r.t. θ
+      // is (-r·sinθ, r·cosθ); sign flips with sweep direction (endAngle vs
+      // startAngle, already encoding CCW/CW per detectPath/detectProfiles).
+      const dir = seg0.endAngle >= seg0.startAngle ? 1 : -1
+      return { x: -Math.sin(seg0.startAngle)*dir, y: Math.cos(seg0.startAngle)*dir }
+    }
+    if (seg0.type === 'spline') {
+      const cp = seg0.controlPoints
+      return { x: cp[1].x - cp[0].x, y: cp[1].y - cp[0].y }
+    }
+  }
+  return { x: path.pts[1].x - path.pts[0].x, y: path.pts[1].y - path.pts[0].y }
+}
+
+// basis: the FacePlane the path was sketched on. path: {pts, curveSegments}
+// from detectPath. Returns the FacePlane the profile should be sketched on.
+function computeSweepProfilePlane(basis, path) {
+  const startPt = path.pts[0]
+  const tangentSketch = sweepPathStartTangent(path)
+  // Rotate a sketch-space DIRECTION into world space — same rotation
+  // FacePlane.sketchToWorld uses for a POSITION (Y-down convention), just
+  // without the origin offset a direction doesn't have.
+  const tangentWorld = basis.uAxis.clone().multiplyScalar(tangentSketch.x)
+    .add(basis.vAxis.clone().multiplyScalar(-tangentSketch.y))
+    .normalize()
+  const origin = basis.sketchToWorld(startPt.x, startPt.y)
+  const normal = tangentWorld.clone().negate()
+  // Always well-defined: the path is sketched flat on `basis`, so its
+  // tangent (and therefore `normal`) is always perpendicular to
+  // basis.normal — never parallel, never a degenerate zero cross product.
+  const uAxis = normal.clone().cross(basis.normal).multiplyScalar(-1).normalize()
+  const vAxis = normal.clone().cross(uAxis)
+  return new FacePlane(origin, normal, uAxis, vAxis)
+}
+
 // Ordered cutout/fillet ops for `solid`, in the shape cadWorker.js's
 // mirrorShape/exportSTL handlers expect. `features` is taken as an explicit
 // parameter (not read from component closure) so callers control exactly
@@ -331,6 +399,11 @@ async function rebuildBaseMesh(solid) {
     // mirrors that same convention.
     : solid.operation === 'loft'
     ? await cadEngine.loft({ solidId: solid.id, ...baseWorkerParams })
+    // Sweep's base params are shaped like {pathPts,planeId,normal,origin,
+    // uAxis,profilePts,profileCircle} (see buildBaseWorkerParams' sweep
+    // branch) — same "wrong shape for cadEngine.extrude()" reasoning as loft.
+    : solid.operation === 'sweep'
+    ? await cadEngine.sweep({ solidId: solid.id, ...baseWorkerParams })
     // An imported STEP body: baseWorkerParams is just {stepText} here (see
     // buildBaseWorkerParams' import branch) — re-running the same import
     // reproduces the identical shape, same as replaying any other recipe.
@@ -346,7 +419,7 @@ async function rebuildBaseMesh(solid) {
   // too, or they'd silently come back solid every time. Revolve/loft/import
   // never punch holes even at creation time (see commitExtrude), so this
   // only applies to a plain extrude.
-  const holes = solid.operation !== 'revolve' && solid.operation !== 'loft' && solid.operation !== 'import'
+  const holes = solid.operation !== 'revolve' && solid.operation !== 'loft' && solid.operation !== 'sweep' && solid.operation !== 'import'
     ? solid.profilePts?.holes : null
   if (holes && holes.length) {
     for (const holePts of holes) {
@@ -695,7 +768,7 @@ function featureOpColor(feat) {
   const op = feat.operation || 'extrude'
   return {
     extrude: '#FBDA2D', revolve: '#FBDA2D', cutout: '#53D3E4',
-    mirror: '#8E65F3', loft: '#FBDA2D', join: '#FFEE88', import: '#66BB6A',
+    mirror: '#8E65F3', loft: '#FBDA2D', sweep: '#7ED957', join: '#FFEE88', import: '#66BB6A',
   }[op] || '#FBDA2D'
 }
 
@@ -714,6 +787,7 @@ function RowIcon({ kind, color, size=13 }) {
     mirror:  <><line x1="6.5" y1="1" x2="6.5" y2="12" strokeDasharray="1.5 1.5" {...p}/><path d="M4.5 4L2.5 5.5 4.5 7" {...p}/><path d="M8.5 4l2 1.5-2 1.5" {...p}/></>,
     join:    <><circle cx="5" cy="6.5" r="3.5" {...p}/><circle cx="8" cy="6.5" r="3.5" {...p}/></>,
     loft:    <><rect x="4" y="1.5" width="5" height="2.5" {...p}/><rect x="1.5" y="8" width="10" height="2.5" {...p}/><line x1="4.5" y1="4" x2="2.5" y2="8" {...p}/><line x1="8.5" y1="4" x2="9.5" y2="8" {...p}/></>,
+    sweep:   <><path d="M2 10Q2 4 10 4" strokeDasharray="1.5 1.5" {...p}/><ellipse cx="2" cy="10" rx="1.6" ry="1" {...p}/></>,
     import:  <><path d="M6.5 1v6M4 4.5l2.5 2.5L9 4.5" {...p}/><path d="M2 9.5h9" {...p}/></>,
   }
   return <svg width={size} height={size} viewBox="0 0 13 13" style={{flexShrink:0}}>{shapes[kind]}</svg>
@@ -838,6 +912,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           const isMirror = isExtrude && feat.operation === 'mirror'
           const isJoin = isExtrude && feat.operation === 'join'
           const isLoft = isExtrude && feat.operation === 'loft'
+          const isSweep = isExtrude && feat.operation === 'sweep'
           // A loft-cutout is stored as an ordinary operation:'cutout' feature
           // (see commitLoft's isLoftCutout branch) so it replays through the
           // same cutout machinery everywhere else, but it carries `profiles`
@@ -856,12 +931,12 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           // blocking it just made "join a mirrored part to its original" — an
           // ordinary CAD operation — impossible.
           const isBodyOwner = isExtrude && !isLocked &&
-            ['extrude','revolve','loft','mirror','join','import'].includes(feat.operation || 'extrude')
+            ['extrude','revolve','loft','sweep','mirror','join','import'].includes(feat.operation || 'extrude')
           const isBodyHidden = isBodyOwner && hiddenSolidIds?.includes(feat.solidId)
           const editingDepth = editDepthId === feat.id
 
           const rowKind = isSketch ? 'sketch' : isFillet ? 'fillet' : isMirror ? 'mirror'
-            : isJoin ? 'join' : isLoft ? 'loft' : feat.operation === 'cutout' ? 'cutout'
+            : isJoin ? 'join' : isLoft ? 'loft' : isSweep ? 'sweep' : feat.operation === 'cutout' ? 'cutout'
             : feat.operation === 'revolve' ? 'revolve' : feat.operation === 'import' ? 'import' : 'extrude'
           const rowColor = featureOpColor(feat)
 
@@ -1002,7 +1077,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                             padding:'1px 3px', display:'flex', alignItems:'center'}}
                         ><PencilGlyph/></button>
                       )}
-                      {!sketchMode && !isMirror && !isJoin && !isLoft && !isLoftCutout && (
+                      {!sketchMode && !isMirror && !isJoin && !isLoft && !isLoftCutout && !isSweep && (
                         <button title={feat.operation==='cutout' ? 'Edit cutout extent' : 'Edit extrusion extent'}
                           onClick={e=>{e.stopPropagation(); onEditExtent(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
@@ -1101,8 +1176,20 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                 </div>
               )}
 
+              {/* Sweep subtitle: just the colour dot + label — no single
+                  depth/direction to show, unlike a plain extrude. */}
+              {isSweep && (
+                <div style={{marginLeft:20, marginTop:3}}>
+                  <div style={{display:'flex', alignItems:'center', gap:5}}>
+                    <div style={{width:8,height:8,borderRadius:'50%',
+                      background:feat.color||'#7ED957', flexShrink:0}}/>
+                    <span style={{color:'#8fa0b8', fontSize:10}}>sweep</span>
+                  </div>
+                </div>
+              )}
+
               {/* Extrude subtitle: colour + depth + operation */}
-              {isExtrude && !isMirror && !isJoin && !isLoft && !isLoftCutout && (
+              {isExtrude && !isMirror && !isJoin && !isLoft && !isLoftCutout && !isSweep && (
                 <div style={{marginLeft:20, marginTop:3}}>
                   <div style={{display:'flex', alignItems:'center', gap:5}}>
                     <div style={{width:8,height:8,borderRadius:'50%',
@@ -1169,6 +1256,13 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [extrudeOffsetMode,setExtrudeOffsetMode]=useState(false)
   const [extrudeOffsetBase,setExtrudeOffsetBase]=useState(null)
   const [extrudeOffsetDistInput,setExtrudeOffsetDistInput]=useState('20')
+  // Offset (parallel) plane for Sweep's path-plane pick step — same idea as
+  // Extrude/Mirror's own offset-plane pick just above, kept as its own
+  // parallel implementation for the same reason theirs are (see
+  // extrudeOffsetMode's comment) — additive-only, zero risk to either.
+  const [sweepOffsetMode,setSweepOffsetMode]=useState(false)
+  const [sweepOffsetBase,setSweepOffsetBase]=useState(null)
+  const [sweepOffsetDistInput,setSweepOffsetDistInput]=useState('20')
   const extrudePanelDrag = useDraggablePanel()
   const cutoutPanelDrag = useDraggablePanel()
   const loftPanelDrag = useDraggablePanel()
@@ -1270,7 +1364,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }, [features])
   const [activeSketchId,setActiveSketchId]=useState(null)  // which sketch is being edited
-  const featureCountRef=useRef({sketch:0,extrude:0,cutout:0,fillet:0,chamfer:0,mirror:0,join:0,loft:0})       // for auto-naming
+  const featureCountRef=useRef({sketch:0,extrude:0,cutout:0,fillet:0,chamfer:0,mirror:0,join:0,loft:0,sweep:0})       // for auto-naming
   const [treeCollapsed,setTreeCollapsed]=useState(false)
 
   const viewport3dRef=useRef(null)
@@ -2808,6 +2902,41 @@ const App3D = forwardRef(function App3D(props, ref) {
     const sketchLineColor = sketchMode ? '#111111' : '#2196F3'
     const sketchHighlight = sketchMode ? '#0066cc' : '#64B5F6'
 
+    // ── Sweep profile-plane markers (always visible, not hover-gated) ──────
+    // Two clearly DIFFERENT markers, so the plane's local origin (0,0) — the
+    // actual attachment point every profile MUST be centered on, since
+    // that's the exact point replicad's sweepSketch anchors the pipe to —
+    // never gets mistaken for the ghost path's far/reference end. Before
+    // this, only the origin's plain crosshair marked the attach point,
+    // while the far end got a bold red dot; a profile centered on the far
+    // dot instead of the (much fainter) origin is off-axis from the real
+    // path, which BRepOffsetAPI_MakePipeShell then renders as a
+    // self-intersecting spike rather than a clean pipe.
+    if (sketchMode && sweepState?.path && sweepState?.ghostEndpoint) {
+      const gp = sweepState.ghostEndpoint
+      ctx.save()
+      ctx.translate(gp.x, gp.y)
+      ctx.scale(1/sc, 1/sc)
+      ctx.beginPath(); ctx.arc(0, 0, 5, 0, Math.PI*2)
+      ctx.fillStyle = '#FF1744'
+      ctx.fill()
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5; ctx.stroke()
+      ctx.fillStyle = '#FF1744'; ctx.font = 'bold 11px monospace'
+      ctx.fillText('FAR END (ref only)', 10, -8)
+      ctx.restore()
+
+      ctx.save()
+      ctx.translate(0, 0)
+      ctx.scale(1/sc, 1/sc)
+      ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI*2)
+      ctx.fillStyle = '#00E676'
+      ctx.fill()
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5; ctx.stroke()
+      ctx.fillStyle = '#00E676'; ctx.font = 'bold 11px monospace'
+      ctx.fillText('CENTER PROFILE HERE', 11, -9)
+      ctx.restore()
+    }
+
     // ── Grid dots (sketch mode only) ────────────────────────────────────────
     // Reference-grid dots at gridSizeMm spacing, drawn in the sketch's own
     // 2D pixel space so they line up correctly on any active plane (XY/XZ/
@@ -3727,6 +3856,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     featureCountRef.current.loft += 1
     return `Loft ${featureCountRef.current.loft}`
   }
+  function nextSweepName() {
+    featureCountRef.current.sweep += 1
+    return `Sweep ${featureCountRef.current.sweep}`
+  }
 
   // Enter sketch mode for a new or existing sketch
   function enterSketch(plane, existingId=null, initialGeometry=null) {
@@ -3793,6 +3926,13 @@ const App3D = forwardRef(function App3D(props, ref) {
     // stray-hit guard as Mirror step 1 above.
     if (tool==='join3d') return
     if (tool==='loft3d' && !loftState) { startLoftProfile1({ kind:'face', facePlane }); return }
+    // Sweep's own offset-plane pick — must run BEFORE the plain sweep
+    // plane-pick branch below, which would otherwise always win first (its
+    // guard is just !sweepState, true the whole time offset mode is armed
+    // too) and start the path directly on the picked plane, skipping the
+    // offset distance entirely.
+    if (tool==='sweep3d' && sweepOffsetMode) { handleSweepOffsetPlanePick({ kind:'face', facePlane }); return }
+    if (tool==='sweep3d' && !sweepState) { startSweepPath({ kind:'face', facePlane }); return }
     if (tool==='exportfacedxf') { handleExportFaceDXFFaceClick(facePlane); return }
     if (extrudeTool && extrudeOffsetMode) { handleExtrudeOffsetPlanePick({ kind:'face', facePlane }); return }
     if (extrudeState) return  // step 3 (depth): ignore stray face clicks
@@ -3807,6 +3947,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (cutoutTargetPicker) return
     if (tool==='mirror3d' && mirror3dSelectionDone) { handleMirror3DPlanePick({ kind:'workplane', planeId:id }); return }
     if (tool==='loft3d' && !loftState) { startLoftProfile1({ kind:'workplane', planeId:id }); return }
+    // Same ordering reasoning as handleFaceClick's own sweep-offset guard.
+    if (tool==='sweep3d' && sweepOffsetMode) { handleSweepOffsetPlanePick({ kind:'workplane', planeId:id }); return }
+    if (tool==='sweep3d' && !sweepState) { startSweepPath({ kind:'workplane', planeId:id }); return }
     if (extrudeTool && extrudeOffsetMode) { handleExtrudeOffsetPlanePick({ kind:'workplane', planeId:id }); return }
     if (extrudeState) return  // step 3 (depth): ignore stray plane clicks
     // Work planes pass through/near the model with no occlusion check against
@@ -3992,6 +4135,49 @@ const App3D = forwardRef(function App3D(props, ref) {
       allProfiles.push({ planeId, facePlane: isFace ? plane : null, pts, centroid:{x:cx,y:cy} })
     })
     setCachedProfiles(allProfiles)
+
+    if (sweepState) {
+      // ── Sweep flow: 2 fixed steps, no repeating N-round loop like Loft —
+      //    finishing the PATH auto-advances straight into sketching the
+      //    PROFILE (no extra click), and finishing the PROFILE commits
+      //    immediately (nothing left to configure once it closes). Checked
+      //    the same way loftState is below — tool alone isn't reliable here
+      //    (enterSketch always resets it to the active drawing tool).
+      if (!sweepState.path) {
+        const path = detectPath(ownLines, ownArcs, planeId, ownCircles, ownSplines)
+        if (!path) {
+          setSketchMode(true)
+          setActivePlane(plane)
+          setCadError('Draw a single connected path (open or closed) — no stray disconnected geometry.')
+          setTimeout(() => setCadError(null), 6000)
+          return
+        }
+        const profilePlane = computeSweepProfilePlane(sweepState.basis, path)
+        setSweepState(prev => ({ ...prev, path }))
+        viewport3dRef.current?.snapToFace(profilePlane).then(() => {
+          enterSketch(profilePlane)
+          // The path was sketched on a DIFFERENT plane (its own), not just a
+          // parallel offset of this one the way Loft's ghost profile is —
+          // its own tangent-perpendicular plane, generally at some angle to
+          // it — so its geometry can't be reused as-is; transform it into
+          // ghost-tagged reference geometry so its far endpoint is visible
+          // and snappable (join to it, measure from it) while the profile
+          // is sketched, same as Loft's own ghost profile.
+          injectSweepPathGhost(path, sweepState.basis, profilePlane)
+        })
+        return
+      }
+      if (allProfiles.length === 0) {
+        setSketchMode(true)
+        setActivePlane(plane)
+        setCadError('No closed profile found — make sure your sketch forms a closed loop.')
+        setTimeout(() => setCadError(null), 5000)
+        return
+      }
+      const best = allProfiles[0]
+      commitSweep(sweepState.path, { pts: best.pts, circle: best.pts.circleMeta || null })
+      return
+    }
 
     if (loftState) {
       // ── Loft flow: store this profile, show the step popup (never
@@ -4673,7 +4859,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // of-mirror, mirror-of-join) — see commitMirrorSolid/rebuildDependentMirrors.
   function baseFeatureForSolid(solidId) {
     return features.find(f => f.type==='extrude' && !f.joinedInto && f.solidId===solidId &&
-      ['extrude','revolve','loft','mirror','join','import'].includes(f.operation || 'extrude'))
+      ['extrude','revolve','loft','sweep','mirror','join','import'].includes(f.operation || 'extrude'))
   }
 
   function activateMirror3DTool() {
@@ -5340,6 +5526,14 @@ const App3D = forwardRef(function App3D(props, ref) {
   // loftPreviousProfile) is identical for both; only commitLoft() branches.
   const [loftTool, setLoftTool] = useState('loft')
 
+  // null while idle. Once a plane is picked: { basis, path: null } (see
+  // startSweepPath). Once the path sketch finishes: { basis, path: {pts,
+  // curveSegments, sketchLines/Circles/Arcs/Splines} } — reliable "which
+  // step of Sweep are we on" signal for handleFinishSketch, same role
+  // loftState plays for Loft (tool alone isn't enough — enterSketch always
+  // resets tool to the active drawing tool once sketching starts).
+  const [sweepState, setSweepState] = useState(null)
+
   function activateLoft3DTool(op = 'loft') {
     resetSelection()
     resetDrawState()
@@ -5373,6 +5567,45 @@ const App3D = forwardRef(function App3D(props, ref) {
     clearLoftPreviewCanvas()
     setLoftState(null)
     setLoftEditingFeatureId(null)
+  }
+
+  function activateSweep3DTool() {
+    resetSelection()
+    resetDrawState()
+    restoreHiddenEditSolid()
+    // Same restoreSavedView()-inside-guard reasoning as activateLoft3DTool.
+    if (sketchModeRef.current) {
+      setSketchMode(false)
+      setActivePlane(null)
+      setActiveSketchId(null)
+      activePlaneRef.current = null
+      viewport3dRef.current?.restoreSavedView()
+    }
+    setTool('sweep3d')
+    setExtrudeTool(null)
+    setExtrudeState(null)
+    setEditingFeatureId(null)
+    setSweepState(null)
+    setSweepOffsetMode(false)
+    setSweepOffsetBase(null)
+  }
+
+  function resetSweep3D() {
+    setSweepState(null)
+    setSweepOffsetMode(false)
+    setSweepOffsetBase(null)
+  }
+
+  async function startSweepPath(pick) {
+    const basis = pick.kind === 'face'
+      ? new FacePlane(pick.facePlane.origin, pick.facePlane.normal, pick.facePlane.uAxis, pick.facePlane.vAxis)
+      : (() => {
+          const b = workPlaneToFacePlaneBasisPx(pick.planeId)
+          return new FacePlane(b.origin, b.normal, b.uAxis, b.vAxis)
+        })()
+    setSweepState({ basis, path: null })
+    await viewport3dRef.current?.snapToFace(basis)
+    enterSketch(basis)
   }
 
   // True while the user is between "Finish Sketch" on one profile and
@@ -5454,6 +5687,38 @@ const App3D = forwardRef(function App3D(props, ref) {
     setCircles(prev => [...prev, ...profile.sketchCircles.map(c => ({ ...c, ghostRef: true }))])
     setArcs(prev => [...prev, ...profile.sketchArcs.map(a => ({ ...a, ghostRef: true }))])
     setSplines(prev => [...prev, ...profile.sketchSplines.map(s => ({ ...s, ghostRef: true }))])
+  }
+
+  // Same idea as injectLoftGhost above, but the source geometry (the sweep
+  // path) lives on a DIFFERENT plane than the one now active (the profile
+  // plane, generally at some angle to it — unlike Loft's parallel offset
+  // planes, which share the same uAxis/vAxis and so can reuse a ghost
+  // profile's raw local coordinates unchanged). Each path point is carried
+  // through pathBasis.sketchToWorld → profilePlane.worldToSketch so the
+  // ghost lands at its true 3D position when rendered on the profile plane
+  // (rendering reads each entity's own stored .facePlane — see buildLine in
+  // Viewport3D.jsx — so tagging every ghost segment with profilePlane here
+  // is what makes that positioning correct). Rebuilt as straight ghost
+  // lines between consecutive path points rather than preserving real arc/
+  // spline curvature — the ghost only needs to be visible and snappable
+  // (its far endpoint especially — "join to it, measure from it"), not
+  // geometrically exact.
+  function injectSweepPathGhost(path, pathBasis, profilePlane) {
+    const pts = path.pts.map(p => profilePlane.worldToSketch(pathBasis.sketchToWorld(p.x, p.y)))
+    const ghostLines = []
+    for (let i = 0; i < pts.length - 1; i++) {
+      ghostLines.push({
+        x1: pts[i].x, y1: pts[i].y, x2: pts[i+1].x, y2: pts[i+1].y,
+        plane: 'face', facePlane: profilePlane, ghostRef: true,
+      })
+    }
+    setLines(prev => [...prev, ...ghostLines])
+    // Stored on sweepState (not just left implicit in the ghost lines) so
+    // the overlay draw effect can show a persistent marker at this point
+    // without hunting through `lines` for the ghost's far end — the user
+    // asked to SEE the attach target up front, not just discover it on hover.
+    const endpoint = pts[pts.length - 1]
+    setSweepState(prev => prev ? { ...prev, ghostEndpoint: endpoint } : prev)
   }
 
   async function loftNextProfile() {
@@ -5670,6 +5935,60 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }
 
+  // path: {pts, curveSegments} from detectPath (via handleFinishSketch's
+  // sweep branch). profile: {pts, circle} — same shape as one Extrude/Loft
+  // profile. basis (sweepState.basis, a FacePlane — .id is always 'face',
+  // exactly what buildProfilePlane expects; Sweep never needs the named-
+  // plane offset machinery Extrude/Loft do, since the path is always
+  // sketched AT that plane with no offset).
+  async function commitSweep(path, profile) {
+    const basis = sweepState.basis
+    feat3d.commit(features)
+    resetSweep3D()
+    setTool('select')
+    setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
+    setLines([]); setCircles([]); setArcs([]); setSplines([])
+    // The profile plane is auto-computed from the path's own tangent — often
+    // a genuinely odd/tilted angle, unlike a work plane or a picked face.
+    // Leaving the camera there after commit (success or failure) is
+    // disorienting; snap back to a neutral overview instead. Not awaited —
+    // nothing below depends on the tween finishing.
+    viewport3dRef.current?.snapToIsometric()
+
+    const planeId = basis.id
+    const normal = [basis.normal.x, basis.normal.y, basis.normal.z]
+    const origin = [pxToMm(basis.origin.x), pxToMm(basis.origin.y), pxToMm(basis.origin.z)]
+    const uAxis  = [basis.uAxis.x, basis.uAxis.y, basis.uAxis.z]
+    const vAxis  = [basis.vAxis.x, basis.vAxis.y, basis.vAxis.z]
+
+    try {
+      const solidId = Date.now()
+      const meshData = await cadEngine.sweep({
+        solidId, pathPts: path.pts, planeId, normal, origin, uAxis,
+        profilePts: profile.pts, profileCircle: profile.circle,
+      })
+      const color = extrudeColor
+      const group = replicadMeshToThree(meshData, color, solidId)
+      const solidData = {
+        id: solidId, group, operation: 'sweep', color,
+        pathPts: path.pts, planeId, normal, origin, uAxis, vAxis,
+        profilePts: profile.pts, profileCircle: profile.circle,
+      }
+      setSolids(prev => [...prev, solidData])
+      const sweepName = nextSweepName()   // outside the updater — see nextSketchName's comment
+      setFeatures(prev => [...prev, {
+        id: `sweep-${solidId}`, type: 'extrude', operation: 'sweep', name: sweepName,
+        solidId, pathPts: path.pts, planeId, normal, origin, uAxis, vAxis,
+        profilePts: profile.pts, profileCircle: profile.circle, color,
+      }])
+      await rebuildDependentMirrors(solidData)
+    } catch (err) {
+      console.error('Sweep failed:', err)
+      setCadError(`Sweep failed: ${err.message || String(err)}`)
+      setTimeout(() => setCadError(null), 6000)
+    }
+  }
+
   // Step 2 commit — picking a plane/face (or confirming an offset plane, see
   // commitMirror3DOffset below) mirrors EVERY selected body in one go. `pick`
   // is {kind:'face', facePlane} or {kind:'workplane', planeId} — same shape
@@ -5828,6 +6147,72 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (fp) viewport3dRef.current?.showOffsetPlanePreview({ origin: fp.origin, normal: fp.normal, uAxis: fp.uAxis, vAxis: fp.vAxis })
   }, [extrudeTool, extrudeOffsetBase, extrudeOffsetDistInput])
 
+  // ── Sweep step 1: offset (parallel) plane — same idea as Extrude's own
+  // offset plane just above, its own parallel implementation for the same
+  // "don't touch already-shipped tools" reason theirs is. ──
+  function sweepOffsetFacePlane() {
+    if (!sweepOffsetBase) return null
+    const basis = sweepOffsetBase.kind === 'face'
+      ? sweepOffsetBase.facePlane
+      : planeIdBasis(sweepOffsetBase.planeId)
+    const distMm = parseFloat(sweepOffsetDistInput) || 0
+    const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(distMm))
+    const vAxis = new THREE.Vector3().crossVectors(basis.normal, basis.uAxis).normalize()
+    return new FacePlane(origin, basis.normal, basis.uAxis, vAxis)
+  }
+
+  function handleSweepOffsetPlanePick(pick) {
+    if (!sweepOffsetBase) setSweepOffsetBase(pick)
+    else commitSweepOffset()  // base already picked — any further click accepts the live distance
+  }
+
+  // Commits into the exact same startSweepPath-shaped sweepState a directly-
+  // picked face/plane already produces — no separate entry point, no worker
+  // changes. Resets the offset state back to defaults so stepping back to
+  // step 1 later doesn't show stale "offset mode on" UI.
+  async function commitSweepOffset() {
+    const facePlane = sweepOffsetFacePlane()
+    if (!facePlane) return
+    setSweepState({ basis: facePlane, path: null })
+    await viewport3dRef.current?.snapToFace(facePlane)
+    enterSketch(facePlane)
+    setSweepOffsetMode(false)
+    setSweepOffsetBase(null)
+    viewport3dRef.current?.hideOffsetPlanePreview()
+  }
+
+  // Drag-to-set-distance — same projection math as handleExtrudeOffsetDragMove
+  // just above, gated on the sweep offset state instead of Extrude's.
+  function handleSweepOffsetDragMove(e) {
+    if (tool !== 'sweep3d' || !sweepOffsetBase) return
+    const vp = viewport3dRef.current
+    if (!vp) return
+    const basis = sweepOffsetBase.kind === 'face' ? sweepOffsetBase.facePlane : planeIdBasis(sweepOffsetBase.planeId)
+    const p0 = vp.worldToScreen(basis.origin.x, basis.origin.y, basis.origin.z)
+    const p1 = vp.worldToScreen(
+      basis.origin.x + basis.normal.x * 2,
+      basis.origin.y + basis.normal.y * 2,
+      basis.origin.z + basis.normal.z * 2,
+    )
+    if (!p0 || !p1) return
+    const dx = p1.x - p0.x, dy = p1.y - p0.y
+    const pxPerMm = Math.hypot(dx, dy)
+    if (!pxPerMm) return
+    const vpRect = vp.getDomElement?.()?.parentElement?.getBoundingClientRect?.()
+    if (!vpRect) return
+    const mx = e.clientX - vpRect.left, my = e.clientY - vpRect.top
+    const proj = (mx - p0.x) * (dx / pxPerMm) + (my - p0.y) * (dy / pxPerMm)
+    let mm = proj / pxPerMm
+    if (gridSnap) mm = Math.round(mm / gridSizeMm) * gridSizeMm
+    setSweepOffsetDistInput(String(Math.round(mm * 100) / 100))
+  }
+
+  useEffect(() => {
+    if (tool !== 'sweep3d' || !sweepOffsetBase) { viewport3dRef.current?.hideOffsetPlanePreview(); return }
+    const fp = sweepOffsetFacePlane()
+    if (fp) viewport3dRef.current?.showOffsetPlanePreview({ origin: fp.origin, normal: fp.normal, uAxis: fp.uAxis, vAxis: fp.vAxis })
+  }, [tool, sweepOffsetBase, sweepOffsetDistInput])
+
   // Mirroring an EXTRUDE/REVOLVE produces a completely separate new solid —
   // not fused with the source (a future "Union (Join)" tool handles merging
   // bodies explicitly). Stores sourceSolidId/mirrorPlane so it can be kept
@@ -5920,6 +6305,10 @@ const App3D = forwardRef(function App3D(props, ref) {
       // its own basis + ordered profile list instead, same fields
       // buildBaseWorkerParams' loft branch reads off a `solid` object.
       normal: feat.normal, origin: feat.origin, uAxis: feat.uAxis, vAxis: feat.vAxis, profiles: feat.profiles, ruled: feat.ruled,
+      // Sweep's path curve + profile circle meta — normal/origin/uAxis/
+      // profilePts above are shared with extrude/revolve's own fields, this
+      // is just what's genuinely new (see buildBaseWorkerParams' sweep branch).
+      pathPts: feat.pathPts, profileCircle: feat.profileCircle,
       // An imported STEP body's whole "recipe" — see buildBaseWorkerParams'
       // import branch.
       stepText: feat.stepText,
@@ -7109,7 +7498,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // evaluated here against a solidId instead of while rendering a row.
   function solidLabel(solidId) {
     const feat = features.find(f => f.type === 'extrude' && !f.joinedInto &&
-      ['extrude','revolve','loft','mirror','join','import'].includes(f.operation || 'extrude') &&
+      ['extrude','revolve','loft','sweep','mirror','join','import'].includes(f.operation || 'extrude') &&
       f.solidId === solidId)
     return feat?.name || `Body ${solidId}`
   }
@@ -8320,6 +8709,13 @@ const App3D = forwardRef(function App3D(props, ref) {
       return
     }
 
+    // Sweep step 1, offset-plane base already picked — same reasoning as
+    // Extrude's own version just above.
+    if (tool==='sweep3d' && sweepOffsetBase) {
+      commitSweepOffset()
+      return
+    }
+
     // ── Extrude / Cutout tool: only intercept outside sketch mode ──
     // Step 2 (sketch mode): clicks belong to sketch tools, not extrude handler
     if (extrudeTool && !sketchMode) {
@@ -9181,6 +9577,17 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (extrudeOffsetBase) { setExtrudeOffsetBase(null); return }
       setExtrudeOffsetMode(false); return
     }
+    if (e.key==='Enter'&&tool==='sweep3d'&&sweepOffsetBase){
+      // Same reasoning as Extrude's own Enter handler just above.
+      e.preventDefault()
+      commitSweepOffset()
+      return
+    }
+    if (e.key==='Escape'&&tool==='sweep3d'&&sweepOffsetMode){
+      // Same back-out-one-level convention as Extrude's own handler above.
+      if (sweepOffsetBase) { setSweepOffsetBase(null); return }
+      setSweepOffsetMode(false); return
+    }
     if (e.key==='Escape'&&extrudeTool){
       // Cancel from step 3 (depth) — restore any hidden solid
       restoreHiddenEditSolid()
@@ -9947,7 +10354,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   return (
     <div ref={rootDivRef} style={{display:'flex',height:'100%',outline:'none'}} tabIndex={0}
       onKeyDown={handleKeyDown}
-      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e); handleMirror3DOffsetDragMove(e); handleExtrudeOffsetDragMove(e); handleMoveCopy3DDragMove(e); handleMoveCopy3DGizmoHover(e); handleSnapMoveHover(e) }}
+      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e); handleMirror3DOffsetDragMove(e); handleExtrudeOffsetDragMove(e); handleSweepOffsetDragMove(e); handleMoveCopy3DDragMove(e); handleMoveCopy3DGizmoHover(e); handleSnapMoveHover(e) }}
       onMouseUp={e=>{ }}
     >
 
@@ -10046,11 +10453,13 @@ const App3D = forwardRef(function App3D(props, ref) {
               {id:'join3d',   label:'JOIN',    color:'#FFEE88'},
               {id:'loft3d',   label:'LOFT',    color:'#FBDA2D'},
               {id:'loftcutout', label:'LOFT CUT', color:'#53D3E4'},
+              {id:'sweep3d',    label:'SWEEP',    color:'#7ED957'},
               {id:'movecopy3d', label:'MOVE/COPY', color:'#FF9800'},
             ].map(({id,label,color})=>{
               const isActive = id==='fillet3d' ? tool==='fillet3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
                 : id==='loft3d' ? ((tool==='loft3d' || !!loftState) && loftTool!=='loftcutout')
                 : id==='loftcutout' ? ((tool==='loft3d' || !!loftState) && loftTool==='loftcutout')
+                : id==='sweep3d' ? (tool==='sweep3d' || !!sweepState)
                 : id==='movecopy3d' ? tool==='movecopy3d'
                 : extrudeTool===id
               return (
@@ -10063,6 +10472,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                   else if (id==='join3d') activateJoin3DTool()
                   else if (id==='loft3d') activateLoft3DTool('loft')
                   else if (id==='loftcutout') activateLoft3DTool('loftcutout')
+                  else if (id==='sweep3d') activateSweep3DTool()
                   else if (id==='movecopy3d') activateMoveCopy3DTool()
                 }}
                 style={{...btnBase, flexDirection:'column', gap:1,
@@ -10386,7 +10796,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             onScaleChange={handleScaleChange}
             onPlaneClick={handlePlaneClick}
             onFaceClick={handleFaceClick}
-            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode) || (tool==='mirror3d' && mirror3dSelectionDone) || (tool==='loft3d' && !loftState) || tool==='exportfacedxf'}
+            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode) || (tool==='mirror3d' && mirror3dSelectionDone) || (tool==='loft3d' && !loftState) || (tool==='sweep3d' && !sweepState) || tool==='exportfacedxf'}
             mirrorPlanePickArmed={tool==='mirror3d' && mirror3dSelectionDone && !mirror3dOffsetBase}
             dxfPickMode={tool==='exportfacedxf'}
             dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : []}
@@ -10637,6 +11047,41 @@ const App3D = forwardRef(function App3D(props, ref) {
               : 'Click a work plane or face'}
             onStepBack={step => {
               if (step === 1) resetLoft3D()
+            }}
+          />
+
+          {/* ── SmartStep bar: overlays bottom of viewport during Sweep ── */}
+          <SmartStepBar
+            op={(tool==='sweep3d' || sweepState) ? 'SWEEP' : null}
+            steps={[{ id:1, label:'Sketch Path' }, { id:2, label:'Sketch Profile' }]}
+            currentStep={sweepState?.path ? 2 : 1}
+            color="#7ED957"
+            hint={!sweepState
+              ? (sweepOffsetBase
+                  ? 'Move the mouse or type a distance, Enter to confirm'
+                  : sweepOffsetMode
+                    ? 'Click a plane or face to offset from'
+                    : 'Click a work plane or face')
+              : !sweepState.path
+                ? `Draw an open path, then Finish${sketchMode ? ' · sketching' : ''}`
+                : `Draw a closed profile, then Finish${sketchMode ? ' · sketching' : ''}`}
+            action={
+              !sweepState
+                ? [
+                    sweepOffsetBase
+                      ? { label:'✓ Use Plane', enabled:true, onClick:commitSweepOffset,
+                          popover: <OffsetDistancePopover color="#7ED957"
+                            value={sweepOffsetDistInput} onChange={setSweepOffsetDistInput}/> }
+                      : { label: sweepOffsetMode ? '✕ Cancel Offset' : '+ Offset Plane', enabled:true,
+                          onClick:()=>{
+                            if (sweepOffsetMode) { setSweepOffsetMode(false); setSweepOffsetBase(null) }
+                            else setSweepOffsetMode(true)
+                          }},
+                  ]
+                : null
+            }
+            onStepBack={step => {
+              if (step === 1) resetSweep3D()
             }}
           />
 

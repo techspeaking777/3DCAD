@@ -299,6 +299,193 @@ export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
   return resolveNestedHoles(profiles)
 }
 
+/**
+ * Detect the single connected chain of line/arc/spline segments a user
+ * sketched as a Sweep path — same segment/adjacency-building approach as
+ * detectProfiles above, but a dead end is SUCCESS here (the chain's other
+ * end), not failure, and the walk starts from a true endpoint (a node only
+ * one segment touches) rather than an arbitrary segment, so it never begins
+ * partway along the chain. A closed loop is also accepted as a (unusual but
+ * legitimate) path — it's just never force-closed the way detectProfiles's
+ * loops are; whatever the user actually drew is reported as-is. Circles
+ * aren't accepted as a path source (see cadWorker.js's buildSweep/makePath —
+ * a circular sweep path isn't supported in this version).
+ *
+ * Returns { pts, curveSegments } (curveSegments possibly absent — same
+ * shape as one entry of detectProfiles's own output, so cadWorker.js can
+ * reuse the identical curve-rebuilding code) on success, or null if the
+ * plane's sketch geometry isn't exactly one connected chain (none found, or
+ * more than one disconnected chain/loop present).
+ */
+export function detectPath(lines, arcs, planeId, circles=[], splines=[]) {
+  const notConstruction = e => e.style !== 'construction' || e.includedEdge
+  const planeLines = lines.filter(l => (l.plane || 'XY') === planeId && notConstruction(l))
+  const planeArcs  = arcs.filter(a => (a.plane || 'XY') === planeId && notConstruction(a))
+  const planeOpenSplines = splines.filter(sp =>
+    (sp.plane || 'XY') === planeId && !sp.closed && sp.points && sp.points.length >= 2 && notConstruction(sp))
+
+  if (planeLines.length === 0 && planeArcs.length === 0 && planeOpenSplines.length === 0) return null
+
+  const segs = []
+  planeLines.forEach(l => segs.push({ p1:{x:l.x1,y:l.y1}, p2:{x:l.x2,y:l.y2}, kind:'line', ref:l }))
+  planeArcs.forEach(a => {
+    const p1 = { x: a.cx+Math.cos(a.startAngle)*a.r, y: a.cy+Math.sin(a.startAngle)*a.r }
+    const p2 = { x: a.cx+Math.cos(a.endAngle  )*a.r, y: a.cy+Math.sin(a.endAngle  )*a.r }
+    segs.push({ p1, p2, kind:'arc', ref:a })
+  })
+  planeOpenSplines.forEach(sp => {
+    const p1 = sp.points[0]
+    const p2 = sp.points[sp.points.length-1]
+    segs.push({ p1:{x:p1.x,y:p1.y}, p2:{x:p2.x,y:p2.y}, kind:'spline', ref:sp })
+  })
+
+  const nodes = []
+  const segNodes = []
+  function findOrAdd(pt) {
+    for (let i = 0; i < nodes.length; i++) {
+      if (Math.hypot(nodes[i].x-pt.x, nodes[i].y-pt.y) < CLOSE_TOL) return i
+    }
+    nodes.push({...pt})
+    return nodes.length - 1
+  }
+  segs.forEach(seg => {
+    const i1 = findOrAdd(seg.p1)
+    const i2 = findOrAdd(seg.p2)
+    segNodes.push([i1, i2])
+  })
+
+  const adj = Array.from({length:nodes.length}, ()=>[])
+  segNodes.forEach(([n1,n2], si) => { adj[n1].push(si); adj[n2].push(si) })
+
+  function otherNode(si, node) {
+    const [na, nb] = segNodes[si]
+    return na === node ? nb : na
+  }
+
+  // Prefer a true endpoint (a node exactly one segment touches) as the
+  // walk's start — beginning partway along the chain would only ever
+  // discover half of it before hitting the (unreachable-from-there) far end.
+  // No degree-1 node at all means every node has 2+ connections — try
+  // walking from segment 0 anyway, in case the whole sketch is one closed
+  // loop (a legitimate path, just with no true endpoint to prefer).
+  //
+  // Specifically the LAST degree-1 node found (not the first) — node indices
+  // follow draw order, so for a simple open chain this is the point the user
+  // drew LAST (finished the chain on). pts[0] ends up there, which is what
+  // computeSweepProfilePlane (App3D.jsx) anchors the profile plane to — so
+  // the profile is sketched right where the user just finished drawing, and
+  // the ghost ref built from the far end (pts[last]) points back to where
+  // they started instead of forward to where they already are.
+  let startSeg = 0
+  let startNode = 0
+  for (let n = 0; n < nodes.length; n++) {
+    if (adj[n].length === 1) { startSeg = adj[n][0]; startNode = n }
+  }
+
+  const usedSegs = new Set()
+  function walkChain(seg0, startNode0) {
+    const path = [seg0]
+    usedSegs.add(seg0)
+    const [na, nb] = segNodes[seg0]
+    let prevNode = startNode0 === nb ? nb : na
+    let curNode = prevNode === na ? nb : na
+    for (let steps = 0; steps < segs.length; steps++) {
+      if (curNode === startNode) return path   // closed loop — also a valid path
+      const candidates = adj[curNode].filter(si => !usedSegs.has(si))
+      if (candidates.length === 0) return path   // dead end — the chain's far end, SUCCESS
+      let next = candidates[0]
+      if (candidates.length > 1) {
+        // Same junction-disambiguation heuristic as detectProfiles's
+        // walkLoop — prefer whichever candidate continues most nearly
+        // straight ahead from the direction we arrived on.
+        const inDir = { x: nodes[curNode].x - nodes[prevNode].x, y: nodes[curNode].y - nodes[prevNode].y }
+        const inLen = Math.hypot(inDir.x, inDir.y) || 1
+        let bestScore = -Infinity
+        for (const si of candidates) {
+          const other = otherNode(si, curNode)
+          const outDir = { x: nodes[other].x - nodes[curNode].x, y: nodes[other].y - nodes[curNode].y }
+          const outLen = Math.hypot(outDir.x, outDir.y) || 1
+          const score = (inDir.x*outDir.x + inDir.y*outDir.y) / (inLen*outLen)
+          if (score > bestScore) { bestScore = score; next = si }
+        }
+      }
+      usedSegs.add(next)
+      path.push(next)
+      prevNode = curNode
+      curNode = otherNode(next, curNode)
+    }
+    return path
+  }
+
+  const chain = walkChain(startSeg, startNode)
+
+  // Every segment on this plane must belong to the ONE chain just walked —
+  // a leftover unused segment means a second, disconnected chain exists,
+  // which is ambiguous ("which one is the path?") rather than worth
+  // silently guessing at.
+  if (usedSegs.size !== segs.length) return null
+
+  // Convert the walked chain into an ordered {x,y} point list, exactly the
+  // same per-segment-kind logic detectProfiles uses for its own loops
+  // (real-curve sampling + curveSegments metadata so cadWorker.js can
+  // rebuild true arcs/splines instead of polygon facets).
+  const pts = []
+  // The walk may have started from either end of chain[0] (see walkChain's
+  // startNode0 handling above) — read the true start node back off segNodes
+  // rather than assuming index 0, or a walk that began at nb would silently
+  // emit its very first point backwards.
+  const [chain0a, chain0b] = segNodes[chain[0]]
+  let prevNode = (startNode === chain0b) ? chain0b : chain0a
+  chain.forEach(si => {
+    const [na, nb] = segNodes[si]
+    const seg = segs[si]
+    const forward = (na === prevNode)
+    if (seg.kind === 'line') {
+      pts.push(forward ? {...nodes[na]} : {...nodes[nb]})
+    } else if (seg.kind === 'spline') {
+      const sp = seg.ref
+      const raw = sp.polyline ? sp.points.map(p=>({x:p.x,y:p.y})) : sampleSpline(sp.points, false, 16)
+      const ordered = forward ? raw : [...raw].reverse()
+      ordered[0] = forward ? {...nodes[na]} : {...nodes[nb]}
+      const startIdx = pts.length
+      for (let i=0; i<ordered.length-1; i++) pts.push(ordered[i])
+      if (!sp.polyline) {
+        if (!pts.curveSegments) pts.curveSegments = []
+        const controlPoints = (forward ? sp.points : [...sp.points].reverse()).map(p=>({x:p.x,y:p.y}))
+        controlPoints[0] = forward ? {...nodes[na]} : {...nodes[nb]}
+        controlPoints[controlPoints.length-1] = forward ? {...nodes[nb]} : {...nodes[na]}
+        pts.curveSegments.push({ type:'spline', startIdx, count: ordered.length-1, controlPoints })
+      }
+    } else {
+      const arc = seg.ref
+      let a0 = forward ? arc.startAngle : arc.endAngle
+      let a1 = forward ? arc.endAngle   : arc.startAngle
+      if (forward && a1 < a0) a1 += Math.PI*2
+      if (!forward && a0 < a1) a0 += Math.PI*2
+      const steps = Math.max(4, Math.round(Math.abs(a1-a0) / (Math.PI/16)))
+      const startIdx = pts.length
+      for (let i=0; i<steps; i++) {
+        const a = a0 + (a1-a0)*i/steps
+        pts.push({ x: arc.cx+Math.cos(a)*arc.r, y: arc.cy+Math.sin(a)*arc.r })
+      }
+      if (!pts.curveSegments) pts.curveSegments = []
+      pts.curveSegments.push({ type:'arc', startIdx, count: steps, cx:arc.cx, cy:arc.cy, r:arc.r, startAngle:a0, endAngle:a1 })
+    }
+    prevNode = forward ? nb : na
+  })
+  // The point-building loop above only ever pushes each segment's START
+  // point (detectProfiles gets away with this because its last point is
+  // supplied by closing back onto pts[0] — a path has no such closing
+  // segment, so its true final point, the chain's far end, needs pushing
+  // explicitly). `prevNode` already holds it: the forEach above reassigns
+  // it to whichever node each segment arrives at, so after the loop it's
+  // sitting on the very last node reached.
+  pts.push({...nodes[prevNode]})
+
+  if (pts.length < 2) return null
+  return { pts, curveSegments: pts.curveSegments }
+}
+
 // Fusion-style hole recognition: a closed loop fully nested inside another
 // closed loop on the same plane/sketch (e.g. a washer's inner circle, or a
 // letter's counter in O/A/8/etc.) is a HOLE of the outer loop, not its own

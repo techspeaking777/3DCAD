@@ -351,12 +351,13 @@ function clampCutDepth(cut, baseParams) {
 // this is the cut-shape counterpart, shared by every op-replay loop
 // (subtract, mirrorShape, joinShapes, exportSTL) so all four stay in sync.
 // isCut adds a 1mm protrusion so a cut ending flush with a solid's face
-// doesn't fail on coincident-face booleans — see extendLoftCutProfiles for
-// the loft-shaped-cut equivalent (buildRevolve has no such treatment yet).
+// doesn't fail on coincident-face booleans — see extendLoftCutProfiles and
+// extendSweepCutPath for the loft- and sweep-shaped-cut equivalents
+// (buildRevolve has no such treatment yet).
 function buildCutShape(cut) {
   return cut.profiles ? buildLoft({ ...cut, profiles: extendLoftCutProfiles(cut.profiles) })
     : cut.axis ? buildRevolve(cut)
-    : cut.pathPts ? buildSweep(cut)
+    : cut.pathPts ? buildSweep(extendSweepCutPath(cut))
     : buildExtrude({ ...cut, isCut: true })
 }
 
@@ -379,6 +380,47 @@ function extendLoftCutProfiles(profiles) {
   extended[0].offsetMm -= LOFT_CUT_OVH_MM
   extended[extended.length - 1].offsetMm += LOFT_CUT_OVH_MM
   return extended
+}
+
+// Sweep-cut equivalent of extendLoftCutProfiles above — same "avoid an
+// exactly-coincident cut face" purpose, just for a path that can bend
+// (arcs/splines) instead of loft's single shared normal, so there's no one
+// fixed direction to push a scalar offset along. Instead, INSERTS one new
+// straight-line point just past each end of the path, extended along the
+// chord to that end's immediate neighbor sample point — pathPts is already
+// densely sampled at both ends (detectPath walks arcs/splines into many
+// close points), so that chord is already a close approximation of the true
+// tangent there, without needing exact arc/spline tangent math.
+//
+// Deliberately INSERTS rather than moving the existing endpoint in place:
+// if pts[0] (or the last point) is itself part of a curveSegments entry
+// (an arc/spline), emitArc/emitBezierChain compute their emitted geometry
+// from that segment's OWN stored parameters (cx/cy/r/angles, or control
+// points) — never from the raw pts array — so silently relocating pts[0]
+// would leave the sketcher's initial movePointerTo() pointing somewhere the
+// curve's actual emitted start no longer matches, breaking wire continuity.
+// Inserting a new plain point instead only ever adds an extra straight
+// segment beyond the curve's untouched true endpoint, so curveSegments'
+// own parametric data — and every startIdx after the prepended point —
+// just needs shifting by the one new index; nothing about the curves
+// themselves changes shape.
+const SWEEP_CUT_OVH_MM = 1
+function extendSweepCutPath(cut) {
+  const pts = cut.pathPts
+  if (!pts || pts.length < 2) return cut
+  const ovhPx = SWEEP_CUT_OVH_MM * SCALE
+  const beyond = (anchor, neighbor) => {
+    const dx = anchor.x - neighbor.x, dy = anchor.y - neighbor.y
+    const len = Math.hypot(dx, dy) || 1
+    return { x: anchor.x + dx/len*ovhPx, y: anchor.y + dy/len*ovhPx }
+  }
+  const preStart = beyond(pts[0], pts[1])
+  const postEnd = beyond(pts[pts.length-1], pts[pts.length-2])
+  const extended = [preStart, ...pts, postEnd]
+  if (pts.curveSegments) {
+    extended.curveSegments = pts.curveSegments.map(seg => ({ ...seg, startIdx: seg.startIdx + 1 }))
+  }
+  return { ...cut, pathPts: extended }
 }
 
 let ocReady = false

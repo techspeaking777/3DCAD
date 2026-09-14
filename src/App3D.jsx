@@ -60,6 +60,10 @@ const SOLID_ICON_COMPONENTS = {
   extrude: IconExtrude3D, cutout: IconCutout3D, fillet3d: IconFillet3D,
   mirror3d: IconMirror3D, loft3d: IconLoft3D, join3d: IconJoin3D, movecopy3d: IconMoveCopy3D,
   sweep3d: IconSweep3D, revolve: IconRevolve3D,
+  // Reuses the additive Sweep icon's shape, rendered in Cutout's color —
+  // same "one glyph, color signals cut variant" convention loftcutout/
+  // revolvecut use.
+  sweepcut: IconSweep3D,
   // Reuses the additive Revolve icon's shape, rendered in Cutout's color —
   // same "one glyph, color signals cut variant" convention loftcutout uses.
   revolvecut: IconRevolve3D,
@@ -175,6 +179,17 @@ function buildCutWorkerParams(cutFeat) {
       axis: cutFeat.revolveAxis, angleDeg: cutFeat.angleDeg ?? 360, reverse: !!cutFeat.revolveReverse,
       circle: cutFeat.profilePts.circleMeta || null,
       ...facePlaneParams(cutFeat.facePlane),
+    }
+  }
+  // Sweep cutout (see commitSweep's isSweepCut branch) — normal/origin/uAxis
+  // are already plain mm/unit-vector arrays on the feature (same shape
+  // buildBaseWorkerParams' own sweep branch reads off a `solid` object), so
+  // no facePlaneParams wrapping needed, same reasoning as the loft branch above.
+  if (cutFeat.pathPts) {
+    return {
+      pathPts: cutFeat.pathPts, planeId: cutFeat.planeId,
+      normal: cutFeat.normal, origin: cutFeat.origin, uAxis: cutFeat.uAxis,
+      profilePts: cutFeat.profilePts, profileCircle: cutFeat.profileCircle,
     }
   }
   return {
@@ -481,6 +496,34 @@ function loftSweepBoxPx(profiles, basis) {
         .addScaledVector(basis.vAxis, -pt.y))
     })
   })
+  return new THREE.Box3().setFromPoints(allPts)
+}
+
+// Cheap bounding-box estimate for a sweep cutout's swept volume — same
+// candidate-filter role as revolveSweepBoxPx/loftSweepBoxPx above; OCC does
+// the real cut. Unlike a loft (profile only translates along one fixed
+// normal) or a revolve (profile only rotates around one fixed axis), a
+// sweep path can bend — an arc or spline segment twists the profile
+// plane's true orientation along it. Rather than reconstructing that
+// rotated frame at every sample point, this inflates every world-space
+// point along the path by the profile's own max radius from its local
+// origin (where the profile plane sits on the path, per
+// computeSweepProfilePlane) — looser than tracking the true rotated frame,
+// but a candidate filter only needs to stay conservative: a false positive
+// here just costs one harmless extra intersectsBox check that OCC then
+// correctly finds no real overlap for. path.pts is already densely sampled
+// for arc/spline segments by detectPath, so no extra curve-walking here.
+function sweepPathBoxPx(path, profile, basis) {
+  let radius = 0
+  for (const p of profile.pts) radius = Math.max(radius, Math.hypot(p.x, p.y))
+  if (profile.circle) radius = Math.max(radius, Math.hypot(profile.circle.cx, profile.circle.cy) + profile.circle.r)
+
+  const allPts = []
+  for (const p of path.pts) {
+    const w = basis.sketchToWorld(p.x, p.y)
+    const v = new THREE.Vector3(w.x, w.y, w.z)
+    allPts.push(v.clone().addScalar(radius), v.clone().addScalar(-radius))
+  }
   return new THREE.Box3().setFromPoints(allPts)
 }
 
@@ -922,6 +965,10 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           // instead of `profilePts`/`planeId` — needs its own UI branches
           // wherever the tree assumed every cutout has the plain shape.
           const isLoftCutout = isExtrude && feat.operation === 'cutout' && !!feat.profiles
+          // Same reasoning as isLoftCutout, for a sweep cutout — an ordinary
+          // operation:'cutout' feature (see commitSweep's isSweepCut branch)
+          // carrying pathPts instead of a linear depthMm/direction.
+          const isSweepCut = isExtrude && feat.operation === 'cutout' && !!feat.pathPts
           const isLocked = !!feat.joinedInto
           // Only rows that own an independent solid can be hidden — a cutout
           // or fillet modifies an EXISTING body in place rather than creating
@@ -1080,7 +1127,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                             padding:'1px 3px', display:'flex', alignItems:'center'}}
                         ><PencilGlyph/></button>
                       )}
-                      {!sketchMode && !isMirror && !isJoin && !isLoft && !isLoftCutout && !isSweep && (
+                      {!sketchMode && !isMirror && !isJoin && !isLoft && !isLoftCutout && !isSweep && !isSweepCut && (
                         <button title={feat.operation==='cutout' ? 'Edit cutout extent' : 'Edit extrusion extent'}
                           onClick={e=>{e.stopPropagation(); onEditExtent(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
@@ -1191,8 +1238,21 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                 </div>
               )}
 
+              {/* Sweep cutout subtitle — same reasoning as the plain Sweep
+                  subtitle above (no single depth/angle to show), just the
+                  cutout accent color. */}
+              {isSweepCut && (
+                <div style={{marginLeft:20, marginTop:3}}>
+                  <div style={{display:'flex', alignItems:'center', gap:5}}>
+                    <div style={{width:8,height:8,borderRadius:'50%',
+                      background:feat.color||'#e05a4e', flexShrink:0}}/>
+                    <span style={{color:'#8fa0b8', fontSize:10}}>sweep cutout</span>
+                  </div>
+                </div>
+              )}
+
               {/* Extrude subtitle: colour + depth + operation */}
-              {isExtrude && !isMirror && !isJoin && !isLoft && !isLoftCutout && !isSweep && (
+              {isExtrude && !isMirror && !isJoin && !isLoft && !isLoftCutout && !isSweep && !isSweepCut && (
                 <div style={{marginLeft:20, marginTop:3}}>
                   <div style={{display:'flex', alignItems:'center', gap:5}}>
                     <div style={{width:8,height:8,borderRadius:'50%',
@@ -5553,6 +5613,10 @@ const App3D = forwardRef(function App3D(props, ref) {
   // loftState plays for Loft (tool alone isn't enough — enterSketch always
   // resets tool to the active drawing tool once sketching starts).
   const [sweepState, setSweepState] = useState(null)
+  // 'sweep' (additive) | 'sweepcut' — mirrors loftTool's split. Persists
+  // across resetSweep3D() the same way loftTool persists across
+  // resetLoft3D(), only changing on the next activateSweep3DTool(op) call.
+  const [sweepTool, setSweepTool] = useState('sweep')
 
   function activateLoft3DTool(op = 'loft') {
     resetSelection()
@@ -5589,7 +5653,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     setLoftEditingFeatureId(null)
   }
 
-  function activateSweep3DTool() {
+  function activateSweep3DTool(op = 'sweep') {
     resetSelection()
     resetDrawState()
     restoreHiddenEditSolid()
@@ -5602,6 +5666,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       viewport3dRef.current?.restoreSavedView()
     }
     setTool('sweep3d')
+    setSweepTool(op)
     setExtrudeTool(null)
     setExtrudeState(null)
     setEditingFeatureId(null)
@@ -5963,6 +6028,9 @@ const App3D = forwardRef(function App3D(props, ref) {
   // sketched AT that plane with no offset).
   async function commitSweep(path, profile) {
     const basis = sweepState.basis
+    // Captured before resetSweep3D() runs — same ordering commitLoft uses
+    // for isLoftCutout, since sweepTool itself outlives the reset anyway.
+    const isSweepCut = sweepTool === 'sweepcut'
     feat3d.commit(features)
     resetSweep3D()
     setTool('select')
@@ -5980,6 +6048,48 @@ const App3D = forwardRef(function App3D(props, ref) {
     const origin = [pxToMm(basis.origin.x), pxToMm(basis.origin.y), pxToMm(basis.origin.z)]
     const uAxis  = [basis.uAxis.x, basis.uAxis.y, basis.uAxis.z]
     const vAxis  = [basis.vAxis.x, basis.vAxis.y, basis.vAxis.z]
+
+    // Subtracts the swept shape from whatever solid(s) it overlaps, instead
+    // of adding a new one — same "additive vs cutout" split as commitLoft's
+    // own isLoftCutout branch, just for a sweep-shaped cut. Always exactly
+    // one swept volume (never a per-profile array like plain Cutout), so —
+    // per Loft Cut's own precedent — every bbox-overlapping candidate is cut
+    // directly, no cutoutTargetPicker confirm step. Sweep has no edit path
+    // at all today (no sweepEditingFeatureId), so unlike Loft Cut there's no
+    // re-edit/groupId branch to port here — every sweep cut is created fresh.
+    if (isSweepCut) {
+      const cutParams = {
+        pathPts: path.pts, planeId, normal, origin, uAxis,
+        profilePts: profile.pts, profileCircle: profile.circle,
+      }
+      try {
+        const sweepBox = sweepPathBoxPx(path, profile, basis)
+        const candidates = solids.filter(s => s.operation !== 'cutout' && s.group)
+        const targets = candidates.filter(s => sweepBox.intersectsBox(new THREE.Box3().setFromObject(s.group)))
+        if (targets.length === 0) throw new Error('No base solid to cut from')
+
+        const newFeats = []
+        for (let target of targets) {
+          const meshData = await cadEngine.subtract({ baseSolidId: target.id, cut: cutParams, base: buildBaseWorkerParams(target) })
+          const group = replicadMeshToThree(meshData, target.color, target.id)
+          target = { ...target, group }
+          setSolids(prev => prev.map(s => s.id === target.id ? target : s))
+          newFeats.push({
+            id: `sweepcut-${target.id}-${Date.now()}-${newFeats.length}`,
+            type: 'extrude', operation: 'cutout', name: nextCutoutName(),
+            solidId: target.id, pathPts: path.pts, planeId, normal, origin, uAxis, vAxis,
+            profilePts: profile.pts, profileCircle: profile.circle, color: '#e05a4e',
+          })
+          await rebuildDependentMirrors(target)
+        }
+        setFeatures(prev => [...prev, ...newFeats])
+      } catch (err) {
+        console.error('Sweep cut failed:', err)
+        setCadError(`Sweep cut failed: ${err.message || String(err)}`)
+        setTimeout(() => setCadError(null), 6000)
+      }
+      return
+    }
 
     try {
       const solidId = Date.now()
@@ -10479,11 +10589,11 @@ const App3D = forwardRef(function App3D(props, ref) {
               [{id:'extrude',  label:'EXTRUDE', color:'#FBDA2D'}, {id:'cutout',     label:'CUTOUT',      color:'#53D3E4'}],
               [{id:'revolve',  label:'REVOLVE', color:'#FBDA2D'}, {id:'revolvecut', label:'REVOLVE CUT', color:'#53D3E4'}],
               [{id:'loft3d',   label:'LOFT',    color:'#FBDA2D'}, {id:'loftcutout', label:'LOFT CUT',    color:'#53D3E4'}],
+              [{id:'sweep3d',  label:'SWEEP',   color:'#7ED957'}, {id:'sweepcut',   label:'SWEEP CUT',   color:'#53D3E4'}],
               // No cutout counterpart — full-width rows, unchanged from before.
               [{id:'fillet3d', label:'FILLET',  color:'#A470F2'}],
               [{id:'mirror3d', label:'MIRROR',  color:'#8E65F3'}],
               [{id:'join3d',   label:'JOIN',    color:'#FFEE88'}],
-              [{id:'sweep3d',    label:'SWEEP',    color:'#7ED957'}],
               [{id:'movecopy3d', label:'MOVE/COPY', color:'#FF9800'}],
             ].map((row, rowIdx) => {
               const paired = row.length > 1
@@ -10493,7 +10603,8 @@ const App3D = forwardRef(function App3D(props, ref) {
                   const isActive = id==='fillet3d' ? tool==='fillet3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
                     : id==='loft3d' ? ((tool==='loft3d' || !!loftState) && loftTool!=='loftcutout')
                     : id==='loftcutout' ? ((tool==='loft3d' || !!loftState) && loftTool==='loftcutout')
-                    : id==='sweep3d' ? (tool==='sweep3d' || !!sweepState)
+                    : id==='sweep3d' ? ((tool==='sweep3d' || !!sweepState) && sweepTool!=='sweepcut')
+                    : id==='sweepcut' ? ((tool==='sweep3d' || !!sweepState) && sweepTool==='sweepcut')
                     : id==='movecopy3d' ? tool==='movecopy3d'
                     : extrudeTool===id
                   const iconSize = paired ? 28 : 40
@@ -10507,7 +10618,8 @@ const App3D = forwardRef(function App3D(props, ref) {
                       else if (id==='join3d') activateJoin3DTool()
                       else if (id==='loft3d') activateLoft3DTool('loft')
                       else if (id==='loftcutout') activateLoft3DTool('loftcutout')
-                      else if (id==='sweep3d') activateSweep3DTool()
+                      else if (id==='sweep3d') activateSweep3DTool('sweep')
+                      else if (id==='sweepcut') activateSweep3DTool('sweepcut')
                       else if (id==='movecopy3d') activateMoveCopy3DTool()
                     }}
                     style={{...btnBase, flexDirection:'column', gap:1,
@@ -11093,10 +11205,10 @@ const App3D = forwardRef(function App3D(props, ref) {
 
           {/* ── SmartStep bar: overlays bottom of viewport during Sweep ── */}
           <SmartStepBar
-            op={(tool==='sweep3d' || sweepState) ? 'SWEEP' : null}
+            op={(tool==='sweep3d' || sweepState) ? (sweepTool==='sweepcut' ? 'SWEEP CUT' : 'SWEEP') : null}
             steps={[{ id:1, label:'Sketch Path' }, { id:2, label:'Sketch Profile' }]}
             currentStep={sweepState?.path ? 2 : 1}
-            color="#7ED957"
+            color={sweepTool==='sweepcut' ? '#53D3E4' : '#7ED957'}
             hint={!sweepState
               ? (sweepOffsetBase
                   ? 'Move the mouse or type a distance, Enter to confirm'
@@ -11111,7 +11223,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                 ? [
                     sweepOffsetBase
                       ? { label:'✓ Use Plane', enabled:true, onClick:commitSweepOffset,
-                          popover: <OffsetDistancePopover color="#7ED957"
+                          popover: <OffsetDistancePopover color={sweepTool==='sweepcut' ? '#53D3E4' : '#7ED957'}
                             value={sweepOffsetDistInput} onChange={setSweepOffsetDistInput}/> }
                       : { label: sweepOffsetMode ? '✕ Cancel Offset' : '+ Offset Plane', enabled:true,
                           onClick:()=>{

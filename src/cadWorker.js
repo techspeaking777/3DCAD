@@ -355,7 +355,9 @@ function clampCutDepth(cut, baseParams) {
 // the loft-shaped-cut equivalent (buildRevolve has no such treatment yet).
 function buildCutShape(cut) {
   return cut.profiles ? buildLoft({ ...cut, profiles: extendLoftCutProfiles(cut.profiles) })
-    : cut.axis ? buildRevolve(cut) : buildExtrude({ ...cut, isCut: true })
+    : cut.axis ? buildRevolve(cut)
+    : cut.pathPts ? buildSweep(cut)
+    : buildExtrude({ ...cut, isCut: true })
 }
 
 // Pushes a loft cutout's first/last profile 1mm further out along the

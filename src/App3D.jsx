@@ -1484,8 +1484,15 @@ const App3D = forwardRef(function App3D(props, ref) {
   // viewTransform kept as a dummy so existing helper functions that read .scale
   // continue to work — we sync .scale from the Three.js camera via onScaleChange.
   const [viewTransform,setViewTransform]=useState({x:0,y:0,scale:1})
-  const [canvasSize,setCanvasSize]=useState({w:window.innerWidth-56,h:window.innerHeight-52})
+  const [canvasSize,setCanvasSize]=useState({w:window.innerWidth,h:window.innerHeight})
   const rootDivRef=useRef(null)
+  // The div that directly wraps <Viewport3D> (flex:1, no padding/border) — its
+  // own clientWidth/clientHeight IS the canvas area, with no arithmetic
+  // needed. Kept separate from rootDivRef (the whole-app container used for
+  // keyboard focus/drag tracking) specifically so this measurement can never
+  // be thrown off by sidebar/toolbar chrome resizing — see canvasSize's
+  // resize effect below for the bug this replaced.
+  const canvasMountRef=useRef(null)
   const viewTransformRef=useRef({x:0,y:0,scale:1})
   const isPanningRef=useRef(false)
   const lastPanPosRef=useRef({x:0,y:0})
@@ -1497,15 +1504,22 @@ const App3D = forwardRef(function App3D(props, ref) {
     zoomRef.scale=viewTransform.scale
   },[viewTransform])
 
-  // Measures the root div itself (via ResizeObserver) rather than
-  // window.innerWidth/innerHeight — when mounted inside AppShell's tab
-  // layout, the available area is smaller than the full window (a tab bar
-  // sits above it), so reading the window directly would overshoot by
-  // whatever the shell's chrome takes up.
+  // Measures canvasMountRef — the div that directly wraps <Viewport3D> —
+  // via ResizeObserver, rather than window.innerWidth/innerHeight (when
+  // mounted inside AppShell's tab layout, the available area is smaller
+  // than the full window) or the whole-app root minus hardcoded pixel
+  // constants (the previous approach: `el.clientWidth-56`/`-52`, guessing
+  // how much space the sidebar/toolbars ate up). That guess only stayed
+  // correct as long as the sidebar/toolbar chrome never changed size —
+  // resizing the sidebar's icons once threw it off, desyncing the Three.js
+  // canvas's actual resolution/aspect from what the 2D overlay and mouse-
+  // to-world math measured directly off their own container, which is what
+  // broke sketch line-preview alignment. Measuring the canvas's own
+  // container directly needs no arithmetic and can't go stale like that.
   useEffect(()=>{
-    const el=rootDivRef.current
+    const el=canvasMountRef.current
     if(!el) return
-    const update=()=>setCanvasSize({w:el.clientWidth-56,h:el.clientHeight-52})
+    const update=()=>setCanvasSize({w:el.clientWidth,h:el.clientHeight})
     update()
     const ro=new ResizeObserver(update)
     ro.observe(el)
@@ -10001,7 +10015,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       )}
 
       {/* ══ LEFT SIDEBAR ══════════════════════════════════════════════════════ */}
-      <div style={{width: sketchMode ? 72 : 112, background:'#1a1a2e',display:'flex',flexDirection:'column',
+      <div style={{width: sketchMode ? 72 : 84, background:'#1a1a2e',display:'flex',flexDirection:'column',
         padding:'8px 4px',gap:4,overflowY:'auto',borderRight:'1px solid #2a2a4a',
         transition:'background 0.3s, width 0.2s'}}>
 
@@ -10051,17 +10065,17 @@ const App3D = forwardRef(function App3D(props, ref) {
                   else if (id==='loftcutout') activateLoft3DTool('loftcutout')
                   else if (id==='movecopy3d') activateMoveCopy3DTool()
                 }}
-                style={{...btnBase, flexDirection:'column', gap:2,
-                  width:102, height:102,
+                style={{...btnBase, flexDirection:'column', gap:1,
+                  width:76, height:76,
                   background: isActive ? color+'33' : 'transparent',
                   outline: isActive ? `2px solid ${color}` : `1px dashed ${color}55`,
                   outlineOffset:'-2px',
                 }}>
                 {SOLID_ICON_COMPONENTS[id] ? (
-                  (() => { const Icon = SOLID_ICON_COMPONENTS[id]; return <Icon color={color}/> })()
+                  (() => { const Icon = SOLID_ICON_COMPONENTS[id]; return <Icon color={color} size={40}/> })()
                 ) : (
                   /* Placeholder icon — no vector icon for this one yet */
-                  <svg width="70" height="70" viewBox="0 0 70 70" fill="none">
+                  <svg width="40" height="40" viewBox="0 0 70 70" fill="none">
                     <rect x="7.5" y="7.5" width="55" height="55" rx="7.5"
                       stroke={color} strokeWidth="3" fill={color+'11'} strokeDasharray="7.5 5"/>
                     <text x="35" y="42.5" textAnchor="middle"
@@ -10070,7 +10084,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                     </text>
                   </svg>
                 )}
-                <span style={{fontSize:10,fontFamily:'monospace',color,letterSpacing:'0.04em'}}>
+                <span style={{fontSize:8,fontFamily:'monospace',color,letterSpacing:'0.01em'}}>
                   {label}
                 </span>
               </button>
@@ -10082,14 +10096,14 @@ const App3D = forwardRef(function App3D(props, ref) {
             {/* MEASURE — click an edge for its length/diameter, or two points
                 for the distance between them. Esc clears the current result. */}
             <button title="Measure" onClick={activateMeasureTool}
-              style={{...btnBase, flexDirection:'column', gap:2,
-                width:102, height:102,
+              style={{...btnBase, flexDirection:'column', gap:1,
+                width:76, height:76,
                 background: tool==='measure' ? '#4FC3F733' : 'transparent',
                 outline: tool==='measure' ? '2px solid #4FC3F7' : '1px dashed #4FC3F755',
                 outlineOffset:'-2px',
               }}>
-              <IconMeasure3D color="#4FC3F7"/>
-              <span style={{fontSize:10,fontFamily:'monospace',color:'#4FC3F7',letterSpacing:'0.04em'}}>
+              <IconMeasure3D color="#4FC3F7" size={40}/>
+              <span style={{fontSize:8,fontFamily:'monospace',color:'#4FC3F7',letterSpacing:'0.01em'}}>
                 MEASURE
               </span>
             </button>
@@ -10097,14 +10111,14 @@ const App3D = forwardRef(function App3D(props, ref) {
             {/* EXPORT FACE DXF — click a solid face to export its exact OCC
                 boundary (outer loop + every hole) as a .dxf file. */}
             <button title="Export Face as DXF" onClick={activateExportFaceDXFTool}
-              style={{...btnBase, flexDirection:'column', gap:2,
-                width:102, height:102,
+              style={{...btnBase, flexDirection:'column', gap:1,
+                width:76, height:76,
                 background: tool==='exportfacedxf' ? '#B47EFF33' : 'transparent',
                 outline: tool==='exportfacedxf' ? '2px solid #B47EFF' : '1px dashed #B47EFF55',
                 outlineOffset:'-2px',
               }}>
               <IconDXF/>
-              <span style={{fontSize:10,fontFamily:'monospace',color:'#B47EFF',letterSpacing:'0.04em'}}>
+              <span style={{fontSize:8,fontFamily:'monospace',color:'#B47EFF',letterSpacing:'0.01em'}}>
                 FACE DXF
               </span>
             </button>
@@ -10355,7 +10369,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           outline: sketchMode ? `3px solid ${getPlaneColor(activePlane)}` : 'none',
           outlineOffset: '-3px',
         }}>
-          <div style={{flex:1,overflow:'hidden',minWidth:0}}>
+          <div ref={canvasMountRef} style={{flex:1,overflow:'hidden',minWidth:0}}>
           <Viewport3D
             ref={viewport3dRef}
             width={canvasSize.w}

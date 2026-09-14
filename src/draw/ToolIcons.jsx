@@ -238,9 +238,9 @@ function GroundShadow({ color, cy = 66 }) {
   return <ellipse cx="35" cy={cy} rx="24" ry="4" stroke={color} strokeWidth="1" strokeDasharray="1 3" opacity="0.4"/>
 }
 
-export function IconExtrude3D({ color = '#FBDA2D' }) {
+export function IconExtrude3D({ color = '#FBDA2D', size = 70 }) {
   return (
-    <svg width="70" height="70" viewBox="0 0 70 70" fill="none" style={glow(color)}>
+    <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>
       <GroundShadow color={color}/>
       <IsoCube color={color}/>
       {/* dashed link + arrow rising straight off the top face, same as the
@@ -252,9 +252,9 @@ export function IconExtrude3D({ color = '#FBDA2D' }) {
   )
 }
 
-export function IconCutout3D({ color = '#53D3E4' }) {
+export function IconCutout3D({ color = '#53D3E4', size = 70 }) {
   return (
-    <svg width="70" height="70" viewBox="0 0 70 70" fill="none" style={glow(color)}>
+    <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>
       <GroundShadow color={color}/>
       {/* right/left faces solid; top face becomes a hollow frame (looking
           down into the cavity) instead of a filled cap */}
@@ -273,9 +273,9 @@ export function IconCutout3D({ color = '#53D3E4' }) {
   )
 }
 
-export function IconFillet3D({ color = '#A470F2' }) {
+export function IconFillet3D({ color = '#A470F2', size = 70 }) {
   return (
-    <svg width="70" height="70" viewBox="0 0 70 70" fill="none" style={glow(color)}>
+    <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>
       <GroundShadow color={color}/>
       <IsoCube color={color}/>
       {/* rounded-edge highlight replacing the cube's sharp front corner */}
@@ -287,9 +287,9 @@ export function IconFillet3D({ color = '#A470F2' }) {
   )
 }
 
-export function IconMirror3D({ color = '#8E65F3' }) {
+export function IconMirror3D({ color = '#8E65F3', size = 70 }) {
   return (
-    <svg width="70" height="70" viewBox="0 0 70 70" fill="none" style={glow(color)}>
+    <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>
       <line x1="35" y1="8" x2="35" y2="60" stroke={color} strokeWidth="1.5" strokeDasharray="3 3"/>
       <path d="M31 16 L25 19 L31 22" fill="none" stroke={color} strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"/>
       <path d="M39 16 L45 19 L39 22" fill="none" stroke={color} strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"/>
@@ -306,9 +306,9 @@ export function IconMirror3D({ color = '#8E65F3' }) {
   )
 }
 
-export function IconLoft3D({ color = '#FBDA2D' }) {
+export function IconLoft3D({ color = '#FBDA2D', size = 70 }) {
   return (
-    <svg width="70" height="70" viewBox="0 0 70 70" fill="none" style={glow(color)}>
+    <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>
       {/* small top profile, dashed extension flaring out to the lofted body's
           wide top opening */}
       <path d="M35 4 L41 8 L35 12 L29 8 Z" fill="none" stroke={color} strokeWidth="1.5" strokeDasharray="2 2"/>
@@ -328,9 +328,9 @@ export function IconLoft3D({ color = '#FBDA2D' }) {
   )
 }
 
-export function IconJoin3D({ color = '#FFEE88' }) {
+export function IconJoin3D({ color = '#FFEE88', size = 70 }) {
   return (
-    <svg width="70" height="70" viewBox="0 0 70 70" fill="none" style={glow(color)}>
+    <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>
       <GroundShadow color={color} cy="48"/>
       {/* two cubes interlocked at a shared seam, x=35 */}
       <path d="M24 22 L35 28 L24 34 L13 28 Z" fill={color} fillOpacity="0.35" stroke={color} strokeWidth="1.5"/>
@@ -346,9 +346,9 @@ export function IconJoin3D({ color = '#FFEE88' }) {
   )
 }
 
-export function IconMoveCopy3D({ color = '#FF9800' }) {
+export function IconMoveCopy3D({ color = '#FF9800', size = 70 }) {
   return (
-    <svg width="70" height="70" viewBox="0 0 70 70" fill="none" style={glow(color)}>
+    <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>
       <GroundShadow color={color}/>
       <IsoCube color={color}/>
       {/* 3 bold straight arrows radiating out from the cube's front-top
@@ -367,9 +367,9 @@ export function IconMoveCopy3D({ color = '#FF9800' }) {
   )
 }
 
-export function IconMeasure3D({ color = '#4FC3F7' }) {
+export function IconMeasure3D({ color = '#4FC3F7', size = 70 }) {
   return (
-    <svg width="70" height="70" viewBox="0 0 70 70" fill="none" style={glow(color)}>
+    <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>
       {/* extension lines */}
       <line x1="16" y1="14" x2="16" y2="48" stroke={color} strokeWidth="1.5" opacity="0.6"/>
       <line x1="54" y1="14" x2="54" y2="48" stroke={color} strokeWidth="1.5" opacity="0.6"/>

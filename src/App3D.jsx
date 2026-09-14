@@ -3845,8 +3845,15 @@ const App3D = forwardRef(function App3D(props, ref) {
       ))
     } else {
       const id = `sketch-${Date.now()}`
+      // Name computed OUTSIDE the updater — React 18 StrictMode double-
+      // invokes setState updaters in dev to catch impure ones, and
+      // nextSketchName() mutates featureCountRef as a side effect, so
+      // calling it inside the updater silently double-increments the
+      // counter (surfaced as "Sketch 2" showing up first). Same fix
+      // applied to every other nextXName() call site below.
+      const name = nextSketchName()
       setFeatures(prev => [...prev, {
-        id, type: 'sketch', name: nextSketchName(),
+        id, type: 'sketch', name,
         planeId, facePlane: isFace ? plane : null,
         visible: true, ...sketchGeom,
       }])
@@ -5280,13 +5287,14 @@ const App3D = forwardRef(function App3D(props, ref) {
       const group = replicadMeshToThree(meshData, memberSolids[0].color, newSolidId)
 
       const joinFeatId = `join-${newSolidId}`
+      const joinName = nextJoinName()   // outside the updater — see nextSketchName's comment
       setSolids(prev => [
         ...prev.filter(s => !memberSolids.some(m => m.id === s.id)),
         { id: newSolidId, group, operation: 'join', memberSolidIds: memberSolids.map(s => s.id), color: memberSolids[0].color },
       ])
       setFeatures(prev => [
         ...prev.map(f => memberFeats.some(m => m.id === f.id) ? { ...f, joinedInto: joinFeatId } : f),
-        { id: joinFeatId, type: 'extrude', name: nextJoinName(), operation: 'join',
+        { id: joinFeatId, type: 'extrude', name: joinName, operation: 'join',
           solidId: newSolidId, memberFeatureIds: selIds, memberSolidIds: memberSolids.map(s => s.id),
           color: memberSolids[0].color },
       ])
@@ -5634,8 +5642,9 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (editingId) {
         setFeatures(prev => prev.map(f => f.id === editingId ? { ...f, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled } : f))
       } else {
+        const loftName = nextLoftName()   // outside the updater — see nextSketchName's comment
         setFeatures(prev => [...prev, {
-          id: `loft-${solidId}`, type: 'extrude', operation: 'loft', name: nextLoftName(),
+          id: `loft-${solidId}`, type: 'extrude', operation: 'loft', name: loftName,
           solidId, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled, color,
         }])
       }
@@ -5839,8 +5848,9 @@ const App3D = forwardRef(function App3D(props, ref) {
       sourceSolidId: sourceSolid.id, mirrorPlane: planeParams,
       color: sourceSolid.color, planeId: null, facePlane: null,
     }])
+    const mirrorName = nextMirrorName()   // outside the updater — see nextSketchName's comment
     setFeatures(prev => [...prev, {
-      id: `mirror-${newSolidId}`, type: 'extrude', name: nextMirrorName(),
+      id: `mirror-${newSolidId}`, type: 'extrude', name: mirrorName,
       solidId: newSolidId, operation: 'mirror',
       sourceSolidId: sourceSolid.id, sourceFeatureId: sourceFeat.id,
       mirrorPlane: planeParams, color: sourceSolid.color,
@@ -6170,9 +6180,14 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (editingId) {
         setFeatures(prev => prev.map(f => f.id === editingId ? { ...f, radius } : f))
       } else {
+        // Name computed OUTSIDE the updater — see nextSketchName's comment.
+        // This is the exact case that produces "Fillet 2"/"Chamfer 2" as the
+        // FIRST feature of that type in a project: StrictMode's double-
+        // invoke doubled the counter increment every time.
+        const name = mode === 'chamfer' ? nextChamferName() : nextFilletName()
         setFeatures(prev => [...prev, {
           id: `fillet-${solidId}-${Date.now()}`, type: 'fillet', operation: mode,
-          name: mode === 'chamfer' ? nextChamferName() : nextFilletName(),
+          name,
           solidId, edgePoints: points, edgeIds, radius, color: targetSolid.color,
         }])
       }

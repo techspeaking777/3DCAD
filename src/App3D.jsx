@@ -49,7 +49,7 @@ import {
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
   IconUndo, IconRedo, IconFitView, IconReframe, IconNew, IconSave, IconLoad, IconCloudSave, IconCloudLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
   IconIncludeEdge,
-  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D,
+  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D, IconRevolve3D,
 } from './draw/ToolIcons.jsx'
 import { glowStroke, glowFill } from './draw/vectorTheme.js'
 
@@ -59,7 +59,10 @@ import { glowStroke, glowFill } from './draw/vectorTheme.js'
 const SOLID_ICON_COMPONENTS = {
   extrude: IconExtrude3D, cutout: IconCutout3D, fillet3d: IconFillet3D,
   mirror3d: IconMirror3D, loft3d: IconLoft3D, join3d: IconJoin3D, movecopy3d: IconMoveCopy3D,
-  sweep3d: IconSweep3D,
+  sweep3d: IconSweep3D, revolve: IconRevolve3D,
+  // Reuses the additive Revolve icon's shape, rendered in Cutout's color —
+  // same "one glyph, color signals cut variant" convention loftcutout uses.
+  revolvecut: IconRevolve3D,
   // Reuses the additive Loft icon's shape, rendered in Cutout's color (see
   // the button color below) — same "one glyph, color signals cut variant"
   // convention Extrude/Cutout already lean on, no separate icon needed.
@@ -2835,7 +2838,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           const ctx = oc.getContext('2d')
           ctx.setTransform(1,0,0,1,0,0)  // raw pixel space
           cachedProfiles.forEach(prof => {
-            const color = extrudeTool==='cutout' ? '#e05a4e' : '#3a7bd5'
+            const color = (extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#e05a4e' : '#3a7bd5'
             const isSelected = extrudeState && extrudeState.planeId===prof.planeId &&
               extrudeState.profiles[0]===prof.pts
             // Project each sketch point to screen pixels
@@ -4044,7 +4047,11 @@ const App3D = forwardRef(function App3D(props, ref) {
     const cy = pts.reduce((s,p)=>s+p.y,0)/pts.length
     const centroid = { x: cx, y: cy }
 
-    const axisLine = srcLines.find(l => l.style === 'axis' && (l.plane||'XY') === planeId)
+    // Neither quick-convert button here (Feature Tree's Extrude/Cutout on a
+    // standalone Sketch) has a Revolve/Revolve Cut counterpart, and both
+    // plain Extrude and plain Cutout now ignore any axis line entirely (see
+    // handleFinishSketch's own gating) — so this never detects one.
+    const axisLine = null
     if (axisLine && profileCrossesAxis(pts, axisLine)) {
       setCadError('Profile crosses the axis — a revolve needs the whole profile on one side of the axis line.')
       setTimeout(() => setCadError(null), 6000)
@@ -4222,16 +4229,29 @@ const App3D = forwardRef(function App3D(props, ref) {
 
       const best = allProfiles[0]
       const editingFeat = editingFeatureId ? features.find(f => f.id === editingFeatureId) : null
-      const isCutoutEdit = editingFeat && extrudeTool === 'cutout'
+      const isCutoutEdit = editingFeat && (extrudeTool === 'cutout' || extrudeTool === 'revolvecut')
 
-      // Revolve: if the sketch has an axis line (drawn with the Axis tool —
-      // see App3D.jsx's tool==='axis' handling), extrude/cutout auto-detects
-      // it and builds a solid (or cut volume) of revolution instead of a
-      // linear one. The profile must stay entirely on one side of the axis;
-      // a crossing produces self-intersecting geometry in the CAD kernel, so
-      // it's blocked here with a clear message rather than left to fail
-      // opaquely later.
-      const axisLine = lines.find(l => l.style === 'axis' && (l.plane||'XY') === planeId)
+      // Revolve and Revolve Cut are their own dedicated tools (not
+      // auto-detected from a plain Extrude/Cutout the way this used to
+      // work) — only they look for the axis line drawn with the Axis tool,
+      // and both REQUIRE one. Plain Extrude/Cutout ignore any axis line
+      // present in the sketch entirely, so drawing one no longer silently
+      // turns an ordinary extrusion/cutout into a revolve.
+      const isRevolveTool = extrudeTool === 'revolve' || extrudeTool === 'revolvecut'
+      const axisLine = isRevolveTool
+        ? lines.find(l => l.style === 'axis' && (l.plane||'XY') === planeId)
+        : null
+      if (isRevolveTool && !axisLine) {
+        setSketchMode(true)
+        setActivePlane(plane)
+        setCadError('Draw a revolve axis first — use the Axis tool to mark the line this profile spins around.')
+        setTimeout(() => setCadError(null), 6000)
+        return
+      }
+      // The profile must stay entirely on one side of the axis; a crossing
+      // produces self-intersecting geometry in the CAD kernel, so it's
+      // blocked here with a clear message rather than left to fail opaquely
+      // later.
       if (axisLine && profileCrossesAxis(best.pts, axisLine)) {
         setSketchMode(true)
         setActivePlane(plane)
@@ -6833,7 +6853,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (!axis || !vp || !prof) { cancelRevolveAnim(); return }
     const angleDeg = Math.min(360, Math.max(1, parseFloat(extrudeState.depthInput) || 360))
     startRevolveAnim(vp, prof, axis, extrudeState.planeId, extrudeState.facePlane||null,
-      angleDeg, !!extrudeState.revolveReverse, extrudeTool === 'cutout' ? '#e05a4e' : extrudeColor)
+      angleDeg, !!extrudeState.revolveReverse, (extrudeTool === 'cutout' || extrudeTool === 'revolvecut') ? '#e05a4e' : extrudeColor)
     return () => cancelRevolveAnim()
   }, [extrudeState?.revolveAxis, extrudeState?.profiles, extrudeState?.pickedIdx,
       extrudeState?.planeId, extrudeState?.facePlane, extrudeState?.depthInput, extrudeState?.revolveReverse, extrudeTool])
@@ -7511,7 +7531,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             sketchLines:savedLines=[], sketchCircles:savedCircles=[], sketchArcs:savedArcs=[], sketchSplines:savedSplines=[] } = state
     const depthMm = parseFloat(depthInput) || 20
     const angleDeg = revolveAxis ? Math.min(360, Math.max(1, depthMm)) : null
-    const isCutout = extrudeTool === 'cutout'
+    const isCutout = extrudeTool === 'cutout' || extrudeTool === 'revolvecut'
     // Plain-extrude-only option (never applied for a cutout or a revolve, neither
     // of which have the same "straight prismatic side wall" shape draft assumes).
     const draftAngleDeg = (!isCutout && !revolveAxis) ? (parseFloat(draftAngleInput) || 0) : 0
@@ -8007,12 +8027,17 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (!feat) return
 
     if (feat.type === 'extrude') {
-      // Re-enter integrated sketch→extrude/cutout flow, replacing this feature on commit.
-      // 'revolve' isn't a real toolbar button (auto-detected via the axis line),
-      // so extrudeTool should only ever be 'extrude' or 'cutout'.
-      const op = feat.operation || 'extrude'
+      // Re-enter integrated sketch→extrude/cutout/revolve/revolve-cut flow,
+      // replacing this feature on commit. 'revolve' and 'revolvecut' are
+      // their own real tool values now (see the sidebar's REVOLVE/REVOLVE
+      // CUT buttons) — a revolve-cutout feature has no operation value of
+      // its own though (it's still plain operation:'cutout', same as
+      // buildCutWorkerParams/applyCutoutToTargets always write — see
+      // handleEditExtent's isRevolveFeat for the same distinction), so it's
+      // only detectable by revolveAxis's presence, same as that function.
+      const op = feat.operation === 'cutout' && feat.revolveAxis ? 'revolvecut' : (feat.operation || 'extrude')
       resetSelection(); resetDrawState()
-      setExtrudeTool(op === 'revolve' ? 'extrude' : op); setExtrudeState(null); setExtrudeHandlePos(null)
+      setExtrudeTool(op); setExtrudeState(null); setExtrudeHandlePos(null)
       setCachedProfiles([])
       setEditingFeatureId(featureId)
 
@@ -8075,11 +8100,12 @@ const App3D = forwardRef(function App3D(props, ref) {
     const cy = pts.reduce((s,p)=>s+p.y,0)/pts.length
     const centroid = { x: cx, y: cy }
 
-    // 'revolve' isn't a real toolbar button (it's auto-detected via the axis
-    // line, not a separate tool) — extrudeTool should only ever be 'extrude'
-    // or 'cutout', matching the two actual buttons.
+    // 'revolve' and 'revolvecut' are their own real tool values (see the
+    // sidebar's REVOLVE/REVOLVE CUT buttons) — a revolve-cutout feature has
+    // no operation value of its own though (still plain 'cutout'), so it's
+    // only detectable by revolveAxis's presence; every other op maps 1:1.
     resetSelection(); resetDrawState()
-    setExtrudeTool(op === 'revolve' ? 'extrude' : op)
+    setExtrudeTool(op === 'cutout' && feat.revolveAxis ? 'revolvecut' : op)
     setEditingFeatureId(featureId)
     setExtrudeHandlePos(null)
     setCachedProfiles([{ planeId: feat.planeId, facePlane: feat.facePlane || null, pts, centroid }])
@@ -10212,14 +10238,14 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
 
     if (extrudeTool && !extrudeState) return { step:1, total:2,
-      color: extrudeTool==='cutout'?'#e05a4e':'#3a7bd5',
+      color: (extrudeTool==='cutout'||extrudeTool==='revolvecut')?'#e05a4e':'#3a7bd5',
       action: cachedProfiles.length > 0
         ? `Click anywhere to ${extrudeTool} — ${cachedProfiles.length} profile${cachedProfiles.length!==1?'s':''} found`
         : `No closed profiles found — draw a closed shape first`,
       hints:[K('Esc','cancel')] }
 
     if (extrudeTool && extrudeState) return { step:2, total:2,
-      color: extrudeTool==='cutout'?'#e05a4e':'#3a7bd5',
+      color: (extrudeTool==='cutout'||extrudeTool==='revolvecut')?'#e05a4e':'#3a7bd5',
       action:`Depth:`,
       hints:[K('Enter','apply'), K('Esc','cancel')] }
 
@@ -10422,7 +10448,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       )}
 
       {/* ══ LEFT SIDEBAR ══════════════════════════════════════════════════════ */}
-      <div style={{width: sketchMode ? 72 : 84, background:'#1a1a2e',display:'flex',flexDirection:'column',
+      <div style={{width: sketchMode ? 72 : 124, background:'#1a1a2e',display:'flex',flexDirection:'column',
         padding:'8px 4px',gap:4,overflowY:'auto',borderRight:'1px solid #2a2a4a',
         transition:'background 0.3s, width 0.2s'}}>
 
@@ -10446,58 +10472,71 @@ const App3D = forwardRef(function App3D(props, ref) {
           /* ── 3D sidebar: solid operation placeholders ── */
           <>
             {[
-              {id:'extrude',  label:'EXTRUDE', color:'#FBDA2D'},
-              {id:'cutout',   label:'CUTOUT',  color:'#53D3E4'},
-              {id:'fillet3d', label:'FILLET',  color:'#A470F2'},
-              {id:'mirror3d', label:'MIRROR',  color:'#8E65F3'},
-              {id:'join3d',   label:'JOIN',    color:'#FFEE88'},
-              {id:'loft3d',   label:'LOFT',    color:'#FBDA2D'},
-              {id:'loftcutout', label:'LOFT CUT', color:'#53D3E4'},
-              {id:'sweep3d',    label:'SWEEP',    color:'#7ED957'},
-              {id:'movecopy3d', label:'MOVE/COPY', color:'#FF9800'},
-            ].map(({id,label,color})=>{
-              const isActive = id==='fillet3d' ? tool==='fillet3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
-                : id==='loft3d' ? ((tool==='loft3d' || !!loftState) && loftTool!=='loftcutout')
-                : id==='loftcutout' ? ((tool==='loft3d' || !!loftState) && loftTool==='loftcutout')
-                : id==='sweep3d' ? (tool==='sweep3d' || !!sweepState)
-                : id==='movecopy3d' ? tool==='movecopy3d'
-                : extrudeTool===id
+              // Paired rows — each shape tool sits directly beside its cutout
+              // variant, so the pairing reads from position alone (additive
+              // on the left, subtractive on the right) with no extra click
+              // or toggle needed to see or reach either one.
+              [{id:'extrude',  label:'EXTRUDE', color:'#FBDA2D'}, {id:'cutout',     label:'CUTOUT',      color:'#53D3E4'}],
+              [{id:'revolve',  label:'REVOLVE', color:'#FBDA2D'}, {id:'revolvecut', label:'REVOLVE CUT', color:'#53D3E4'}],
+              [{id:'loft3d',   label:'LOFT',    color:'#FBDA2D'}, {id:'loftcutout', label:'LOFT CUT',    color:'#53D3E4'}],
+              // No cutout counterpart — full-width rows, unchanged from before.
+              [{id:'fillet3d', label:'FILLET',  color:'#A470F2'}],
+              [{id:'mirror3d', label:'MIRROR',  color:'#8E65F3'}],
+              [{id:'join3d',   label:'JOIN',    color:'#FFEE88'}],
+              [{id:'sweep3d',    label:'SWEEP',    color:'#7ED957'}],
+              [{id:'movecopy3d', label:'MOVE/COPY', color:'#FF9800'}],
+            ].map((row, rowIdx) => {
+              const paired = row.length > 1
               return (
-              <button key={id}
-                title={label}
-                onClick={()=>{
-                  if (id==='extrude'||id==='cutout') activateExtrudeTool(id)
-                  else if (id==='fillet3d') activateFillet3DTool()
-                  else if (id==='mirror3d') activateMirror3DTool()
-                  else if (id==='join3d') activateJoin3DTool()
-                  else if (id==='loft3d') activateLoft3DTool('loft')
-                  else if (id==='loftcutout') activateLoft3DTool('loftcutout')
-                  else if (id==='sweep3d') activateSweep3DTool()
-                  else if (id==='movecopy3d') activateMoveCopy3DTool()
-                }}
-                style={{...btnBase, flexDirection:'column', gap:1,
-                  width:76, height:76,
-                  background: isActive ? color+'33' : 'transparent',
-                  outline: isActive ? `2px solid ${color}` : `1px dashed ${color}55`,
-                  outlineOffset:'-2px',
-                }}>
-                {SOLID_ICON_COMPONENTS[id] ? (
-                  (() => { const Icon = SOLID_ICON_COMPONENTS[id]; return <Icon color={color} size={40}/> })()
-                ) : (
-                  /* Placeholder icon — no vector icon for this one yet */
-                  <svg width="40" height="40" viewBox="0 0 70 70" fill="none">
-                    <rect x="7.5" y="7.5" width="55" height="55" rx="7.5"
-                      stroke={color} strokeWidth="3" fill={color+'11'} strokeDasharray="7.5 5"/>
-                    <text x="35" y="42.5" textAnchor="middle"
-                      style={{fontSize:17.5, fontFamily:'monospace', fill:color, letterSpacing:0}}>
-                      {label.slice(0,3)}
-                    </text>
-                  </svg>
-                )}
-                <span style={{fontSize:8,fontFamily:'monospace',color,letterSpacing:'0.01em'}}>
-                  {label}
-                </span>
-              </button>
+              <div key={rowIdx} style={{display:'flex', gap:4}}>
+                {row.map(({id,label,color}) => {
+                  const isActive = id==='fillet3d' ? tool==='fillet3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
+                    : id==='loft3d' ? ((tool==='loft3d' || !!loftState) && loftTool!=='loftcutout')
+                    : id==='loftcutout' ? ((tool==='loft3d' || !!loftState) && loftTool==='loftcutout')
+                    : id==='sweep3d' ? (tool==='sweep3d' || !!sweepState)
+                    : id==='movecopy3d' ? tool==='movecopy3d'
+                    : extrudeTool===id
+                  const iconSize = paired ? 28 : 40
+                  return (
+                  <button key={id}
+                    title={label}
+                    onClick={()=>{
+                      if (id==='extrude'||id==='cutout'||id==='revolve'||id==='revolvecut') activateExtrudeTool(id)
+                      else if (id==='fillet3d') activateFillet3DTool()
+                      else if (id==='mirror3d') activateMirror3DTool()
+                      else if (id==='join3d') activateJoin3DTool()
+                      else if (id==='loft3d') activateLoft3DTool('loft')
+                      else if (id==='loftcutout') activateLoft3DTool('loftcutout')
+                      else if (id==='sweep3d') activateSweep3DTool()
+                      else if (id==='movecopy3d') activateMoveCopy3DTool()
+                    }}
+                    style={{...btnBase, flexDirection:'column', gap:1,
+                      flex: paired ? 1 : 'none',
+                      width: paired ? undefined : 76, height:76,
+                      background: isActive ? color+'33' : 'transparent',
+                      outline: isActive ? `2px solid ${color}` : `1px dashed ${color}55`,
+                      outlineOffset:'-2px',
+                    }}>
+                    {SOLID_ICON_COMPONENTS[id] ? (
+                      (() => { const Icon = SOLID_ICON_COMPONENTS[id]; return <Icon color={color} size={iconSize}/> })()
+                    ) : (
+                      /* Placeholder icon — no vector icon for this one yet */
+                      <svg width={iconSize} height={iconSize} viewBox="0 0 70 70" fill="none">
+                        <rect x="7.5" y="7.5" width="55" height="55" rx="7.5"
+                          stroke={color} strokeWidth="3" fill={color+'11'} strokeDasharray="7.5 5"/>
+                        <text x="35" y="42.5" textAnchor="middle"
+                          style={{fontSize:17.5, fontFamily:'monospace', fill:color, letterSpacing:0}}>
+                          {label.slice(0,3)}
+                        </text>
+                      </svg>
+                    )}
+                    <span style={{fontSize:paired?7:8,fontFamily:'monospace',color,letterSpacing:'0.01em',textAlign:'center'}}>
+                      {label}
+                    </span>
+                  </button>
+                  )
+                })}
+              </div>
               )
             })}
 
@@ -10801,7 +10840,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             dxfPickMode={tool==='exportfacedxf'}
             dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : []}
             extrudeArmed={!!extrudeState || (!!loftState && !sketchMode)}
-            showWorkPlanes={!sketchMode && !cutoutTargetPicker && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && tool!=='movecopy3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hidePlanesForExtrude && (tool==='extrude' || tool==='cutout'))}
+            showWorkPlanes={!sketchMode && !cutoutTargetPicker && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && tool!=='movecopy3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hidePlanesForExtrude && (tool==='extrude' || tool==='cutout' || tool==='revolve' || tool==='revolvecut'))}
             activePlane={activePlane}
             sketchMode={sketchMode}
             gridVisible={gridVisible}
@@ -10836,21 +10875,23 @@ const App3D = forwardRef(function App3D(props, ref) {
             selection, selectDimField,
           }}/>}
 
-          {/* ── SmartStep bar: overlays bottom of viewport during Extrude/Cutout ── */}
+          {/* ── SmartStep bar: overlays bottom of viewport during Extrude/Cutout/Revolve ── */}
           <SmartStepBar
-            op={extrudeTool}
+            op={extrudeTool === 'revolvecut' ? 'revolve cut' : extrudeTool}
             currentStep={
               extrudeState  ? 3 :
               sketchMode    ? 2 : 1
             }
-            color={extrudeTool === 'cutout' ? '#e05a4e' : '#3a7bd5'}
+            color={(extrudeTool === 'cutout' || extrudeTool === 'revolvecut') ? '#e05a4e' : '#3a7bd5'}
             hint={(!extrudeState && !sketchMode)
               ? (extrudeOffsetBase
                   ? 'Move the mouse or type a distance, Enter to confirm'
                   : extrudeOffsetMode
                     ? 'Click a plane or face to offset from'
                     : null)
-              : null}
+              : ((extrudeTool === 'revolve' || extrudeTool === 'revolvecut') && sketchMode)
+                ? 'Draw a closed profile and an axis line (Revolve Axis tool), then Finish'
+                : null}
             action={
               (!extrudeState && !sketchMode)
                 ? [
@@ -10858,7 +10899,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                       onClick: () => setHidePlanesForExtrude(p => !p) },
                     extrudeOffsetBase
                       ? { label:'✓ Use Plane', enabled:true, onClick:commitExtrudeOffset,
-                          popover: <OffsetDistancePopover color={extrudeTool === 'cutout' ? '#e05a4e' : '#3a7bd5'}
+                          popover: <OffsetDistancePopover color={(extrudeTool === 'cutout' || extrudeTool === 'revolvecut') ? '#e05a4e' : '#3a7bd5'}
                             value={extrudeOffsetDistInput} onChange={setExtrudeOffsetDistInput}/> }
                       : { label: extrudeOffsetMode ? '✕ Cancel Offset' : '+ Offset Plane', enabled:true,
                           onClick:()=>{
@@ -11411,7 +11452,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                     onKeyDown={e=>{ e.stopPropagation(); handleExtrudeDepthKey(e) }}
                     style={{
                       width:70, background:'#1e1e38',
-                      border:`1.5px solid ${extrudeTool==='cutout'?'#e05a4e':'#3a7bd5'}`,
+                      border:`1.5px solid ${(extrudeTool==='cutout'||extrudeTool==='revolvecut')?'#e05a4e':'#3a7bd5'}`,
                       borderRadius:4, color:'#dce8ff',
                       fontFamily:'monospace', fontSize:13,
                       padding:'3px 8px', outline:'none',
@@ -11512,15 +11553,15 @@ const App3D = forwardRef(function App3D(props, ref) {
         }}>
         <div ref={extrudePanelDrag.panelRef} style={{
           background: '#000',
-          border: `1.5px solid ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'}`,
+          border: `1.5px solid ${(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'}`,
           borderRadius: 2,
           padding: '10px 14px',
           minWidth: 180,
-          boxShadow: `0 0 14px ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'}77, 0 0 3px ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'} inset`,
+          boxShadow: `0 0 14px ${(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'}77, 0 0 3px ${(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'} inset`,
           fontFamily: 'monospace',
           ...extrudePanelDrag.panelStyle,
         }}>
-          <DragHandle {...extrudePanelDrag.handleProps}>{extrudeTool==='cutout' ? 'Cutout' : 'Extrude'}</DragHandle>
+          <DragHandle {...extrudePanelDrag.handleProps}>{(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? 'Cutout' : 'Extrude'}</DragHandle>
           {extrudeState.revolveAxis ? (
             <>
               {/* Revolve (extrude or cutout): sweep-angle input + a CW/CCW
@@ -11537,18 +11578,18 @@ const App3D = forwardRef(function App3D(props, ref) {
                     title={label==='CW' ? 'Clockwise' : 'Counterclockwise'}
                     style={{
                       flex:1, padding:'4px 0', fontSize:12, cursor:'pointer',
-                      background: extrudeState.revolveReverse===k ? (extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff') : '#050505',
-                      color: extrudeState.revolveReverse===k ? '#000' : (extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'),
-                      border:`1px solid ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'}`,
+                      background: extrudeState.revolveReverse===k ? ((extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff') : '#050505',
+                      color: extrudeState.revolveReverse===k ? '#000' : ((extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'),
+                      border:`1px solid ${(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'}`,
                       borderRadius: 2, fontFamily:'monospace', fontWeight:'bold', letterSpacing:'0.05em',
-                      textShadow: extrudeState.revolveReverse===k ? 'none' : `0 0 4px ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'}`,
+                      textShadow: extrudeState.revolveReverse===k ? 'none' : `0 0 4px ${(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'}`,
                     }}
                   >{label}</button>
                 ))}
               </div>
               <div style={{display:'flex', alignItems:'center', gap:8}}>
                 <div style={{
-                  flex:1, background:'#000', border:`1px solid ${extrudeTool==='cutout' ? '#FF3B5C55' : '#3ad6ff55'}`,
+                  flex:1, background:'#000', border:`1px solid ${(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C55' : '#3ad6ff55'}`,
                   borderRadius:2, padding:'4px 8px',
                   display:'flex', alignItems:'center', justifyContent:'space-between',
                 }}>
@@ -11564,8 +11605,8 @@ const App3D = forwardRef(function App3D(props, ref) {
                     onKeyDown={e=>{ e.stopPropagation(); handleExtrudeDepthKey(e) }}
                     style={{
                       background:'none', border:'none', outline:'none',
-                      color: extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff',
-                      textShadow: `0 0 5px ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'}`,
+                      color: (extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff',
+                      textShadow: `0 0 5px ${(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'}`,
                       fontFamily:'monospace', fontSize:16,
                       fontWeight:'bold', flex:1, minWidth:0,
                     }}
@@ -11582,15 +11623,15 @@ const App3D = forwardRef(function App3D(props, ref) {
                     commitExtrude()
                   }}
                   style={{
-                    padding:'4px 10px', background: extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff', color:'#000',
+                    padding:'4px 10px', background: (extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff', color:'#000',
                     border:'none', borderRadius:2, cursor:'pointer',
                     fontFamily:'monospace', fontSize:12, fontWeight:'bold',
-                    boxShadow: `0 0 6px ${extrudeTool==='cutout' ? '#FF3B5C' : '#3ad6ff'}`,
+                    boxShadow: `0 0 6px ${(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'}`,
                   }}
                 >↵</button>
               </div>
               <div style={{color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em'}}>
-                {extrudeTool==='cutout' ? 'Revolve cutout angle' : 'Revolve angle'} · ↵ to accept · Esc to cancel
+                {(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? 'Revolve cutout angle' : 'Revolve angle'} · ↵ to accept · Esc to cancel
               </div>
             </>
           ) : (

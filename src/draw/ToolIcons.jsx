@@ -399,6 +399,24 @@ export function IconSweep3D({ color = '#7ED957', size = 70 }) {
   )
 }
 
+export function IconRevolve3D({ color = '#FBDA2D', size = 70 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>
+      <GroundShadow color={color}/>
+      {/* revolve axis — dashed vertical line the profile spins around */}
+      <line x1="35" y1="4" x2="35" y2="64" stroke={color} strokeWidth="1.5" strokeDasharray="2 2"/>
+      {/* solid of revolution — a lathe-turned vase silhouette, symmetric about the axis */}
+      <path d="M23 10 Q17 24 25 34 Q31 40 25 50 Q21 58 27 64 L43 64 Q49 58 45 50 Q39 40 45 34 Q53 24 47 10 Z"
+        fill={color} fillOpacity="0.25" stroke={color} strokeWidth="1.75"/>
+      {/* top rim ellipse — the circular cross-section the profile sweeps out */}
+      <ellipse cx="35" cy="10" rx="12" ry="4" fill="none" stroke={color} strokeWidth="1.5"/>
+      {/* curved arrow around the rim, showing the spin direction */}
+      <path d="M47 10 A12 4 0 0 1 40 13.7" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round"/>
+      <path d="M38 15.5 L40 13.7 L42.5 16.3" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  )
+}
+
 // ── MOVE ──────────────────────────────────────────────────────────────────────
 // x=c*3, y=r*3 from original raw pixel array
 export function IconMove({ active }) {

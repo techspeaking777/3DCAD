@@ -383,43 +383,80 @@ function extendLoftCutProfiles(profiles) {
 }
 
 // Sweep-cut equivalent of extendLoftCutProfiles above — same "avoid an
-// exactly-coincident cut face" purpose, just for a path that can bend
-// (arcs/splines) instead of loft's single shared normal, so there's no one
-// fixed direction to push a scalar offset along. Instead, INSERTS one new
-// straight-line point just past each end of the path, extended along the
-// chord to that end's immediate neighbor sample point — pathPts is already
-// densely sampled at both ends (detectPath walks arcs/splines into many
-// close points), so that chord is already a close approximation of the true
-// tangent there, without needing exact arc/spline tangent math.
-//
-// Deliberately INSERTS rather than moving the existing endpoint in place:
-// if pts[0] (or the last point) is itself part of a curveSegments entry
-// (an arc/spline), emitArc/emitBezierChain compute their emitted geometry
-// from that segment's OWN stored parameters (cx/cy/r/angles, or control
-// points) — never from the raw pts array — so silently relocating pts[0]
-// would leave the sketcher's initial movePointerTo() pointing somewhere the
-// curve's actual emitted start no longer matches, breaking wire continuity.
-// Inserting a new plain point instead only ever adds an extra straight
-// segment beyond the curve's untouched true endpoint, so curveSegments'
-// own parametric data — and every startIdx after the prepended point —
-// just needs shifting by the one new index; nothing about the curves
-// themselves changes shape.
+// exactly-coincident cut face" purpose, but ONLY extends the path's FAR end
+// (pts[last]), never pts[0]. buildSweep's sweepSketch call computes the
+// profile's plane from the wire's own start point AND tangent (see its own
+// comment) — App3D.jsx's computeSweepProfilePlane already anchors the
+// profile there using the path's EXACT tangent (real arc/spline math, see
+// sweepPathStartTangent), matching what the user actually saw while
+// sketching the profile. Prepending a point before pts[0] would change the
+// wire's start tangent to this extension's straight chord direction instead
+// — for a straight path that's identical to the original tangent (harmless,
+// which is why this bug shipped unnoticed with a line-only path), but for
+// an arc/spline path it diverges from the exact tangent already baked into
+// the profile's orientation, twisting the profile relative to what
+// sweepSketch actually sweeps and producing a self-intersecting pipe shell
+// (surfaced as "could not build a valid solid from this path and profile").
+// Extending only the far end sidesteps this entirely — it's never the wire
+// end sweepSketch anchors anything to — at the cost of leaving the near/
+// entry end (where the profile is sketched, often flush against a face)
+// with no margin, same posture buildRevolve's cut path already has today.
 const SWEEP_CUT_OVH_MM = 1
 function extendSweepCutPath(cut) {
   const pts = cut.pathPts
   if (!pts || pts.length < 2) return cut
   const ovhPx = SWEEP_CUT_OVH_MM * SCALE
-  const beyond = (anchor, neighbor) => {
-    const dx = anchor.x - neighbor.x, dy = anchor.y - neighbor.y
-    const len = Math.hypot(dx, dy) || 1
-    return { x: anchor.x + dx/len*ovhPx, y: anchor.y + dy/len*ovhPx }
+  const anchor = pts[pts.length-1]
+  // Naive default: chord direction between the last two SAMPLED points.
+  // Exact for a straight path (there's only ever two points), but for a
+  // curve this is only ever an approximation of the true end tangent — and
+  // empirically, "close enough" isn't reliably close enough. An arc's
+  // coarse sampling (as few as 4 points across its whole span, see
+  // detectPath) can diverge enough from its real end tangent that the
+  // straight stub below meets it at a small but real kink, which made
+  // replicad's sweepSketch throw outright (a raw native exception, not even
+  // the graceful BRepCheck_Analyzer failure this function was written to
+  // avoid). A spline samples far more densely (sampleSpline(...,16)) so the
+  // chord is a much closer approximation — but "closer" isn't "exact", and
+  // a sharp enough curve combined with a large enough profile (both
+  // observed live: a spline doubling back on itself swept with a ~20mm-
+  // radius circle) still lets that residual error tip a valid sweep into
+  // BRepCheck_Analyzer's "invalid solid" failure. Both cases have an exact
+  // fix available from the curve's own defining data (not its sampled
+  // polygon), so use that whenever the anchor is a real curve's true end.
+  let dx, dy
+  const segs = pts.curveSegments
+  const lastSeg = segs && segs.length ? segs[segs.length - 1] : null
+  const curveEndsAtAnchor = lastSeg && (lastSeg.startIdx + lastSeg.count) === pts.length - 1
+  if (curveEndsAtAnchor && lastSeg.type === 'arc') {
+    // Exact tangent: perpendicular to the radius, signed to the arc's own
+    // sweep direction — G1-continuous with the arc by construction.
+    const sign = lastSeg.endAngle >= lastSeg.startAngle ? 1 : -1
+    dx = -Math.sin(lastSeg.endAngle) * sign
+    dy = Math.cos(lastSeg.endAngle) * sign
+  } else if (curveEndsAtAnchor && lastSeg.type === 'spline' && lastSeg.controlPoints.length >= 2) {
+    // Exact tangent for an open Catmull-Rom spline's last control point:
+    // catmullRomToBezierSegments' own open-curve extension duplicates the
+    // final control point as its own virtual neighbor (ext = [...pts,
+    // pts[n-1]]), which reduces the standard T_i=(P_{i+1}-P_{i-1})/2
+    // tangent formula at the endpoint to just P_last - P_secondLast — the
+    // chord between the last two CONTROL points (sparse, exact), not the
+    // last two SAMPLED points (dense, approximate) used above.
+    const cp = lastSeg.controlPoints
+    const last = cp[cp.length-1], prev = cp[cp.length-2]
+    dx = last.x - prev.x
+    dy = last.y - prev.y
+  } else {
+    const neighbor = pts[pts.length-2]
+    dx = anchor.x - neighbor.x
+    dy = anchor.y - neighbor.y
   }
-  const preStart = beyond(pts[0], pts[1])
-  const postEnd = beyond(pts[pts.length-1], pts[pts.length-2])
-  const extended = [preStart, ...pts, postEnd]
-  if (pts.curveSegments) {
-    extended.curveSegments = pts.curveSegments.map(seg => ({ ...seg, startIdx: seg.startIdx + 1 }))
-  }
+  const len = Math.hypot(dx, dy) || 1
+  const postEnd = { x: anchor.x + dx/len*ovhPx, y: anchor.y + dy/len*ovhPx }
+  const extended = [...pts, postEnd]
+  // No index shift needed — appending after the end never moves any
+  // existing point, so every curveSegments.startIdx still matches.
+  if (pts.curveSegments) extended.curveSegments = pts.curveSegments
   return { ...cut, pathPts: extended }
 }
 

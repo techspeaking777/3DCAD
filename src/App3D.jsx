@@ -4582,6 +4582,14 @@ const App3D = forwardRef(function App3D(props, ref) {
       resetLoft3D()
       setTool('select')
     }
+    if (sweepState) {
+      resetSweep3D()
+      setTool('select')
+    }
+    if (springState) {
+      resetSpring3D()
+      setTool('select')
+    }
     viewport3dRef.current?.restoreSavedView()
   }
 
@@ -6019,6 +6027,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     setSpringState({ basis, pickKind: springState.pickKind, params: { pitchMm, heightMm, coilRadiusMm, coils, lefthand, origin, normal }, profilePlane })
     await viewport3dRef.current?.snapToFace(profilePlane)
     enterSketch(profilePlane)
+    injectSpringProfileOriginGhost(profilePlane)
   }
 
   // True while the user is between "Finish Sketch" on one profile and
@@ -6132,6 +6141,21 @@ const App3D = forwardRef(function App3D(props, ref) {
     // asked to SEE the attach target up front, not just discover it on hover.
     const endpoint = pts[pts.length - 1]
     setSweepState(prev => prev ? { ...prev, ghostEndpoint: endpoint } : prev)
+  }
+
+  // Spring's own "CENTER PROFILE HERE" marker (drawn in the sketch-overlay
+  // effect below) sits at local (0,0) of the profile plane by construction
+  // — but unlike Sweep's own marker, which happens to already be snappable
+  // for free (it's literally the start point of injectSweepPathGhost's
+  // ghost line, since the path's start point IS the profile plane's
+  // origin), Spring has no hand-drawn path to inject a ghost FROM — there's
+  // nothing in `lines`/`circles` at all for the mouse to snap to. A
+  // zero-radius ghost circle gives the existing snap system (getGeoSnap's
+  // own circle-center check, see geometry/snap.js) a real point to catch —
+  // r:0 rather than a real size since this is purely a snap target, not a
+  // second visual (the canvas overlay already draws the actual marker).
+  function injectSpringProfileOriginGhost(profilePlane) {
+    setCircles(prev => [...prev, { cx: 0, cy: 0, r: 0, plane: 'face', facePlane: profilePlane, ghostRef: true }])
   }
 
   async function loftNextProfile() {
@@ -11319,12 +11343,13 @@ const App3D = forwardRef(function App3D(props, ref) {
               Finish/Guide always stay in the same top-right spot no matter
               how many rows the tool groups wrap into. */}
           <div style={{display:'flex',alignItems:'center',gap:4,flexShrink:0,height:70}}>
-            {/* CANCEL FEATURE — only for Cut/Extrude/Loft, which have a whole
-                in-progress feature to abandon (a plain standalone sketch
-                doesn't). Placed left of Finish so the two can't be confused. */}
-            {sketchMode && (extrudeTool || loftState) && (
+            {/* CANCEL FEATURE — only for Cut/Extrude/Loft/Sweep/Spring, which
+                have a whole in-progress feature to abandon (a plain
+                standalone sketch doesn't). Placed left of Finish so the two
+                can't be confused. */}
+            {sketchMode && (extrudeTool || loftState || sweepState || springState) && (
               <button
-                title="Cancel — abandons this Cut/Extrude/Loft entirely"
+                title="Cancel — abandons this Cut/Extrude/Loft/Sweep/Spring entirely"
                 onClick={cancelFeature}
                 style={{...btnBase,background:'#3a1a1a',outline:'2px solid #e05a4e',
                   outlineOffset:'-2px',flexDirection:'column',gap:2,

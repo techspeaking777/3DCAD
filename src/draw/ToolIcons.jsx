@@ -417,6 +417,27 @@ export function IconRevolve3D({ color = '#FBDA2D', size = 70 }) {
   )
 }
 
+export function IconSpring3D({ color = '#F06292', size = 70 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>
+      <GroundShadow color={color}/>
+      {/* coil axis — same dashed-diagonal convention as Sweep/Loft's own
+          path, climbing bottom-left to top-right */}
+      <line x1="10" y1="60" x2="56" y2="12" stroke={color} strokeWidth="1.25" strokeDasharray="2 2" opacity="0.4"/>
+      {/* 4 open coil loops climbing the axis — deliberately UNFILLED, unlike
+          IsoCube's tri-tone faces: a filled ellipse this size overlapping
+          its neighbors reads as a solid blob/chain of linked rings (tried
+          live, rejected), while a plain ring stroke keeps each turn visible
+          as a distinct loop of wire, reading as a coiled spring even at the
+          sidebar's small render size. */}
+      <ellipse cx="14" cy="56" rx="15" ry="7" transform="rotate(-46 14 56)" fill="none" stroke={color} strokeWidth="2.5"/>
+      <ellipse cx="27" cy="42" rx="15" ry="7" transform="rotate(-46 27 42)" fill="none" stroke={color} strokeWidth="2.5"/>
+      <ellipse cx="40" cy="28" rx="15" ry="7" transform="rotate(-46 40 28)" fill="none" stroke={color} strokeWidth="2.5"/>
+      <ellipse cx="53" cy="14" rx="15" ry="7" transform="rotate(-46 53 14)" fill="none" stroke={color} strokeWidth="2.5"/>
+    </svg>
+  )
+}
+
 // ── MOVE ──────────────────────────────────────────────────────────────────────
 // x=c*3, y=r*3 from original raw pixel array
 export function IconMove({ active }) {

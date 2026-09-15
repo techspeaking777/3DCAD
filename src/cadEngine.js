@@ -30,7 +30,7 @@ class CadEngine {
       )
 
       this._worker.onmessage = (e) => {
-        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, message } = e.data
+        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, planeData, message } = e.data
 
         if (type === 'ready') {
           this._ready = true
@@ -60,6 +60,7 @@ class CadEngine {
             stepBlob ? { stepBlob } :
             dxfData ? { dxfData } :
             orthoViews ? { orthoViews } :
+            planeData ? { planeData } :
             { faces, edges }
           )
         } else if (type === 'error') {
@@ -123,6 +124,30 @@ class CadEngine {
    */
   async sweep(params) {
     return this._send('sweep', params)
+  }
+
+  /**
+   * Build a helical coil-spring solid — sweeps a hand-sketched cross-section
+   * profile along a helical path. params: {solidId, pitchMm, heightMm,
+   * coilRadiusMm, origin, normal, lefthand?, profilePts, profileCircle?}.
+   */
+  async spring(params) {
+    return this._send('spring', params)
+  }
+
+  /**
+   * Returns the exact plane replicad's own sweepSketch call will hand its
+   * profile-building callback for this helix — {origin,normal,uAxis}, mm/
+   * unit-vector arrays. Needed because the profile is now hand-sketched (see
+   * spring() above): the sketch has to happen on the SAME plane replicad
+   * will actually sweep from, and a helix's start point/tangent depend on
+   * OpenCascade's own (undocumented-from-JS) gp_Ax3 axis convention — not
+   * something worth re-deriving independently when replicad's own wire
+   * object already knows it exactly. params: {pitchMm, heightMm,
+   * coilRadiusMm, origin, normal, lefthand?}.
+   */
+  async springProfilePlane(params) {
+    return this._send('springProfilePlane', params)
   }
 
   /** Rebuild a base extrude and subtract one or more cut volumes. */

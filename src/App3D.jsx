@@ -26,6 +26,7 @@ import { cadEngine } from './cadEngine.js'
 import { replicadMeshToThree } from './cadMesh.js'
 import TracerPanel from './tools/TracerPanel.jsx'
 import TextPanel from './tools/TextPanel.jsx'
+import SpringPanel from './tools/SpringPanel.jsx'
 import PageSetupPanel from './tools/PageSetupPanel.jsx'
 import GuidePanel from './tools/GuidePanel.jsx'
 import SaveAsPanel from './tools/SaveAsPanel.jsx'
@@ -49,7 +50,7 @@ import {
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
   IconUndo, IconRedo, IconFitView, IconReframe, IconNew, IconSave, IconLoad, IconCloudSave, IconCloudLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
   IconIncludeEdge,
-  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D, IconRevolve3D,
+  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D, IconRevolve3D, IconSpring3D,
 } from './draw/ToolIcons.jsx'
 import { glowStroke, glowFill } from './draw/vectorTheme.js'
 
@@ -59,7 +60,7 @@ import { glowStroke, glowFill } from './draw/vectorTheme.js'
 const SOLID_ICON_COMPONENTS = {
   extrude: IconExtrude3D, cutout: IconCutout3D, fillet3d: IconFillet3D,
   mirror3d: IconMirror3D, loft3d: IconLoft3D, join3d: IconJoin3D, movecopy3d: IconMoveCopy3D,
-  sweep3d: IconSweep3D, revolve: IconRevolve3D,
+  sweep3d: IconSweep3D, revolve: IconRevolve3D, spring3d: IconSpring3D,
   // Reuses the additive Sweep icon's shape, rendered in Cutout's color —
   // same "one glyph, color signals cut variant" convention loftcutout/
   // revolvecut use.
@@ -71,6 +72,10 @@ const SOLID_ICON_COMPONENTS = {
   // the button color below) — same "one glyph, color signals cut variant"
   // convention Extrude/Cutout already lean on, no separate icon needed.
   loftcutout: IconLoft3D,
+  // Reuses the additive Spring icon's shape, rendered in Cutout's color —
+  // same "one glyph, color signals cut variant" convention every other
+  // cutout pair above uses.
+  springcut: IconSpring3D,
 }
 
 // Pixel-art view-preset icons (src/assets/view-op-icons.png) — same
@@ -192,6 +197,18 @@ function buildCutWorkerParams(cutFeat) {
       profilePts: cutFeat.profilePts, profileCircle: cutFeat.profileCircle,
     }
   }
+  // Spring cutout (see commitSpring's isSpringCut branch) — pitchMm/
+  // heightMm/coilRadiusMm/normal/origin are already plain mm/unit-vector
+  // arrays on the feature (same shape buildBaseWorkerParams' own spring
+  // branch reads off a `solid` object), so no facePlaneParams wrapping
+  // needed, same reasoning as the loft/sweep branches above.
+  if (cutFeat.pitchMm !== undefined) {
+    return {
+      pitchMm: cutFeat.pitchMm, heightMm: cutFeat.heightMm, coilRadiusMm: cutFeat.coilRadiusMm,
+      origin: cutFeat.origin, normal: cutFeat.normal, lefthand: !!cutFeat.lefthand,
+      profilePts: cutFeat.profilePts, profileCircle: cutFeat.profileCircle,
+    }
+  }
   return {
     pts: cutFeat.profilePts,
     depthMm: cutFeat.cutDepthMm ?? 10000,
@@ -261,6 +278,20 @@ function buildBaseWorkerParams(solid) {
     return {
       pathPts: solid.pathPts, planeId: solid.planeId,
       normal: solid.normal, origin: solid.origin, uAxis: solid.uAxis,
+      profilePts: solid.profilePts, profileCircle: solid.profileCircle,
+    }
+  }
+  // Spring's path is purely parametric (the helix), but its wire
+  // cross-section IS a real hand-sketched profile — same profilePts/
+  // profileCircle shape Sweep's own branch above carries, just paired with
+  // helix params instead of a drawn pathPts chain (see cadWorker.js's
+  // buildSpring). uAxis isn't included here since sketchHelix never reads
+  // it (only origin+normal); it's still stored on the solid itself
+  // (see commitSpring) for round-trip parity with Sweep/Loft's shape.
+  if (solid.operation === 'spring') {
+    return {
+      pitchMm: solid.pitchMm, heightMm: solid.heightMm,
+      coilRadiusMm: solid.coilRadiusMm, origin: solid.origin, normal: solid.normal, lefthand: !!solid.lefthand,
       profilePts: solid.profilePts, profileCircle: solid.profileCircle,
     }
   }
@@ -422,6 +453,12 @@ async function rebuildBaseMesh(solid) {
     // branch) — same "wrong shape for cadEngine.extrude()" reasoning as loft.
     : solid.operation === 'sweep'
     ? await cadEngine.sweep({ solidId: solid.id, ...baseWorkerParams })
+    // Spring's base params are shaped like {pitchMm,heightMm,coilRadiusMm,
+    // origin,normal,lefthand,profilePts,profileCircle} (see
+    // buildBaseWorkerParams' spring branch) — same "wrong shape for
+    // cadEngine.extrude()" reasoning as loft/sweep.
+    : solid.operation === 'spring'
+    ? await cadEngine.spring({ solidId: solid.id, ...baseWorkerParams })
     // An imported STEP body: baseWorkerParams is just {stepText} here (see
     // buildBaseWorkerParams' import branch) — re-running the same import
     // reproduces the identical shape, same as replaying any other recipe.
@@ -437,7 +474,7 @@ async function rebuildBaseMesh(solid) {
   // too, or they'd silently come back solid every time. Revolve/loft/import
   // never punch holes even at creation time (see commitExtrude), so this
   // only applies to a plain extrude.
-  const holes = solid.operation !== 'revolve' && solid.operation !== 'loft' && solid.operation !== 'sweep' && solid.operation !== 'import'
+  const holes = solid.operation !== 'revolve' && solid.operation !== 'loft' && solid.operation !== 'sweep' && solid.operation !== 'spring' && solid.operation !== 'import'
     ? solid.profilePts?.holes : null
   if (holes && holes.length) {
     for (const holePts of holes) {
@@ -523,6 +560,30 @@ function sweepPathBoxPx(path, profile, basis) {
     const w = basis.sketchToWorld(p.x, p.y)
     const v = new THREE.Vector3(w.x, w.y, w.z)
     allPts.push(v.clone().addScalar(radius), v.clone().addScalar(-radius))
+  }
+  return new THREE.Box3().setFromPoints(allPts)
+}
+
+// Cheap bounding-box estimate for a spring cutout's swept coil volume — same
+// candidate-filter role as sweepPathBoxPx above; OCC does the real cut. A
+// helix's "path" isn't user-drawn points to walk — it's fully described by
+// basis.origin/normal (the coil's own axis) plus coilRadiusMm/heightMm — so
+// this samples world-space points at even steps along that axis instead,
+// each inflated by (coilRadiusMm + the profile's own max radius) using the
+// same cube-inflation trick sweepPathBoxPx uses (looser than a true
+// cylinder, but a candidate filter only needs to stay conservative).
+function springSweepBoxPx(basis, params, profile) {
+  let wireRadius = 0
+  for (const p of profile.pts) wireRadius = Math.max(wireRadius, Math.hypot(p.x, p.y))
+  if (profile.circle) wireRadius = Math.max(wireRadius, Math.hypot(profile.circle.cx, profile.circle.cy) + profile.circle.r)
+  const outerRadiusPx = mmToPx(params.coilRadiusMm) + wireRadius
+  const heightPx = mmToPx(params.heightMm)
+
+  const allPts = []
+  const STEPS = 12
+  for (let i = 0; i <= STEPS; i++) {
+    const center = basis.origin.clone().addScaledVector(basis.normal, heightPx * i / STEPS)
+    allPts.push(center.clone().addScalar(outerRadiusPx), center.clone().addScalar(-outerRadiusPx))
   }
   return new THREE.Box3().setFromPoints(allPts)
 }
@@ -814,7 +875,7 @@ function featureOpColor(feat) {
   const op = feat.operation || 'extrude'
   return {
     extrude: '#FBDA2D', revolve: '#FBDA2D', cutout: '#53D3E4',
-    mirror: '#8E65F3', loft: '#FBDA2D', sweep: '#7ED957', join: '#FFEE88', import: '#66BB6A',
+    mirror: '#8E65F3', loft: '#FBDA2D', sweep: '#7ED957', spring: '#F06292', join: '#FFEE88', import: '#66BB6A',
   }[op] || '#FBDA2D'
 }
 
@@ -834,6 +895,7 @@ function RowIcon({ kind, color, size=13 }) {
     join:    <><circle cx="5" cy="6.5" r="3.5" {...p}/><circle cx="8" cy="6.5" r="3.5" {...p}/></>,
     loft:    <><rect x="4" y="1.5" width="5" height="2.5" {...p}/><rect x="1.5" y="8" width="10" height="2.5" {...p}/><line x1="4.5" y1="4" x2="2.5" y2="8" {...p}/><line x1="8.5" y1="4" x2="9.5" y2="8" {...p}/></>,
     sweep:   <><path d="M2 10Q2 4 10 4" strokeDasharray="1.5 1.5" {...p}/><ellipse cx="2" cy="10" rx="1.6" ry="1" {...p}/></>,
+    spring:  <path d="M2 1.5l7 1.5-7 1.5 7 1.5-7 1.5 7 1.5-7 1.5" {...p}/>,
     import:  <><path d="M6.5 1v6M4 4.5l2.5 2.5L9 4.5" {...p}/><path d="M2 9.5h9" {...p}/></>,
   }
   return <svg width={size} height={size} viewBox="0 0 13 13" style={{flexShrink:0}}>{shapes[kind]}</svg>
@@ -959,6 +1021,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           const isJoin = isExtrude && feat.operation === 'join'
           const isLoft = isExtrude && feat.operation === 'loft'
           const isSweep = isExtrude && feat.operation === 'sweep'
+          const isSpring = isExtrude && feat.operation === 'spring'
           // A loft-cutout is stored as an ordinary operation:'cutout' feature
           // (see commitLoft's isLoftCutout branch) so it replays through the
           // same cutout machinery everywhere else, but it carries `profiles`
@@ -969,6 +1032,13 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           // operation:'cutout' feature (see commitSweep's isSweepCut branch)
           // carrying pathPts instead of a linear depthMm/direction.
           const isSweepCut = isExtrude && feat.operation === 'cutout' && !!feat.pathPts
+          // Same reasoning again, for a spring cutout — an ordinary
+          // operation:'cutout' feature (see commitSpring's isSpringCut
+          // branch) carrying pitchMm/coilRadiusMm instead of a linear
+          // depthMm/direction. pitchMm!==undefined (not !!feat.pitchMm) since
+          // a real pitch is never falsy but this stays correct even if it
+          // somehow were.
+          const isSpringCut = isExtrude && feat.operation === 'cutout' && feat.pitchMm !== undefined
           const isLocked = !!feat.joinedInto
           // Only rows that own an independent solid can be hidden — a cutout
           // or fillet modifies an EXISTING body in place rather than creating
@@ -981,12 +1051,12 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           // blocking it just made "join a mirrored part to its original" — an
           // ordinary CAD operation — impossible.
           const isBodyOwner = isExtrude && !isLocked &&
-            ['extrude','revolve','loft','sweep','mirror','join','import'].includes(feat.operation || 'extrude')
+            ['extrude','revolve','loft','sweep','spring','mirror','join','import'].includes(feat.operation || 'extrude')
           const isBodyHidden = isBodyOwner && hiddenSolidIds?.includes(feat.solidId)
           const editingDepth = editDepthId === feat.id
 
           const rowKind = isSketch ? 'sketch' : isFillet ? 'fillet' : isMirror ? 'mirror'
-            : isJoin ? 'join' : isLoft ? 'loft' : isSweep ? 'sweep' : feat.operation === 'cutout' ? 'cutout'
+            : isJoin ? 'join' : isLoft ? 'loft' : isSweep ? 'sweep' : isSpring ? 'spring' : feat.operation === 'cutout' ? 'cutout'
             : feat.operation === 'revolve' ? 'revolve' : feat.operation === 'import' ? 'import' : 'extrude'
           const rowColor = featureOpColor(feat)
 
@@ -1127,7 +1197,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                             padding:'1px 3px', display:'flex', alignItems:'center'}}
                         ><PencilGlyph/></button>
                       )}
-                      {!sketchMode && !isMirror && !isJoin && !isLoft && !isLoftCutout && !isSweep && !isSweepCut && (
+                      {!sketchMode && !isMirror && !isJoin && !isLoft && !isLoftCutout && !isSweep && !isSweepCut && !isSpring && !isSpringCut && (
                         <button title={feat.operation==='cutout' ? 'Edit cutout extent' : 'Edit extrusion extent'}
                           onClick={e=>{e.stopPropagation(); onEditExtent(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
@@ -1251,8 +1321,39 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                 </div>
               )}
 
+              {/* Spring subtitle: colour dot + coil count — no single wire
+                  diameter to show now that the cross-section is a real
+                  hand-sketched profile (could be any shape), same posture
+                  as Sweep's own minimal subtitle. */}
+              {isSpring && (
+                <div style={{marginLeft:20, marginTop:3}}>
+                  <div style={{display:'flex', alignItems:'center', gap:5}}>
+                    <div style={{width:8,height:8,borderRadius:'50%',
+                      background:feat.color||'#F06292', flexShrink:0}}/>
+                    <span style={{color:'#8fa0b8', fontSize:10}}>
+                      spring · {feat.coils} coils
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Spring cutout subtitle — same reasoning as the plain Spring
+                  subtitle above (no single depth/angle to show), just the
+                  cutout accent color. */}
+              {isSpringCut && (
+                <div style={{marginLeft:20, marginTop:3}}>
+                  <div style={{display:'flex', alignItems:'center', gap:5}}>
+                    <div style={{width:8,height:8,borderRadius:'50%',
+                      background:feat.color||'#e05a4e', flexShrink:0}}/>
+                    <span style={{color:'#8fa0b8', fontSize:10}}>
+                      spring cutout · {feat.coils} coils
+                    </span>
+                  </div>
+                </div>
+              )}
+
               {/* Extrude subtitle: colour + depth + operation */}
-              {isExtrude && !isMirror && !isJoin && !isLoft && !isLoftCutout && !isSweep && !isSweepCut && (
+              {isExtrude && !isMirror && !isJoin && !isLoft && !isLoftCutout && !isSweep && !isSweepCut && !isSpring && !isSpringCut && (
                 <div style={{marginLeft:20, marginTop:3}}>
                   <div style={{display:'flex', alignItems:'center', gap:5}}>
                     <div style={{width:8,height:8,borderRadius:'50%',
@@ -1326,6 +1427,12 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [sweepOffsetMode,setSweepOffsetMode]=useState(false)
   const [sweepOffsetBase,setSweepOffsetBase]=useState(null)
   const [sweepOffsetDistInput,setSweepOffsetDistInput]=useState('20')
+  // Offset (parallel) plane for Spring's own plane-pick step — same idea,
+  // its own parallel implementation for the same reason (additive-only,
+  // zero risk to Sweep/Extrude's already-shipped versions).
+  const [springOffsetMode,setSpringOffsetMode]=useState(false)
+  const [springOffsetBase,setSpringOffsetBase]=useState(null)
+  const [springOffsetDistInput,setSpringOffsetDistInput]=useState('20')
   const extrudePanelDrag = useDraggablePanel()
   const cutoutPanelDrag = useDraggablePanel()
   const loftPanelDrag = useDraggablePanel()
@@ -1427,7 +1534,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }, [features])
   const [activeSketchId,setActiveSketchId]=useState(null)  // which sketch is being edited
-  const featureCountRef=useRef({sketch:0,extrude:0,cutout:0,fillet:0,chamfer:0,mirror:0,join:0,loft:0,sweep:0})       // for auto-naming
+  const featureCountRef=useRef({sketch:0,extrude:0,cutout:0,fillet:0,chamfer:0,mirror:0,join:0,loft:0,sweep:0,spring:0})       // for auto-naming
   const [treeCollapsed,setTreeCollapsed]=useState(false)
 
   const viewport3dRef=useRef(null)
@@ -3000,6 +3107,23 @@ const App3D = forwardRef(function App3D(props, ref) {
       ctx.restore()
     }
 
+    // ── Spring profile-plane marker — same green "attach point" marker as
+    // Sweep's above, minus the red far-end dot (a helix has no user-drawn
+    // far end to reference; the plane's own origin is the only anchor that
+    // matters, and it's the exact point computeSpringPathPlane resolved).
+    if (sketchMode && springState?.profilePlane) {
+      ctx.save()
+      ctx.translate(0, 0)
+      ctx.scale(1/sc, 1/sc)
+      ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI*2)
+      ctx.fillStyle = '#00E676'
+      ctx.fill()
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5; ctx.stroke()
+      ctx.fillStyle = '#00E676'; ctx.font = 'bold 11px monospace'
+      ctx.fillText('CENTER PROFILE HERE', 11, -9)
+      ctx.restore()
+    }
+
     // ── Grid dots (sketch mode only) ────────────────────────────────────────
     // Reference-grid dots at gridSizeMm spacing, drawn in the sketch's own
     // 2D pixel space so they line up correctly on any active plane (XY/XZ/
@@ -3923,6 +4047,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     featureCountRef.current.sweep += 1
     return `Sweep ${featureCountRef.current.sweep}`
   }
+  function nextSpringName() {
+    featureCountRef.current.spring += 1
+    return `Spring ${featureCountRef.current.spring}`
+  }
 
   // Enter sketch mode for a new or existing sketch
   function enterSketch(plane, existingId=null, initialGeometry=null) {
@@ -3996,6 +4124,11 @@ const App3D = forwardRef(function App3D(props, ref) {
     // offset distance entirely.
     if (tool==='sweep3d' && sweepOffsetMode) { handleSweepOffsetPlanePick({ kind:'face', facePlane }); return }
     if (tool==='sweep3d' && !sweepState) { startSweepPath({ kind:'face', facePlane }); return }
+    // Same ordering reasoning as Sweep's own offset guard just above.
+    if (tool==='spring3d' && springOffsetMode) { handleSpringOffsetPlanePick({ kind:'face', facePlane }); return }
+    // Spring has no path/profile sketch at all — picking a plane goes
+    // straight to SpringPanel (see startSpringPlanePick), never enterSketch.
+    if (tool==='spring3d' && !springState) { startSpringPlanePick({ kind:'face', facePlane }); return }
     if (tool==='exportfacedxf') { handleExportFaceDXFFaceClick(facePlane); return }
     if (extrudeTool && extrudeOffsetMode) { handleExtrudeOffsetPlanePick({ kind:'face', facePlane }); return }
     if (extrudeState) return  // step 3 (depth): ignore stray face clicks
@@ -4013,6 +4146,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     // Same ordering reasoning as handleFaceClick's own sweep-offset guard.
     if (tool==='sweep3d' && sweepOffsetMode) { handleSweepOffsetPlanePick({ kind:'workplane', planeId:id }); return }
     if (tool==='sweep3d' && !sweepState) { startSweepPath({ kind:'workplane', planeId:id }); return }
+    if (tool==='spring3d' && springOffsetMode) { handleSpringOffsetPlanePick({ kind:'workplane', planeId:id }); return }
+    if (tool==='spring3d' && !springState) { startSpringPlanePick({ kind:'workplane', planeId:id }); return }
     if (extrudeTool && extrudeOffsetMode) { handleExtrudeOffsetPlanePick({ kind:'workplane', planeId:id }); return }
     if (extrudeState) return  // step 3 (depth): ignore stray plane clicks
     // Work planes pass through/near the model with no occlusion check against
@@ -4202,6 +4337,23 @@ const App3D = forwardRef(function App3D(props, ref) {
       allProfiles.push({ planeId, facePlane: isFace ? plane : null, pts, centroid:{x:cx,y:cy} })
     })
     setCachedProfiles(allProfiles)
+
+    if (springState?.profilePlane) {
+      // ── Spring flow: no path step at all (the helix is fully parametric,
+      //    not user-drawn — see startSpringProfileSketch) — this is the
+      //    ONLY sketch step (the wire cross-section), on the exact plane
+      //    replicad's own sweepSketch will use. Finish always commits.
+      if (allProfiles.length === 0) {
+        setSketchMode(true)
+        setActivePlane(plane)
+        setCadError('No closed profile found — make sure your sketch forms a closed loop.')
+        setTimeout(() => setCadError(null), 5000)
+        return
+      }
+      const best = allProfiles[0]
+      commitSpring(springState, { pts: best.pts, circle: best.pts.circleMeta || null })
+      return
+    }
 
     if (sweepState) {
       // ── Sweep flow: 2 fixed steps, no repeating N-round loop like Loft —
@@ -4939,7 +5091,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // of-mirror, mirror-of-join) — see commitMirrorSolid/rebuildDependentMirrors.
   function baseFeatureForSolid(solidId) {
     return features.find(f => f.type==='extrude' && !f.joinedInto && f.solidId===solidId &&
-      ['extrude','revolve','loft','sweep','mirror','join','import'].includes(f.operation || 'extrude'))
+      ['extrude','revolve','loft','sweep','spring','mirror','join','import'].includes(f.operation || 'extrude'))
   }
 
   function activateMirror3DTool() {
@@ -5693,6 +5845,182 @@ const App3D = forwardRef(function App3D(props, ref) {
     enterSketch(basis)
   }
 
+  // null while idle. Once a plane is picked: { basis } — SpringPanel opens
+  // off this (see the render gate near TextPanel's own). Once SpringPanel
+  // confirms: { basis, params, profilePlane } — params is the resolved coil
+  // geometry (pitchMm/heightMm/coilRadiusMm/coils/lefthand/origin/normal),
+  // profilePlane is the exact plane replicad's own sweepSketch will use
+  // (see computeSpringPathPlane/startSpringProfileSketch) — that's when the
+  // real hand-sketched profile step begins, mirroring how sweepState.path
+  // being set is what flips Sweep from "sketch path" to "sketch profile".
+  const [springState, setSpringState] = useState(null)
+  // 'spring' (additive) | 'springcut' — mirrors sweepTool's split. Persists
+  // across resetSpring3D() the same way sweepTool persists across
+  // resetSweep3D(), only changing on the next activateSpring3DTool(op) call.
+  const [springTool, setSpringTool] = useState('spring')
+
+  function activateSpring3DTool(op = 'spring') {
+    resetSelection()
+    resetDrawState()
+    restoreHiddenEditSolid()
+    // Same restoreSavedView()-inside-guard reasoning as activateLoft3DTool.
+    if (sketchModeRef.current) {
+      setSketchMode(false)
+      setActivePlane(null)
+      setActiveSketchId(null)
+      activePlaneRef.current = null
+      viewport3dRef.current?.restoreSavedView()
+    }
+    setTool('spring3d')
+    setSpringTool(op)
+    setExtrudeTool(null)
+    setExtrudeState(null)
+    setEditingFeatureId(null)
+    setSpringState(null)
+    setSpringOffsetMode(false)
+    setSpringOffsetBase(null)
+  }
+
+  function resetSpring3D() {
+    setSpringState(null)
+    setSpringOffsetMode(false)
+    setSpringOffsetBase(null)
+  }
+
+  async function startSpringPlanePick(pick) {
+    const basis = pick.kind === 'face'
+      ? new FacePlane(pick.facePlane.origin, pick.facePlane.normal, pick.facePlane.uAxis, pick.facePlane.vAxis)
+      : (() => {
+          const b = workPlaneToFacePlaneBasisPx(pick.planeId)
+          return new FacePlane(b.origin, b.normal, b.uAxis, b.vAxis)
+        })()
+    // pickKind carried alongside basis (not derivable from basis alone — a
+    // FacePlane's own .id is unconditionally 'face' even for a work-plane
+    // pick, see FacePlane.js) so SpringPanel's direction toggle can default
+    // sensibly: a real picked FACE's normal always points outward from its
+    // solid, a work plane's normal is just a fixed axis convention with no
+    // such bias — see startSpringProfileSketch's initialReversed computation.
+    setSpringState({ basis, pickKind: pick.kind })
+    await viewport3dRef.current?.snapToFace(basis)
+    // No enterSketch() yet — SpringPanel (numeric coil params) comes first;
+    // the real hand-sketched profile step starts once it confirms, via
+    // startSpringProfileSketch below.
+  }
+
+  // ── Spring step 1: offset (parallel) plane — same idea as Sweep's own
+  // offset plane just above, its own parallel implementation for the same
+  // "don't touch already-shipped tools" reason theirs is. ──
+  function springOffsetFacePlane() {
+    if (!springOffsetBase) return null
+    const basis = springOffsetBase.kind === 'face'
+      ? springOffsetBase.facePlane
+      : planeIdBasis(springOffsetBase.planeId)
+    const distMm = parseFloat(springOffsetDistInput) || 0
+    const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(distMm))
+    const vAxis = new THREE.Vector3().crossVectors(basis.normal, basis.uAxis).normalize()
+    return new FacePlane(origin, basis.normal, basis.uAxis, vAxis)
+  }
+
+  function handleSpringOffsetPlanePick(pick) {
+    if (!springOffsetBase) setSpringOffsetBase(pick)
+    else commitSpringOffset()  // base already picked — any further click accepts the live distance
+  }
+
+  // Commits into the exact same startSpringPlanePick-shaped springState a
+  // directly-picked face/plane already produces — no separate entry point,
+  // no worker changes. Resets the offset state back to defaults so stepping
+  // back to step 1 later doesn't show stale "offset mode on" UI.
+  async function commitSpringOffset() {
+    const facePlane = springOffsetFacePlane()
+    if (!facePlane) return
+    // Inherits pickKind from the offset's own base — the offset plane's
+    // normal is the SAME direction as whatever it was offset from, so the
+    // "does this normal point outward from a real solid" question has the
+    // same answer either way (see startSpringPlanePick's own comment).
+    setSpringState({ basis: facePlane, pickKind: springOffsetBase.kind })
+    await viewport3dRef.current?.snapToFace(facePlane)
+    setSpringOffsetMode(false)
+    setSpringOffsetBase(null)
+    viewport3dRef.current?.hideOffsetPlanePreview()
+  }
+
+  // Drag-to-set-distance — same projection math as handleSweepOffsetDragMove
+  // just above, gated on the spring offset state instead of Sweep's.
+  function handleSpringOffsetDragMove(e) {
+    if (tool !== 'spring3d' || !springOffsetBase) return
+    const vp = viewport3dRef.current
+    if (!vp) return
+    const basis = springOffsetBase.kind === 'face' ? springOffsetBase.facePlane : planeIdBasis(springOffsetBase.planeId)
+    const p0 = vp.worldToScreen(basis.origin.x, basis.origin.y, basis.origin.z)
+    const p1 = vp.worldToScreen(
+      basis.origin.x + basis.normal.x * 2,
+      basis.origin.y + basis.normal.y * 2,
+      basis.origin.z + basis.normal.z * 2,
+    )
+    if (!p0 || !p1) return
+    const dx = p1.x - p0.x, dy = p1.y - p0.y
+    const pxPerMm = Math.hypot(dx, dy)
+    if (!pxPerMm) return
+    const vpRect = vp.getDomElement?.()?.parentElement?.getBoundingClientRect?.()
+    if (!vpRect) return
+    const mx = e.clientX - vpRect.left, my = e.clientY - vpRect.top
+    const proj = (mx - p0.x) * (dx / pxPerMm) + (my - p0.y) * (dy / pxPerMm)
+    let mm = proj / pxPerMm
+    if (gridSnap) mm = Math.round(mm / gridSizeMm) * gridSizeMm
+    setSpringOffsetDistInput(String(Math.round(mm * 100) / 100))
+  }
+
+  useEffect(() => {
+    if (tool !== 'spring3d' || !springOffsetBase) { viewport3dRef.current?.hideOffsetPlanePreview(); return }
+    const fp = springOffsetFacePlane()
+    if (fp) viewport3dRef.current?.showOffsetPlanePreview({ origin: fp.origin, normal: fp.normal, uAxis: fp.uAxis, vAxis: fp.vAxis })
+  }, [tool, springOffsetBase, springOffsetDistInput])
+
+  // SpringPanel's onConfirm — params is the resolved coil geometry (no
+  // profile yet). Asks the worker for the EXACT plane buildSpring's own
+  // sweepSketch call will use (see computeSpringPathPlane's own comment for
+  // why this can't be safely re-derived independently on the main thread),
+  // then opens the real sketch canvas on that plane — same role
+  // computeSweepProfilePlane plays for Sweep, just resolved by querying
+  // replicad directly instead of an in-app tangent formula, since a helix's
+  // start point/tangent depend on OpenCascade's own axis convention.
+  async function startSpringProfileSketch(params) {
+    const basis = springState.basis
+    const origin = [pxToMm(basis.origin.x), pxToMm(basis.origin.y), pxToMm(basis.origin.z)]
+    const { pitchMm, heightMm, coilRadiusMm, coils, lefthand, reversed } = params
+    // A picked FACE's normal always points OUTWARD from its solid (see
+    // cadWorker.js's buildExtrude comment) — growing the coil straight
+    // along it only clips a sliver where the coil's start barely grazes the
+    // surface (a cut) or grows away into open space (additive, usually
+    // fine, but not always what's wanted). SpringPanel's DIRECTION toggle
+    // (reversed) flips this; its own initialReversed default already
+    // accounts for isCut+pickKind, this just applies whatever the user
+    // ended up confirming.
+    const sign = reversed ? -1 : 1
+    const normal = [basis.normal.x * sign, basis.normal.y * sign, basis.normal.z * sign]
+
+    let planeData
+    try {
+      ;({ planeData } = await cadEngine.springProfilePlane({ pitchMm, heightMm, coilRadiusMm, origin, normal, lefthand }))
+    } catch (err) {
+      console.error('Spring failed:', err)
+      setCadError(`Spring failed: ${err.message || String(err)}`)
+      setTimeout(() => setCadError(null), 6000)
+      return
+    }
+
+    const profOrigin = new THREE.Vector3(mmToPx(planeData.origin[0]), mmToPx(planeData.origin[1]), mmToPx(planeData.origin[2]))
+    const profNormal = new THREE.Vector3(...planeData.normal).normalize()
+    const profUAxis  = new THREE.Vector3(...planeData.uAxis).normalize()
+    // Same tail as computeSweepProfilePlane: vAxis = normal × uAxis.
+    const profVAxis  = profNormal.clone().cross(profUAxis)
+    const profilePlane = new FacePlane(profOrigin, profNormal, profUAxis, profVAxis)
+
+    setSpringState({ basis, pickKind: springState.pickKind, params: { pitchMm, heightMm, coilRadiusMm, coils, lefthand, origin, normal }, profilePlane })
+    await viewport3dRef.current?.snapToFace(profilePlane)
+    enterSketch(profilePlane)
+  }
+
   // True while the user is between "Finish Sketch" on one profile and
   // starting the next one's sketch — the window where the drag-to-position
   // ghost preview is shown. Excludes re-visiting an already-sketched later
@@ -6119,6 +6447,92 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }
 
+  // Spring commit — handleFinishSketch's springState branch, once the wire
+  // cross-section profile closes. state is springState itself (basis,
+  // params, profilePlane); profile is {pts, circle} exactly like Sweep's own
+  // detected profile. No path to carry either way (the helix path is fully
+  // described by state.params already) — closest to commitSweep, minus the
+  // path fields.
+  async function commitSpring(state, profile) {
+    const { pitchMm, heightMm, coilRadiusMm, coils, lefthand, origin, normal } = state.params
+    // Captured before resetSpring3D() runs — same ordering commitSweep uses
+    // for isSweepCut, since springTool itself outlives the reset anyway.
+    const isSpringCut = springTool === 'springcut'
+    feat3d.commit(features)
+    resetSpring3D()
+    setTool('select')
+    setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
+    setLines([]); setCircles([]); setArcs([]); setSplines([])
+    viewport3dRef.current?.snapToIsometric()
+
+    // Subtracts the coil volume from whatever solid(s) it overlaps, instead
+    // of adding a new one — same "additive vs cutout" split as commitSweep's
+    // own isSweepCut branch. Always exactly one swept volume, so — per Loft/
+    // Sweep Cut's own precedent — every bbox-overlapping candidate is cut
+    // directly, no cutoutTargetPicker confirm step. Spring has no edit path
+    // at all (no springEditingFeatureId), so every spring cut is created fresh.
+    if (isSpringCut) {
+      const cutParams = {
+        pitchMm, heightMm, coilRadiusMm, origin, normal, lefthand,
+        profilePts: profile.pts, profileCircle: profile.circle,
+      }
+      try {
+        const springBox = springSweepBoxPx(state.basis, state.params, profile)
+        const candidates = solids.filter(s => s.operation !== 'cutout' && s.group)
+        const targets = candidates.filter(s => springBox.intersectsBox(new THREE.Box3().setFromObject(s.group)))
+        if (targets.length === 0) throw new Error('No base solid to cut from')
+
+        const newFeats = []
+        for (let target of targets) {
+          const meshData = await cadEngine.subtract({ baseSolidId: target.id, cut: cutParams, base: buildBaseWorkerParams(target) })
+          const group = replicadMeshToThree(meshData, target.color, target.id)
+          target = { ...target, group }
+          setSolids(prev => prev.map(s => s.id === target.id ? target : s))
+          newFeats.push({
+            id: `springcut-${target.id}-${Date.now()}-${newFeats.length}`,
+            type: 'extrude', operation: 'cutout', name: nextCutoutName(),
+            solidId: target.id, pitchMm, heightMm, coilRadiusMm, coils, lefthand, normal, origin,
+            profilePts: profile.pts, profileCircle: profile.circle, color: '#e05a4e',
+          })
+          await rebuildDependentMirrors(target)
+        }
+        setFeatures(prev => [...prev, ...newFeats])
+      } catch (err) {
+        console.error('Spring cut failed:', err)
+        setCadError(`Spring cut failed: ${err.message || String(err)}`)
+        setTimeout(() => setCadError(null), 6000)
+      }
+      return
+    }
+
+    try {
+      const solidId = Date.now()
+      const meshData = await cadEngine.spring({
+        solidId, pitchMm, heightMm, coilRadiusMm, origin, normal, lefthand,
+        profilePts: profile.pts, profileCircle: profile.circle,
+      })
+      const color = extrudeColor
+      const group = replicadMeshToThree(meshData, color, solidId)
+      const solidData = {
+        id: solidId, group, operation: 'spring', color,
+        pitchMm, heightMm, coilRadiusMm, coils, lefthand, normal, origin,
+        profilePts: profile.pts, profileCircle: profile.circle,
+      }
+      setSolids(prev => [...prev, solidData])
+      const springName = nextSpringName()   // outside the updater — see nextSketchName's comment
+      setFeatures(prev => [...prev, {
+        id: `spring-${solidId}`, type: 'extrude', operation: 'spring', name: springName,
+        solidId, pitchMm, heightMm, coilRadiusMm, coils, lefthand, normal, origin,
+        profilePts: profile.pts, profileCircle: profile.circle, color,
+      }])
+      await rebuildDependentMirrors(solidData)
+    } catch (err) {
+      console.error('Spring failed:', err)
+      setCadError(`Spring failed: ${err.message || String(err)}`)
+      setTimeout(() => setCadError(null), 6000)
+    }
+  }
+
   // Step 2 commit — picking a plane/face (or confirming an offset plane, see
   // commitMirror3DOffset below) mirrors EVERY selected body in one go. `pick`
   // is {kind:'face', facePlane} or {kind:'workplane', planeId} — same shape
@@ -6439,6 +6853,13 @@ const App3D = forwardRef(function App3D(props, ref) {
       // profilePts above are shared with extrude/revolve's own fields, this
       // is just what's genuinely new (see buildBaseWorkerParams' sweep branch).
       pathPts: feat.pathPts, profileCircle: feat.profileCircle,
+      // Spring's coil parameters — normal/origin above are shared with
+      // Sweep/Loft's own fields, and profilePts/profileCircle (the hand-
+      // sketched wire cross-section) are shared with Sweep's own fields
+      // just above; pitchMm/heightMm/coilRadiusMm/coils/lefthand are what's
+      // genuinely new (see buildBaseWorkerParams' spring branch).
+      pitchMm: feat.pitchMm, heightMm: feat.heightMm, coilRadiusMm: feat.coilRadiusMm,
+      coils: feat.coils, lefthand: feat.lefthand,
       // An imported STEP body's whole "recipe" — see buildBaseWorkerParams'
       // import branch.
       stepText: feat.stepText,
@@ -7628,7 +8049,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // evaluated here against a solidId instead of while rendering a row.
   function solidLabel(solidId) {
     const feat = features.find(f => f.type === 'extrude' && !f.joinedInto &&
-      ['extrude','revolve','loft','sweep','mirror','join','import'].includes(f.operation || 'extrude') &&
+      ['extrude','revolve','loft','sweep','spring','mirror','join','import'].includes(f.operation || 'extrude') &&
       f.solidId === solidId)
     return feat?.name || `Body ${solidId}`
   }
@@ -8852,6 +9273,13 @@ const App3D = forwardRef(function App3D(props, ref) {
       return
     }
 
+    // Spring step 1, offset-plane base already picked — same reasoning as
+    // Extrude/Sweep's own versions just above.
+    if (tool==='spring3d' && springOffsetBase) {
+      commitSpringOffset()
+      return
+    }
+
     // ── Extrude / Cutout tool: only intercept outside sketch mode ──
     // Step 2 (sketch mode): clicks belong to sketch tools, not extrude handler
     if (extrudeTool && !sketchMode) {
@@ -9724,6 +10152,17 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (sweepOffsetBase) { setSweepOffsetBase(null); return }
       setSweepOffsetMode(false); return
     }
+    if (e.key==='Enter'&&tool==='spring3d'&&springOffsetBase){
+      // Same reasoning as Extrude/Sweep's own Enter handlers just above.
+      e.preventDefault()
+      commitSpringOffset()
+      return
+    }
+    if (e.key==='Escape'&&tool==='spring3d'&&springOffsetMode){
+      // Same back-out-one-level convention as Extrude/Sweep's own handlers above.
+      if (springOffsetBase) { setSpringOffsetBase(null); return }
+      setSpringOffsetMode(false); return
+    }
     if (e.key==='Escape'&&extrudeTool){
       // Cancel from step 3 (depth) — restore any hidden solid
       restoreHiddenEditSolid()
@@ -10490,7 +10929,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   return (
     <div ref={rootDivRef} style={{display:'flex',height:'100%',outline:'none'}} tabIndex={0}
       onKeyDown={handleKeyDown}
-      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e); handleMirror3DOffsetDragMove(e); handleExtrudeOffsetDragMove(e); handleSweepOffsetDragMove(e); handleMoveCopy3DDragMove(e); handleMoveCopy3DGizmoHover(e); handleSnapMoveHover(e) }}
+      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e); handleMirror3DOffsetDragMove(e); handleExtrudeOffsetDragMove(e); handleSweepOffsetDragMove(e); handleSpringOffsetDragMove(e); handleMoveCopy3DDragMove(e); handleMoveCopy3DGizmoHover(e); handleSnapMoveHover(e) }}
       onMouseUp={e=>{ }}
     >
 
@@ -10590,11 +11029,12 @@ const App3D = forwardRef(function App3D(props, ref) {
               [{id:'revolve',  label:'REVOLVE', color:'#FBDA2D'}, {id:'revolvecut', label:'REVOLVE CUT', color:'#53D3E4'}],
               [{id:'loft3d',   label:'LOFT',    color:'#FBDA2D'}, {id:'loftcutout', label:'LOFT CUT',    color:'#53D3E4'}],
               [{id:'sweep3d',  label:'SWEEP',   color:'#7ED957'}, {id:'sweepcut',   label:'SWEEP CUT',   color:'#53D3E4'}],
-              // No cutout counterpart — full-width rows, unchanged from before.
-              [{id:'fillet3d', label:'FILLET',  color:'#A470F2'}],
-              [{id:'mirror3d', label:'MIRROR',  color:'#8E65F3'}],
-              [{id:'join3d',   label:'JOIN',    color:'#FFEE88'}],
-              [{id:'movecopy3d', label:'MOVE/COPY', color:'#FF9800'}],
+              [{id:'spring3d', label:'SPRING',  color:'#F06292'}, {id:'springcut', label:'SPRING CUT', color:'#53D3E4'}],
+              // No cutout counterpart — paired side by side (instead of each
+              // as its own full-width row) for a more compact, grid-like
+              // layout, matching the pairs above.
+              [{id:'fillet3d', label:'FILLET',  color:'#A470F2'}, {id:'mirror3d', label:'MIRROR', color:'#8E65F3'}],
+              [{id:'join3d',   label:'JOIN',    color:'#FFEE88'}, {id:'movecopy3d', label:'MOVE/COPY', color:'#FF9800'}],
             ].map((row, rowIdx) => {
               const paired = row.length > 1
               return (
@@ -10605,6 +11045,8 @@ const App3D = forwardRef(function App3D(props, ref) {
                     : id==='loftcutout' ? ((tool==='loft3d' || !!loftState) && loftTool==='loftcutout')
                     : id==='sweep3d' ? ((tool==='sweep3d' || !!sweepState) && sweepTool!=='sweepcut')
                     : id==='sweepcut' ? ((tool==='sweep3d' || !!sweepState) && sweepTool==='sweepcut')
+                    : id==='spring3d' ? ((tool==='spring3d' || !!springState) && springTool!=='springcut')
+                    : id==='springcut' ? ((tool==='spring3d' || !!springState) && springTool==='springcut')
                     : id==='movecopy3d' ? tool==='movecopy3d'
                     : extrudeTool===id
                   const iconSize = paired ? 28 : 40
@@ -10620,6 +11062,8 @@ const App3D = forwardRef(function App3D(props, ref) {
                       else if (id==='loftcutout') activateLoft3DTool('loftcutout')
                       else if (id==='sweep3d') activateSweep3DTool('sweep')
                       else if (id==='sweepcut') activateSweep3DTool('sweepcut')
+                      else if (id==='spring3d') activateSpring3DTool('spring')
+                      else if (id==='springcut') activateSpring3DTool('springcut')
                       else if (id==='movecopy3d') activateMoveCopy3DTool()
                     }}
                     style={{...btnBase, flexDirection:'column', gap:1,
@@ -10947,7 +11391,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             onScaleChange={handleScaleChange}
             onPlaneClick={handlePlaneClick}
             onFaceClick={handleFaceClick}
-            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode) || (tool==='mirror3d' && mirror3dSelectionDone) || (tool==='loft3d' && !loftState) || (tool==='sweep3d' && !sweepState) || tool==='exportfacedxf'}
+            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode) || (tool==='mirror3d' && mirror3dSelectionDone) || (tool==='loft3d' && !loftState) || (tool==='sweep3d' && !sweepState) || (tool==='spring3d' && !springState) || tool==='exportfacedxf'}
             mirrorPlanePickArmed={tool==='mirror3d' && mirror3dSelectionDone && !mirror3dOffsetBase}
             dxfPickMode={tool==='exportfacedxf'}
             dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : []}
@@ -11235,6 +11679,43 @@ const App3D = forwardRef(function App3D(props, ref) {
             }
             onStepBack={step => {
               if (step === 1) resetSweep3D()
+            }}
+          />
+
+          {/* ── SmartStep bar: overlays bottom of viewport during Spring ──
+              No sketch step at all — step 2 opens SpringPanel directly
+              (see the modal render further down), never a canvas sketch. */}
+          <SmartStepBar
+            op={(tool==='spring3d' || springState) ? (springTool==='springcut' ? 'SPRING CUT' : 'SPRING') : null}
+            steps={[{ id:1, label:'Pick Plane' }, { id:2, label:'Set Parameters' }, { id:3, label:'Sketch Profile' }]}
+            currentStep={springState?.profilePlane ? 3 : springState ? 2 : 1}
+            color={springTool==='springcut' ? '#53D3E4' : '#F06292'}
+            hint={!springState
+              ? (springOffsetBase
+                  ? 'Move the mouse or type a distance, Enter to confirm'
+                  : springOffsetMode
+                    ? 'Click a plane or face to offset from'
+                    : 'Click a work plane or face')
+              : !springState.profilePlane
+                ? 'Set spring parameters, then continue'
+                : `Draw a closed profile, then Finish${sketchMode ? ' · sketching' : ''}`}
+            action={
+              !springState
+                ? [
+                    springOffsetBase
+                      ? { label:'✓ Use Plane', enabled:true, onClick:commitSpringOffset,
+                          popover: <OffsetDistancePopover color={springTool==='springcut' ? '#53D3E4' : '#F06292'}
+                            value={springOffsetDistInput} onChange={setSpringOffsetDistInput}/> }
+                      : { label: springOffsetMode ? '✕ Cancel Offset' : '+ Offset Plane', enabled:true,
+                          onClick:()=>{
+                            if (springOffsetMode) { setSpringOffsetMode(false); setSpringOffsetBase(null) }
+                            else setSpringOffsetMode(true)
+                          }},
+                  ]
+                : null
+            }
+            onStepBack={step => {
+              if (step === 1) resetSpring3D()
             }}
           />
 
@@ -12609,6 +13090,19 @@ const App3D = forwardRef(function App3D(props, ref) {
             resetText();setTool('line')
           }}
           onClose={()=>{resetText();setTool('line')}}
+        />
+      )}
+      {springState && !springState.profilePlane && (
+        <SpringPanel
+          onConfirm={startSpringProfileSketch}
+          onClose={resetSpring3D}
+          color={springTool==='springcut' ? '#53D3E4' : '#F06292'}
+          isCut={springTool==='springcut'}
+          // Smart default: a cut anchored on a REAL picked face should grow
+          // INTO the solid by default (matching Extrude/Cutout's own
+          // planeId==='face' && isCut convention) — a work-plane pick has
+          // no such "outward" bias, so it defaults unreversed either way.
+          initialReversed={springTool==='springcut' && springState?.pickKind==='face'}
         />
       )}
     </div>

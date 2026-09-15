@@ -1,6 +1,6 @@
 import opencascade from 'replicad-opencascadejs/src/replicad_single.js'
 import opencascadeWasm from 'replicad-opencascadejs/src/replicad_single.wasm?url'
-import { setOC, Sketcher, Plane, makePlane, sketchCircle, getOC, cast, localGC, FaceFinder, Vector, importSTEP } from 'replicad'
+import { setOC, Sketcher, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, Vector, importSTEP } from 'replicad'
 
 const SCALE = 2
 // Tolerance (mm) for matching a picked screen point to the actual OCC edge —
@@ -357,6 +357,12 @@ function clampCutDepth(cut, baseParams) {
 function buildCutShape(cut) {
   return cut.profiles ? buildLoft({ ...cut, profiles: extendLoftCutProfiles(cut.profiles) })
     : cut.axis ? buildRevolve(cut)
+    // No flush-face overhang margin — same posture buildRevolve's cut path
+    // already ships with, and unlike extendSweepCutPath's arc/spline-
+    // tangent-approximation concern, a helix's start point/tangent are
+    // exact by construction (see computeSpringPathPlane), so there's no
+    // equivalent risk to guard against here even if a margin is added later.
+    : cut.pitchMm !== undefined ? buildSpring(cut)
     : cut.pathPts ? buildSweep(extendSweepCutPath(cut))
     : buildExtrude({ ...cut, isCut: true })
 }
@@ -615,6 +621,11 @@ self.onmessage = async function(e) {
       return
     }
 
+    if (type==='springProfilePlane') {
+      self.postMessage({ type:'result', id, planeData: computeSpringPathPlane(params) })
+      return
+    }
+
     let shape
     if (type==='extrude'||type==='cutout') {
       shape = buildExtrude(params)
@@ -627,6 +638,9 @@ self.onmessage = async function(e) {
       if (params.solidId) shapeStore.set(params.solidId, shape)
     } else if (type==='sweep') {
       shape = buildSweep(params)
+      if (params.solidId) shapeStore.set(params.solidId, shape)
+    } else if (type==='spring') {
+      shape = buildSpring(params)
       if (params.solidId) shapeStore.set(params.solidId, shape)
     } else if (type==='fillet3d') {
       // Edge-pick fillet: applies to whatever this solid currently looks like
@@ -1206,6 +1220,70 @@ function buildSweep({ pathPts, planeId, normal, origin, uAxis, profilePts, profi
   return shape
 }
 
+// Spring — a hand-sketched wire cross-section swept along a helical path.
+// Unlike a plain circle wire, the profile here is real user-sketched
+// geometry (same shape detectProfiles/buildMixedProfile produce for Sweep's
+// own profile), sketched on the EXACT plane replicad's sweepSketch call
+// below will compute internally — see computeSpringPathPlane, which App3D.jsx
+// calls BEFORE showing the sketch canvas, so what the user draws lines up
+// with what actually gets swept. The path itself is still purely parametric
+// (no hand-drawn points): replicad's own sketchHelix(pitch, height, radius,
+// center, dir, lefthand) builds the whole helical Sketch directly from plain
+// [x,y,z] arrays — no Plane/Vector wrapping, no makePath involved.
+function buildSpring({ pitchMm, heightMm, coilRadiusMm, origin, normal, lefthand=false, profilePts, profileCircle }) {
+  const pathSketch = sketchHelix(pitchMm, heightMm, coilRadiusMm, origin, normal, lefthand)
+  // frenet:true is required here — replicad's genericSweep defaults to
+  // frenet:false (OCC's "CorrectedFrenet" trihedron law), which deliberately
+  // MINIMIZES the profile's rotation along the spine to avoid gratuitous
+  // twisting. For a circular profile that's invisible (rotationally
+  // symmetric), which is why this went unnoticed while Spring only supported
+  // a plain circle wire — but for any real hand-sketched (non-circular)
+  // profile it means the cross-section stays at a near-fixed orientation in
+  // world space as it travels, instead of rotating WITH the coil, producing
+  // radial fin/blade artifacts instead of a properly twisted wire. True
+  // Frenet mode rotates the profile to track the spine's own natural
+  // rotation — for a helix, exactly one full 360° turn of the profile per
+  // coil, matching the coil's own geometry.
+  const shape = pathSketch.sweepSketch((plane) => makeProfileOnPlane(profilePts, plane, true, profileCircle), { frenet: true })
+  // Same BRepCheck_Analyzer guard as buildSweep — a wire cross-section too
+  // large relative to the pitch/coil radius can self-intersect.
+  const oc = getOC()
+  const analyzer = new oc.BRepCheck_Analyzer(shape.wrapped, true, false)
+  const valid = analyzer.IsValid_2()
+  analyzer.delete()
+  if (!valid) throw new Error('Spring failed: could not build a valid solid — try a smaller wire profile or larger pitch')
+  return shape
+}
+
+// Returns the exact plane buildSpring's own sweepSketch call will hand its
+// profile-building callback — mirrors Sketch.sweepSketch's plane math
+// EXACTLY (see node_modules/replicad/dist/replicad.js): startPoint =
+// wire.startPoint, normal = -tangentAt(~0) (normalized), xDir =
+// normal×defaultDirection×-1. sketchHelix's Sketch is built via `new
+// Sketch(assembleWire(...))` with no defaultOrigin/defaultDirection
+// override, so defaultDirection stays the class default [0,0,1] here —
+// NOT origin/normal, and NOT basis.normal the way a hand-sketched Sweep
+// path's own Sketcher(plane)-built Sketch would carry.
+//
+// This is computed by actually building the helix wire and reading real
+// values off it (wire.startPoint/tangentAt), rather than independently
+// re-deriving OpenCascade's gp_Ax3(origin,dir) X-direction convention by
+// hand — that convention is a real, deterministic algorithm, but it's
+// undocumented from the JS binding's perspective and not worth risking a
+// silent mismatch (a mirrored/misaligned profile plane) when replicad's own
+// wire object already knows the exact answer for free.
+function computeSpringPathPlane({ pitchMm, heightMm, coilRadiusMm, origin, normal, lefthand=false }) {
+  const pathSketch = sketchHelix(pitchMm, heightMm, coilRadiusMm, origin, normal, lefthand)
+  const startPoint = pathSketch.wire.startPoint
+  const tangent = pathSketch.wire.tangentAt(1e-9).multiply(-1).normalize()
+  const xDir = tangent.cross(new Vector([0, 0, 1])).multiply(-1).normalize()
+  return {
+    origin: [startPoint.x, startPoint.y, startPoint.z],
+    normal: [tangent.x, tangent.y, tangent.z],
+    uAxis: [xDir.x, xDir.y, xDir.z],
+  }
+}
+
 function buildExtrude({ pts, depthMm, planeId, direction='both',
                         normal, origin, uAxis, vAxis, isCut=false, circle=null,
                         draftAngleDeg=0, draftDirection='out' }) {
@@ -1297,6 +1375,14 @@ function buildExtrude({ pts, depthMm, planeId, direction='both',
 async function buildBase(params) {
   if (params.stepText) return await importSTEP(new Blob([params.stepText]))
   if (params.profiles) return buildLoft(params)
+  // Pre-existing gap: Sweep's pathPts shape had no branch here at all,
+  // silently falling through to buildExtrude and throwing "Need ≥3 pts" —
+  // surfaced by mirrorShape (below), which calls buildBase unconditionally
+  // whenever base params are supplied, unlike subtract/fillet3d's
+  // shapeStore-first fallback. Fixed alongside adding Spring's own params,
+  // which would hit the identical gap otherwise.
+  if (params.pitchMm !== undefined) return buildSpring(params)
+  if (params.pathPts) return buildSweep(params)
   return params.axis ? buildRevolve(params) : buildExtrude(params)
 }
 

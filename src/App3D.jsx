@@ -50,7 +50,7 @@ import {
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
   IconUndo, IconRedo, IconFitView, IconReframe, IconNew, IconSave, IconLoad, IconCloudSave, IconCloudLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
   IconIncludeEdge,
-  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D, IconRevolve3D, IconSpring3D,
+  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D, IconRevolve3D, IconSpring3D, IconShell3D,
 } from './draw/ToolIcons.jsx'
 import { glowStroke, glowFill } from './draw/vectorTheme.js'
 
@@ -60,7 +60,7 @@ import { glowStroke, glowFill } from './draw/vectorTheme.js'
 const SOLID_ICON_COMPONENTS = {
   extrude: IconExtrude3D, cutout: IconCutout3D, fillet3d: IconFillet3D,
   mirror3d: IconMirror3D, loft3d: IconLoft3D, join3d: IconJoin3D, movecopy3d: IconMoveCopy3D,
-  sweep3d: IconSweep3D, revolve: IconRevolve3D, spring3d: IconSpring3D,
+  sweep3d: IconSweep3D, revolve: IconRevolve3D, spring3d: IconSpring3D, shell3d: IconShell3D,
   // Reuses the additive Sweep icon's shape, rendered in Cutout's color —
   // same "one glyph, color signals cut variant" convention loftcutout/
   // revolvecut use.
@@ -425,10 +425,12 @@ function computeSweepProfilePlane(basis, path) {
 // use freshly-built state, not a stale render's closure.
 function buildSolidOpsForWorker(solid, features) {
   return features
-    .filter(f => f.solidId === solid.id && (f.operation === 'cutout' || f.type === 'fillet'))
+    .filter(f => f.solidId === solid.id && (f.operation === 'cutout' || f.type === 'fillet' || f.type === 'shell'))
     .map(f => f.type === 'fillet'
       ? { type: 'fillet', operation: f.operation ?? 'fillet', radius: f.radius, edgePoints: f.edgePoints }
-      : { type: 'cut', params: buildCutWorkerParams(f) })
+      : f.type === 'shell'
+        ? { type: 'shell', thickness: f.thickness, direction: f.direction ?? 'inward', facePoints: f.facePoints }
+        : { type: 'cut', params: buildCutWorkerParams(f) })
 }
 
 // Rebuilds a solid's clean base mesh (via cadEngine.revolve or .extrude,
@@ -872,6 +874,7 @@ function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEP
 function featureOpColor(feat) {
   if (feat.type === 'sketch') return '#4FC3F7'
   if (feat.type === 'fillet') return '#A470F2'
+  if (feat.type === 'shell') return '#4DB6AC'
   const op = feat.operation || 'extrude'
   return {
     extrude: '#FBDA2D', revolve: '#FBDA2D', cutout: '#53D3E4',
@@ -891,6 +894,7 @@ function RowIcon({ kind, color, size=13 }) {
     cutout:  <path d="M6.5 2v8M3 6.5L6.5 10l3.5-3.5" {...p}/>,
     revolve: <><path d="M10.5 6.5a4 4 0 1 1-1.3-2.95" {...p}/><path d="M10.8 2.2l.3 2.4-2.4-.4" {...p}/></>,
     fillet:  <path d="M2 10q0-8 8-8" {...p}/>,
+    shell:   <><rect x="2" y="2" width="9" height="9" rx="1" {...p}/><rect x="4" y="4" width="5" height="5" rx="0.5" strokeDasharray="1.2 1.2" {...p}/></>,
     mirror:  <><line x1="6.5" y1="1" x2="6.5" y2="12" strokeDasharray="1.5 1.5" {...p}/><path d="M4.5 4L2.5 5.5 4.5 7" {...p}/><path d="M8.5 4l2 1.5-2 1.5" {...p}/></>,
     join:    <><circle cx="5" cy="6.5" r="3.5" {...p}/><circle cx="8" cy="6.5" r="3.5" {...p}/></>,
     loft:    <><rect x="4" y="1.5" width="5" height="2.5" {...p}/><rect x="1.5" y="8" width="10" height="2.5" {...p}/><line x1="4.5" y1="4" x2="2.5" y2="8" {...p}/><line x1="8.5" y1="4" x2="9.5" y2="8" {...p}/></>,
@@ -958,7 +962,7 @@ function CutoutGlyph({ color='#7fa8cc' }) {
   )
 }
 
-function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, onEditLoft, hiddenSolidIds, onToggleBodyVisible, onConvertSketch, hasSolids }) {
+function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, onEditShellThickness, onEditLoft, hiddenSolidIds, onToggleBodyVisible, onConvertSketch, hasSolids }) {
   const [editingName, setEditingName] = useState(null)
   const [editDepthId, setEditDepthId] = useState(null)
   const [depthVal, setDepthVal]       = useState('')
@@ -1017,6 +1021,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           const isSketch = feat.type === 'sketch'
           const isExtrude = feat.type === 'extrude'
           const isFillet = feat.type === 'fillet'
+          const isShell = feat.type === 'shell'
           const isMirror = isExtrude && feat.operation === 'mirror'
           const isJoin = isExtrude && feat.operation === 'join'
           const isLoft = isExtrude && feat.operation === 'loft'
@@ -1055,7 +1060,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           const isBodyHidden = isBodyOwner && hiddenSolidIds?.includes(feat.solidId)
           const editingDepth = editDepthId === feat.id
 
-          const rowKind = isSketch ? 'sketch' : isFillet ? 'fillet' : isMirror ? 'mirror'
+          const rowKind = isSketch ? 'sketch' : isShell ? 'shell' : isFillet ? 'fillet' : isMirror ? 'mirror'
             : isJoin ? 'join' : isLoft ? 'loft' : isSweep ? 'sweep' : isSpring ? 'spring' : feat.operation === 'cutout' ? 'cutout'
             : feat.operation === 'revolve' ? 'revolve' : feat.operation === 'import' ? 'import' : 'extrude'
           const rowColor = featureOpColor(feat)
@@ -1216,6 +1221,22 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                       {!sketchMode && (
                         <button title={feat.operation==='chamfer' ? 'Edit chamfer distance' : 'Edit fillet radius'}
                           onClick={e=>{e.stopPropagation(); onEditFilletRadius(feat.id)}}
+                          style={{background:'none',border:'none',cursor:'pointer',
+                            padding:'1px 3px', display:'flex', alignItems:'center'}}
+                        ><RulerGlyph/></button>
+                      )}
+                      <button title="Delete"
+                        onClick={e=>{e.stopPropagation(); onDelete(feat.id)}}
+                        style={{background:'none',border:'none',cursor:'pointer',
+                          padding:'1px 3px', fontSize:11, color:'#ff6b5e'}}
+                      >✕</button>
+                    </>
+                  )}
+                  {isShell && (
+                    <>
+                      {!sketchMode && (
+                        <button title="Edit shell thickness"
+                          onClick={e=>{e.stopPropagation(); onEditShellThickness(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
                             padding:'1px 3px', display:'flex', alignItems:'center'}}
                         ><RulerGlyph/></button>
@@ -1389,6 +1410,19 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                   </div>
                 </div>
               )}
+
+              {/* Shell subtitle: colour + thickness + face count */}
+              {isShell && (
+                <div style={{marginLeft:20, marginTop:3}}>
+                  <div style={{display:'flex', alignItems:'center', gap:5}}>
+                    <div style={{width:8,height:8,borderRadius:'50%',
+                      background:feat.color||'#4DB6AC', flexShrink:0}}/>
+                    <span style={{color:'#8fa0b8', fontSize:10}}>
+                      shell · {feat.facePoints?.length ?? 0} face{feat.facePoints?.length!==1?'s':''} open, {feat.thickness}mm wall{feat.direction==='outward' ? ' · outward' : ''}
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
           )
         })}
@@ -1534,7 +1568,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }, [features])
   const [activeSketchId,setActiveSketchId]=useState(null)  // which sketch is being edited
-  const featureCountRef=useRef({sketch:0,extrude:0,cutout:0,fillet:0,chamfer:0,mirror:0,join:0,loft:0,sweep:0,spring:0})       // for auto-naming
+  const featureCountRef=useRef({sketch:0,extrude:0,cutout:0,fillet:0,chamfer:0,mirror:0,join:0,loft:0,sweep:0,spring:0,shell:0})       // for auto-naming
   const [treeCollapsed,setTreeCollapsed]=useState(false)
 
   const viewport3dRef=useRef(null)
@@ -1549,7 +1583,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // space that doesn't belong to any visible sketch. Snapping back to
   // 'select' the moment sketchMode goes false closes that off in one place
   // instead of guarding every sketch tool's click handler individually.
-  const ALWAYS_AVAILABLE_TOOLS = useRef(new Set(['select','extrude','cutout','fillet3d','measure','exportfacedxf','exportstl','exportstep','color','join3d','mirror3d','loft3d'])).current
+  const ALWAYS_AVAILABLE_TOOLS = useRef(new Set(['select','extrude','cutout','fillet3d','shell3d','measure','exportfacedxf','exportstl','exportstep','color','join3d','mirror3d','loft3d'])).current
   useEffect(() => {
     if (!sketchMode && tool && !ALWAYS_AVAILABLE_TOOLS.has(tool)) setTool('select')
   }, [sketchMode])
@@ -4031,6 +4065,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     featureCountRef.current.chamfer += 1
     return `Chamfer ${featureCountRef.current.chamfer}`
   }
+  function nextShellName() {
+    featureCountRef.current.shell += 1
+    return `Shell ${featureCountRef.current.shell}`
+  }
   function nextMirrorName() {
     featureCountRef.current.mirror += 1
     return `Mirror ${featureCountRef.current.mirror}`
@@ -4130,6 +4168,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     // straight to SpringPanel (see startSpringPlanePick), never enterSketch.
     if (tool==='spring3d' && !springState) { startSpringPlanePick({ kind:'face', facePlane }); return }
     if (tool==='exportfacedxf') { handleExportFaceDXFFaceClick(facePlane); return }
+    if (tool==='shell3d') { handleShellFaceClick(facePlane); return }
     if (extrudeTool && extrudeOffsetMode) { handleExtrudeOffsetPlanePick({ kind:'face', facePlane }); return }
     if (extrudeState) return  // step 3 (depth): ignore stray face clicks
     enterSketch(facePlane)
@@ -4677,6 +4716,55 @@ const App3D = forwardRef(function App3D(props, ref) {
     setFillet3dMode('fillet')
   }
 
+  // ── Shell (3D face) state machine ──────────────────────────────────────────
+  // No separate hover state needed — Shell reuses the same sketchArmed/
+  // onFaceClick pipeline Export Face DXF/Mirror3D/Loft3D use for face-
+  // picking, which already shows a hover face-plane indicator for free
+  // (Viewport3D.jsx's animate() loop). Phase 1 (selecting): click toggles
+  // faces in/out of shell3dSel (same key-toggle idiom as
+  // handleExportFaceDXFFaceClick, but scoped to one solid per session, like
+  // Fillet). Phase 2 (accepted, once shell3dSel.length>0): thickness popup
+  // shown, no more face picking. Phase 3 (commit): popup's ↵ →
+  // cadEngine.shell3d() hollows the solid, removing every picked face in one
+  // operation (replicad's FaceFinder.either() combinator — see
+  // cadWorker.js's applyShell).
+  const [shell3dSel, setShell3dSel] = useState([])              // [{solidId, point, key}] accumulated face picks
+  const [shell3dAccepted, setShell3dAccepted] = useState(false)
+  const [shell3dThicknessInput, setShell3dThicknessInput] = useState('2')
+  const [shell3dHandlePos, setShell3dHandlePos] = useState(null)
+  // Not reset by resetShell3D() (mid-session Esc-to-back-up) — only a fresh
+  // tool activation reverts to Inward, mirroring fillet3dMode's own
+  // survive-a-back-up behavior.
+  const [shell3dDirection, setShell3dDirection] = useState('inward')   // 'inward' | 'outward'
+
+  function activateShell3DTool() {
+    resetSelection()
+    resetDrawState()
+    restoreHiddenEditSolid()
+    if (sketchModeRef.current) {
+      setSketchMode(false)
+      setActivePlane(null)
+      setActiveSketchId(null)
+      activePlaneRef.current = null
+      viewport3dRef.current?.restoreSavedView()
+    }
+    setTool('shell3d')
+    setExtrudeTool(null)
+    setExtrudeState(null)
+    setEditingFeatureId(null)
+    setShell3dSel([])
+    setShell3dAccepted(false)
+    setShell3dThicknessInput('2')
+    setShell3dHandlePos(null)
+    setShell3dDirection('inward')
+  }
+  function resetShell3D() {
+    setShell3dSel([])
+    setShell3dAccepted(false)
+    setShell3dHandlePos(null)
+    setEditingFeatureId(null)
+  }
+
   // ── Measure (3D) state machine ────────────────────────────────────────────
   // An explicit mode toggle (measureMode, buttons in the SmartStepBar below)
   // decides what a click/hover can even see — this replaced an earlier
@@ -5070,6 +5158,76 @@ const App3D = forwardRef(function App3D(props, ref) {
       console.error('Export Face DXF failed:', err)
     } finally {
       setExportFaceDXFBusy(false)
+    }
+  }
+
+  // Click while the Shell tool is armed — toggle a face in/out of
+  // shell3dSel, same key-toggle idiom as handleExportFaceDXFFaceClick.
+  // Unlike DXF export, Shell is scoped to ONE solid per session (matching
+  // Fillet's own "one solid per selection session" constraint) since a
+  // shell operation hollows a single body — a click on a different solid
+  // than the one already in progress is ignored rather than accumulated.
+  function handleShellFaceClick(facePlane) {
+    if (shell3dAccepted || facePlane.solidId == null) return
+    if (shell3dSel.length > 0 && facePlane.solidId !== shell3dSel[0].solidId) return
+    const point = { x: facePlane.point.x, y: facePlane.point.y, z: facePlane.point.z }
+    // normal is carried alongside point purely for Viewport3D's persistent
+    // face-outline highlight (facePickBoundaryLoops needs it) — the worker
+    // itself only needs the point (see commitShell3D's facePoints).
+    const normal = { x: facePlane.normal.x, y: facePlane.normal.y, z: facePlane.normal.z }
+    const key = `${facePlane.solidId}_${[point.x,point.y,point.z].map(v=>v.toFixed(1)).join('_')}`
+    setShell3dSel(prev => {
+      if (prev.some(s => s.key === key)) return prev.filter(s => s.key !== key)
+      return [...prev, { solidId: facePlane.solidId, point, normal, key }]
+    })
+    // Anchor the picking-hint/thickness popup near this pick — handleFaceClick
+    // only hands us facePlane (no raw mouse event to read clientX/Y from, the
+    // way handleFillet3DClick does), so project the world point back to
+    // screen space instead, same technique handleEditShellThickness uses.
+    const screenPt = viewport3dRef.current?.worldToScreen(point.x, point.y, point.z)
+    if (screenPt) setShell3dHandlePos({ x: screenPt.x + 20, y: screenPt.y - 20 })
+  }
+
+  // Commits the Shell operation — mirrors commitFillet3D's structure
+  // (single-solid rebuild in place, not a new body-owning feature).
+  async function commitShell3D() {
+    if (shell3dSel.length === 0) return
+    const SCALE = 2
+    const solidId = shell3dSel[0].solidId
+    const facePoints = shell3dSel.map(s => [s.point.x/SCALE, s.point.y/SCALE, s.point.z/SCALE])
+    // Stored alongside facePoints purely so a later edit can reconstruct
+    // shell3dSel's normals for the highlight (see handleEditShellThickness)
+    // — the worker itself never reads this.
+    const faceNormals = shell3dSel.map(s => [s.normal.x, s.normal.y, s.normal.z])
+    const thickness = parseFloat(shell3dThicknessInput) || 1
+    const direction = shell3dDirection
+    const targetSolid = solids.find(s => s.id === solidId)
+    if (!targetSolid) { resetShell3D(); return }
+    const editingId = editingFeatureId
+    feat3d.commit(features)
+    resetShell3D()
+    try {
+      const meshData = editingId
+        ? await rebuildSolidChain(targetSolid, { overrideId: editingId, overrideShellThickness: thickness })
+        : await cadEngine.shell3d({ solidId, facePoints, thickness, direction, base: buildBaseWorkerParams(targetSolid) })
+      const group = replicadMeshToThree(meshData, targetSolid.color, solidId)
+      const updatedSolid = { ...targetSolid, group }
+      setSolids(prev => prev.map(s => s.id === solidId ? updatedSolid : s))
+      if (editingId) {
+        setFeatures(prev => prev.map(f => f.id === editingId ? { ...f, thickness, direction } : f))
+      } else {
+        const name = nextShellName()
+        setFeatures(prev => [...prev, {
+          id: `shell-${solidId}-${Date.now()}`, type: 'shell', operation: 'shell',
+          name,
+          solidId, facePoints, faceNormals, thickness, direction, color: targetSolid.color,
+        }])
+      }
+      await rebuildDependentMirrors(updatedSolid)
+    } catch (err) {
+      console.error('Shell failed:', err)
+      setCadError(`Shell failed: ${err.message || String(err)} — try a smaller thickness or different faces.`)
+      setTimeout(() => setCadError(null), 6000)
     }
   }
 
@@ -7099,6 +7257,16 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }, [tool])
 
+  // Leaving the shell tool for any other tool clears its selection — the
+  // persistent face outline itself just follows shell3dSel via the
+  // dxfSelectedFaces prop (see the Viewport3D render call), so clearing the
+  // array here is enough to also clear the highlight.
+  useEffect(() => {
+    if (tool !== 'shell3d') {
+      setShell3dSel([]); setShell3dAccepted(false); setShell3dHandlePos(null)
+    }
+  }, [tool])
+
   // Keeps Measure's point-mode markers (P1 dot, live hover dot + connector)
   // in sync — mirrors fillet3d's marker-sync effect above. Edge-mode's
   // highlight is handled separately by setSelectedEdges (in handleMeasureClick)
@@ -7134,6 +7302,28 @@ const App3D = forwardRef(function App3D(props, ref) {
     const firstPt = feat.edgePoints[0]
     const screenPt = firstPt && vp?.worldToScreen(firstPt[0]*SCALE, firstPt[1]*SCALE, firstPt[2]*SCALE)
     setFillet3dHandlePos(screenPt ? { x: screenPt.x+20, y: screenPt.y-20 } : { x: window.innerWidth/2, y: window.innerHeight/2 })
+  }
+
+  function handleEditShellThickness(featureId) {
+    const feat = features.find(f => f.id === featureId)
+    if (!feat || feat.type !== 'shell') return
+    resetSelection(); resetDrawState()
+    setTool('shell3d')
+    setEditingFeatureId(featureId)
+    const SCALE = 2
+    setShell3dSel(feat.facePoints.map((pt,i) => {
+      const point = { x: pt[0]*SCALE, y: pt[1]*SCALE, z: pt[2]*SCALE }
+      const n = feat.faceNormals?.[i] ?? [0,0,1]
+      const normal = { x: n[0], y: n[1], z: n[2] }
+      return { solidId: feat.solidId, point, normal, key: `${feat.solidId}_${[point.x,point.y,point.z].map(v=>v.toFixed(1)).join('_')}` }
+    }))
+    setShell3dAccepted(true)
+    setShell3dThicknessInput(String(feat.thickness))
+    setShell3dDirection(feat.direction ?? 'inward')
+    const vp = viewport3dRef.current
+    const firstPt = feat.facePoints[0]
+    const screenPt = firstPt && vp?.worldToScreen(firstPt[0]*SCALE, firstPt[1]*SCALE, firstPt[2]*SCALE)
+    setShell3dHandlePos(screenPt ? { x: screenPt.x+20, y: screenPt.y-20 } : { x: window.innerWidth/2, y: window.innerHeight/2 })
   }
 
   async function commitFillet3D() {
@@ -7920,11 +8110,11 @@ const App3D = forwardRef(function App3D(props, ref) {
   // applied first. `overrideId` + `overrideCut`/`overrideFilletRadius`
   // substitutes new params for ONE feature being edited; `skipId` omits one
   // being deleted. Returns the final meshData.
-  async function rebuildSolidChain(baseSolid, { overrideId=null, overrideCut=null, overrideFilletRadius=null, skipId=null, skipIds=null } = {}, feats = features, solidsLookup = solids) {
+  async function rebuildSolidChain(baseSolid, { overrideId=null, overrideCut=null, overrideFilletRadius=null, overrideShellThickness=null, skipId=null, skipIds=null } = {}, feats = features, solidsLookup = solids) {
     let { meshData, baseWorkerParams } = baseSolid.operation === 'join'
       ? await rebuildJoinBaseMesh(baseSolid, feats, solidsLookup)
       : await rebuildBaseMesh(baseSolid)
-    const ops = feats.filter(f => f.solidId === baseSolid.id && (f.operation === 'cutout' || f.type === 'fillet'))
+    const ops = feats.filter(f => f.solidId === baseSolid.id && (f.operation === 'cutout' || f.type === 'fillet' || f.type === 'shell'))
     // skipIds lets a caller skip several ops in ONE rebuild pass (e.g. deleting
     // or re-sketching every member of a multi-hole cutout group that shares this
     // solidId) instead of doing N separate full rebuild-and-replay passes.
@@ -7934,6 +8124,9 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (opFeat.type === 'fillet') {
         const radius = opFeat.id === overrideId ? overrideFilletRadius : opFeat.radius
         meshData = await cadEngine.fillet3d({ solidId: baseSolid.id, edgePoints: opFeat.edgePoints, radius, operation: opFeat.operation ?? 'fillet', base: baseWorkerParams })
+      } else if (opFeat.type === 'shell') {
+        const thickness = opFeat.id === overrideId ? overrideShellThickness : opFeat.thickness
+        meshData = await cadEngine.shell3d({ solidId: baseSolid.id, facePoints: opFeat.facePoints, thickness, direction: opFeat.direction ?? 'inward', base: baseWorkerParams })
       } else {
         const cutParams = opFeat.id === overrideId ? overrideCut : buildCutWorkerParams(opFeat)
         meshData = await cadEngine.subtract({ baseSolidId: baseSolid.id, cut: cutParams, base: baseWorkerParams })
@@ -7969,7 +8162,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   async function rebuildProjectFromFeatures(loadedFeatures) {
     const newSolids = []
     for (const feat of loadedFeatures) {
-      if (feat.type === 'sketch' || feat.type === 'fillet' || feat.operation === 'cutout') continue
+      if (feat.type === 'sketch' || feat.type === 'fillet' || feat.type === 'shell' || feat.operation === 'cutout') continue
       if (feat.joinedInto) continue
       const meshData = await rebuildFeatureSolid(feat, loadedFeatures, newSolids)
       const group = replicadMeshToThree(meshData, feat.color, feat.solidId)
@@ -8478,12 +8671,14 @@ const App3D = forwardRef(function App3D(props, ref) {
           // inlined here since the base mesh is already in hand — avoids
           // re-extruding it a second time.
           if (reuse) {
-            const depOps = features.filter(f => f.solidId === solidId && (f.operation === 'cutout' || f.type === 'fillet'))
+            const depOps = features.filter(f => f.solidId === solidId && (f.operation === 'cutout' || f.type === 'fillet' || f.type === 'shell'))
             for (const opFeat of depOps) {
               try {
                 meshData = opFeat.type === 'fillet'
                   ? await cadEngine.fillet3d({ solidId, edgePoints: opFeat.edgePoints, radius: opFeat.radius, operation: opFeat.operation ?? 'fillet', base: memberWorkerParams })
-                  : await cadEngine.subtract({ baseSolidId: solidId, cut: buildCutWorkerParams(opFeat), base: memberWorkerParams })
+                  : opFeat.type === 'shell'
+                    ? await cadEngine.shell3d({ solidId, facePoints: opFeat.facePoints, thickness: opFeat.thickness, direction: opFeat.direction ?? 'inward', base: memberWorkerParams })
+                    : await cadEngine.subtract({ baseSolidId: solidId, cut: buildCutWorkerParams(opFeat), base: memberWorkerParams })
               } catch (e) {
                 console.error(`[extrude edit] replaying dependent op ${opFeat.id} failed:`, e)
                 throw e
@@ -8852,7 +9047,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       return
     }
 
-    if (feat.type === 'fillet') {
+    if (feat.type === 'fillet' || feat.type === 'shell') {
       const baseSolid = solids.find(s => s.id === feat.solidId)
       if (baseSolid) {
         try {
@@ -8862,7 +9057,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           setSolids(prev => prev.map(s => s.id === baseSolid.id ? updatedSolid : s))
           await rebuildDependentMirrors(updatedSolid)
         } catch (err) {
-          console.error('Fillet delete restore failed:', err)
+          console.error(`${feat.type === 'shell' ? 'Shell' : 'Fillet'} delete restore failed:`, err)
         }
       }
       setFeatures(prev => prev.filter(f => f.id !== featureId))
@@ -8968,10 +9163,12 @@ const App3D = forwardRef(function App3D(props, ref) {
       const solidsForExport = targetSolids.map(solid => {
         const base = buildBaseWorkerParams(solid)
         const ops = features
-          .filter(f => f.solidId === solid.id && (f.operation === 'cutout' || f.type === 'fillet'))
+          .filter(f => f.solidId === solid.id && (f.operation === 'cutout' || f.type === 'fillet' || f.type === 'shell'))
           .map(f => f.type === 'fillet'
             ? { type: 'fillet', operation: f.operation ?? 'fillet', radius: f.radius, edgePoints: f.edgePoints }
-            : { type: 'cut', params: buildCutWorkerParams(f) })
+            : f.type === 'shell'
+              ? { type: 'shell', thickness: f.thickness, direction: f.direction ?? 'inward', facePoints: f.facePoints }
+              : { type: 'cut', params: buildCutWorkerParams(f) })
         return { solidId: solid.id, base, ops }
       })
 
@@ -9053,10 +9250,12 @@ const App3D = forwardRef(function App3D(props, ref) {
       const solidsForExport = targetSolids.map(solid => {
         const base = buildBaseWorkerParams(solid)
         const ops = features
-          .filter(f => f.solidId === solid.id && (f.operation === 'cutout' || f.type === 'fillet'))
+          .filter(f => f.solidId === solid.id && (f.operation === 'cutout' || f.type === 'fillet' || f.type === 'shell'))
           .map(f => f.type === 'fillet'
             ? { type: 'fillet', operation: f.operation ?? 'fillet', radius: f.radius, edgePoints: f.edgePoints }
-            : { type: 'cut', params: buildCutWorkerParams(f) })
+            : f.type === 'shell'
+              ? { type: 'shell', thickness: f.thickness, direction: f.direction ?? 'inward', facePoints: f.facePoints }
+              : { type: 'cut', params: buildCutWorkerParams(f) })
         return { solidId: solid.id, base, ops }
       })
 
@@ -10220,6 +10419,17 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (fillet3dAccepted || fillet3dSel.length>0) { resetFillet3D(); return }
       resetFillet3D(); setTool('select'); return
     }
+    if ((e.key==='Enter'||e.key==='Tab')&&tool==='shell3d'&&!shell3dAccepted&&shell3dSel.length>0){
+      // Promote from "still picking faces" to "thickness popup" — mirrors
+      // Fillet's own Tab-to-accept.
+      e.preventDefault()
+      setShell3dAccepted(true)
+      return
+    }
+    if (e.key==='Escape'&&tool==='shell3d'){
+      if (shell3dAccepted || shell3dSel.length>0) { resetShell3D(); return }
+      resetShell3D(); setTool('select'); return
+    }
     if (e.key==='Enter'&&tool==='mirror3d'&&!mirror3dSelectionDone&&mirror3dSel.length>0){
       // Finish picking bodies (same role as the SmartStepBar's ✓ Next button)
       // — advances to step 2 without touching the accumulated picks.
@@ -11059,12 +11269,13 @@ const App3D = forwardRef(function App3D(props, ref) {
               // layout, matching the pairs above.
               [{id:'fillet3d', label:'FILLET',  color:'#A470F2'}, {id:'mirror3d', label:'MIRROR', color:'#8E65F3'}],
               [{id:'join3d',   label:'JOIN',    color:'#FFEE88'}, {id:'movecopy3d', label:'MOVE/COPY', color:'#FF9800'}],
+              [{id:'shell3d',  label:'SHELL',   color:'#4DB6AC'}],
             ].map((row, rowIdx) => {
               const paired = row.length > 1
               return (
               <div key={rowIdx} style={{display:'flex', gap:4}}>
                 {row.map(({id,label,color}) => {
-                  const isActive = id==='fillet3d' ? tool==='fillet3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
+                  const isActive = id==='fillet3d' ? tool==='fillet3d' : id==='shell3d' ? tool==='shell3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
                     : id==='loft3d' ? ((tool==='loft3d' || !!loftState) && loftTool!=='loftcutout')
                     : id==='loftcutout' ? ((tool==='loft3d' || !!loftState) && loftTool==='loftcutout')
                     : id==='sweep3d' ? ((tool==='sweep3d' || !!sweepState) && sweepTool!=='sweepcut')
@@ -11073,13 +11284,14 @@ const App3D = forwardRef(function App3D(props, ref) {
                     : id==='springcut' ? ((tool==='spring3d' || !!springState) && springTool==='springcut')
                     : id==='movecopy3d' ? tool==='movecopy3d'
                     : extrudeTool===id
-                  const iconSize = paired ? 28 : 40
+                  const iconSize = paired ? 34 : 48
                   return (
                   <button key={id}
                     title={label}
                     onClick={()=>{
                       if (id==='extrude'||id==='cutout'||id==='revolve'||id==='revolvecut') activateExtrudeTool(id)
                       else if (id==='fillet3d') activateFillet3DTool()
+                      else if (id==='shell3d') activateShell3DTool()
                       else if (id==='mirror3d') activateMirror3DTool()
                       else if (id==='join3d') activateJoin3DTool()
                       else if (id==='loft3d') activateLoft3DTool('loft')
@@ -11416,12 +11628,13 @@ const App3D = forwardRef(function App3D(props, ref) {
             onScaleChange={handleScaleChange}
             onPlaneClick={handlePlaneClick}
             onFaceClick={handleFaceClick}
-            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode) || (tool==='mirror3d' && mirror3dSelectionDone) || (tool==='loft3d' && !loftState) || (tool==='sweep3d' && !sweepState) || (tool==='spring3d' && !springState) || tool==='exportfacedxf'}
+            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode) || (tool==='mirror3d' && mirror3dSelectionDone) || (tool==='loft3d' && !loftState) || (tool==='sweep3d' && !sweepState) || (tool==='spring3d' && !springState) || tool==='exportfacedxf' || (tool==='shell3d' && !shell3dAccepted)}
             mirrorPlanePickArmed={tool==='mirror3d' && mirror3dSelectionDone && !mirror3dOffsetBase}
-            dxfPickMode={tool==='exportfacedxf'}
-            dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : []}
+            dxfPickMode={tool==='exportfacedxf' || tool==='shell3d'}
+            dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : tool==='shell3d' ? shell3dSel : []}
+            facePickLabel={tool==='shell3d' ? 'click to remove' : null}
             extrudeArmed={!!extrudeState || (!!loftState && !sketchMode)}
-            showWorkPlanes={!sketchMode && !cutoutTargetPicker && tool!=='fillet3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && tool!=='movecopy3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hidePlanesForExtrude && (tool==='extrude' || tool==='cutout' || tool==='revolve' || tool==='revolvecut'))}
+            showWorkPlanes={!sketchMode && !cutoutTargetPicker && tool!=='fillet3d' && tool!=='shell3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && tool!=='movecopy3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hidePlanesForExtrude && (tool==='extrude' || tool==='cutout' || tool==='revolve' || tool==='revolvecut'))}
             activePlane={activePlane}
             sketchMode={sketchMode}
             gridVisible={gridVisible}
@@ -11772,6 +11985,29 @@ const App3D = forwardRef(function App3D(props, ref) {
                   : []),
             ]}
             onStepBack={step => { if (step===1) resetFillet3D() }}
+          />
+
+          {/* ── SmartStep bar: overlays bottom of viewport during Shell ── */}
+          <SmartStepBar
+            op={tool==='shell3d' ? 'SHELL' : null}
+            steps={[{ id:1, label:'Select Faces' }, { id:2, label:'Set Thickness' }]}
+            currentStep={shell3dAccepted ? 2 : 1}
+            color="#4DB6AC"
+            hint={
+              shell3dAccepted
+                ? `Thickness for ${shell3dSel.length} face${shell3dSel.length!==1?'s':''} — Enter to apply`
+                : shell3dSel.length>0
+                  ? `${shell3dSel.length} face${shell3dSel.length!==1?'s':''} selected — Enter to lock`
+                  : 'Click a face to remove it'
+            }
+            action={
+              !shell3dAccepted && shell3dSel.length>0
+                ? [{label:'✓ Lock Faces', enabled:true, onClick:()=>setShell3dAccepted(true)}]
+                : shell3dAccepted
+                  ? [{label:'✓ Apply', enabled:true, onClick:commitShell3D}]
+                  : []
+            }
+            onStepBack={step => { if (step===1) resetShell3D() }}
           />
 
           {/* ── SmartStep bar: overlays bottom of viewport during Measure —
@@ -12814,6 +13050,105 @@ const App3D = forwardRef(function App3D(props, ref) {
         </div>
       )}
 
+      {/* ── Shell: "still picking faces" hint (shown before Enter/Tab accepts) ── */}
+      {tool==='shell3d' && !shell3dAccepted && shell3dSel.length>0 && shell3dHandlePos && (
+        <div style={{
+          position: 'fixed',
+          left: shell3dHandlePos.x,
+          top:  shell3dHandlePos.y,
+          zIndex: 1000,
+          background: 'rgba(15,20,40,0.95)',
+          border: '1.5px solid #4DB6AC',
+          borderRadius: 8,
+          padding: '6px 12px',
+          boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
+          fontFamily: 'monospace',
+          fontSize: 11,
+          color: '#dce8ff',
+          display: 'flex', alignItems: 'center', gap: 10, whiteSpace: 'nowrap',
+        }}>
+          <span>{shell3dSel.length} face{shell3dSel.length!==1?'s':''} selected</span>
+          <button
+            onClick={()=>setShell3dAccepted(true)}
+            style={{
+              padding:'3px 10px', background: '#4DB6AC', color:'#0d0d1a',
+              border:'none', borderRadius:4, cursor:'pointer',
+              fontFamily:'monospace', fontSize:11, fontWeight:'bold',
+            }}
+          >✓ Lock Faces</button>
+          <span style={{color:'#6688aa'}}>Esc to clear</span>
+        </div>
+      )}
+
+      {/* ── Shell popup (thickness + direction — faces already picked) ────── */}
+      {shell3dAccepted && shell3dHandlePos && (
+        <div style={{
+          position: 'fixed',
+          left: shell3dHandlePos.x,
+          top:  shell3dHandlePos.y,
+          zIndex: 1000,
+          background: 'rgba(15,20,40,0.95)',
+          border: '1.5px solid #4DB6AC',
+          borderRadius: 8,
+          padding: '10px 14px',
+          minWidth: 190,
+          boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
+          fontFamily: 'monospace',
+        }}>
+          <div style={{display:'flex', alignItems:'center', gap:8}}>
+            <div style={{
+              flex:1, background:'#0a0e1a', border:'1px solid #2a3a5a',
+              borderRadius:4, padding:'4px 8px',
+              display:'flex', alignItems:'center', justifyContent:'space-between',
+            }}>
+              <input
+                autoFocus
+                value={shell3dThicknessInput}
+                onChange={e=>setShell3dThicknessInput(e.target.value)}
+                onKeyDown={e=>{
+                  e.stopPropagation()
+                  if (e.key==='Enter') commitShell3D()
+                  else if (e.key==='Escape') resetShell3D()
+                }}
+                style={{
+                  background:'none', border:'none', outline:'none',
+                  color:'#dce8ff', fontFamily:'monospace', fontSize:16,
+                  fontWeight:'bold', flex:1, minWidth:0,
+                }}
+              />
+              <span style={{color:'#6688aa', fontSize:12}}>mm</span>
+            </div>
+            <button
+              onClick={()=>commitShell3D()}
+              style={{
+                padding:'4px 10px', background: '#4DB6AC', color:'#0d0d1a',
+                border:'none', borderRadius:4, cursor:'pointer',
+                fontFamily:'monospace', fontSize:12, fontWeight:'bold',
+              }}
+            >↵</button>
+          </div>
+          <div style={{display:'flex', gap:6, marginTop:8}}>
+            <button onClick={()=>setShell3dDirection('inward')} style={{
+              flex:1, background: shell3dDirection!=='outward' ? '#4DB6AC' : '#0a0e1a',
+              color: shell3dDirection!=='outward' ? '#0d0d1a' : '#aaa',
+              border:'1px solid #2a3a5a', borderRadius:4, padding:'4px 6px',
+              cursor:'pointer', fontFamily:'monospace', fontSize:10,
+              fontWeight: shell3dDirection!=='outward' ? 'bold' : 'normal',
+            }}>Inward</button>
+            <button onClick={()=>setShell3dDirection('outward')} style={{
+              flex:1, background: shell3dDirection==='outward' ? '#4DB6AC' : '#0a0e1a',
+              color: shell3dDirection==='outward' ? '#0d0d1a' : '#aaa',
+              border:'1px solid #2a3a5a', borderRadius:4, padding:'4px 6px',
+              cursor:'pointer', fontFamily:'monospace', fontSize:10,
+              fontWeight: shell3dDirection==='outward' ? 'bold' : 'normal',
+            }}>Outward</button>
+          </div>
+          <div style={{color:'#445566', fontSize:10, marginTop:6, textAlign:'center'}}>
+            Wall thickness{shell3dSel.length>1 ? ` · ${shell3dSel.length} faces` : ''} · ↵ to accept · Esc to cancel
+          </div>
+        </div>
+      )}
+
       {/* ── Measure: "click second point" hint (pending distance pick) ───── */}
       {tool==='measure' && measureP1 && !measureResult && measureHandlePos && (
         <div style={{
@@ -12899,6 +13234,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         onEditDepth={handleEditExtrudeDepth}
         onEditExtent={handleEditExtent}
         onEditFilletRadius={handleEditFilletRadius}
+        onEditShellThickness={handleEditShellThickness}
         onEditLoft={handleEditLoft}
         hiddenSolidIds={hiddenSolidIds}
         onToggleBodyVisible={handleToggleBodyVisible}

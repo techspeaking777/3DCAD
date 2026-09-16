@@ -438,6 +438,29 @@ export function IconSpring3D({ color = '#F06292', size = 70 }) {
   )
 }
 
+export function IconShell3D({ color = '#4DB6AC', size = 70 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>
+      <GroundShadow color={color}/>
+      {/* Top + left faces solid, same tri-tone convention as IsoCube — only
+          the picked face (the right side, here) opens up. Reuses
+          Cutout3D's own "hollow frame + dark inset window" treatment
+          verbatim, just moved off the top face onto a SIDE face (Shell
+          hollows out through a picked face on the body, not down through
+          the top) and with no plunge arrow — Shell doesn't drill through,
+          it opens one face and empties what's behind it. */}
+      <path d="M35 16 L57 28 L35 40 L13 28 Z" fill={color} fillOpacity="0.35" stroke={color} strokeWidth="1.75"/>
+      <path d="M35 40 L13 28 L13 52 L35 64 Z" fill={color} fillOpacity="0.12" stroke={color} strokeWidth="1.75"/>
+      <path d="M35 40 L57 28 L57 52 L35 64 Z" fill="none" stroke={color} strokeWidth="1.75"/>
+      <path d="M40 43 L52 37 L52 49 L40 55 Z" fill="#000" fillOpacity="0.55" stroke={color} strokeWidth="1.25"/>
+      <line x1="35" y1="40" x2="40" y2="43" stroke={color} strokeWidth="1"/>
+      <line x1="57" y1="28" x2="52" y2="37" stroke={color} strokeWidth="1"/>
+      <line x1="57" y1="52" x2="52" y2="49" stroke={color} strokeWidth="1"/>
+      <line x1="35" y1="64" x2="40" y2="55" stroke={color} strokeWidth="1"/>
+    </svg>
+  )
+}
+
 // ── MOVE ──────────────────────────────────────────────────────────────────────
 // x=c*3, y=r*3 from original raw pixel array
 export function IconMove({ active }) {

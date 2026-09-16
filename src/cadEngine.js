@@ -103,6 +103,11 @@ class CadEngine {
     return this._send('fillet3d', params)
   }
 
+  /** Hollow an existing solid — params: {solidId, facePoints:[[x,y,z],...] (mm) of faces to remove, thickness, direction:'inward'|'outward' (defaults to 'inward'), base?}. */
+  async shell3d(params) {
+    return this._send('shell3d', params)
+  }
+
   /** Revolve a 2D profile around an axis line (drawn in the same sketch) to a solid. */
   async revolve(params) {
     return this._send('revolve', params)

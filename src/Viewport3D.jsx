@@ -391,13 +391,19 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     onPlaneClick,
     onFaceClick,          // called with FacePlane when a solid face is clicked
     sketchArmed = false,
-    // true while sketchArmed's face-pick is for Export Face DXF rather than
-    // starting a sketch — swaps the hover label and skips the bottom-edge
-    // preview line, which previews sketch orientation and has no meaning here.
+    // true while sketchArmed's face-pick is for Export Face DXF (or another
+    // multi-face-pick tool, e.g. Shell) rather than starting a sketch —
+    // swaps the hover label and skips the bottom-edge preview line, which
+    // previews sketch orientation and has no meaning here.
     dxfPickMode = false,
     // [{solidId, point:{x,y,z}, normal:{x,y,z}}] — faces already picked for
-    // Export Face DXF's multi-select, drawn as a persistent yellow outline.
+    // Export Face DXF's (or Shell's) multi-select, drawn as a persistent
+    // yellow outline.
     dxfSelectedFaces = [],
+    // Overrides dxfPickMode's default "click to export" hover label — set by
+    // whichever OTHER multi-face-pick tool (e.g. Shell) is currently using
+    // dxfPickMode/dxfSelectedFaces, so its own hover text doesn't say "export".
+    facePickLabel = null,
     extrudeArmed   = false,  // true once a profile is picked (Phase 2/3) — see extrudeArmedRef
     showWorkPlanes = true,
     activePlane    = null,
@@ -428,6 +434,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   const mirrorPlanePickArmedRef = useRef(false)
   const dxfPickModeRef   = useRef(false)
   const dxfSelectedFacesRef = useRef([])
+  const facePickLabelRef = useRef(null)
   // Extrude/cutout Phase 2/3 (a profile is picked, awaiting the commit
   // click) — tracked separately from sketchArmedRef because the two mean
   // different things: sketchArmedRef gates "is some tool armed for a plane/
@@ -772,7 +779,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
             ctx2.fillStyle = '#fff'
             ctx2.font = 'bold 12px monospace'
             ctx2.textAlign = 'center'
-            ctx2.fillText(dxfPickModeRef.current ? 'click to export' : 'click to sketch', cx, cy-8)
+            ctx2.fillText(facePickLabelRef.current || (dxfPickModeRef.current ? 'click to export' : 'click to sketch'), cx, cy-8)
             ctx2.restore()
           }
         }
@@ -1089,6 +1096,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   }, [sketchArmed])
   useEffect(() => { dxfPickModeRef.current = dxfPickMode }, [dxfPickMode])
   useEffect(() => { dxfSelectedFacesRef.current = dxfSelectedFaces }, [dxfSelectedFaces])
+  useEffect(() => { facePickLabelRef.current = facePickLabel }, [facePickLabel])
   useEffect(() => { extrudeArmedRef.current = extrudeArmed }, [extrudeArmed])
   useEffect(() => { mirrorPlanePickArmedRef.current = mirrorPlanePickArmed }, [mirrorPlanePickArmed])
   useEffect(() => {

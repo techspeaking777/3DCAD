@@ -17,6 +17,15 @@ function applyFilletOrChamfer(shape, op) {
   const edgeFilter = e => e.either(op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt)))
   return op.operation === 'chamfer' ? shape.chamfer(op.radius, edgeFilter) : shape.fillet(op.radius, edgeFilter)
 }
+// Shell — hollows a solid, removing whichever faces were picked (by
+// proximity, same EDGE_PICK_TOL idiom as the fillet filter above).
+// replicad's own shell() negates thickness internally to hollow inward, so
+// a 'outward' op flips the sign here to thicken outward instead.
+function applyShell(shape, op) {
+  const faceFilter = f => f.either(op.facePoints.map(pt => g => g.withinDistance(EDGE_PICK_TOL, pt)))
+  const signedThickness = op.direction === 'outward' ? -op.thickness : op.thickness
+  return shape.shell(signedThickness, faceFilter)
+}
 // Fuzzy tolerance (mm) for boolean fuse — a face-sketched boss meant to sit
 // flush on another solid's face can end up a hair's-width off due to
 // floating-point round-tripping through the sketch's mm<->px conversions.
@@ -66,6 +75,8 @@ async function gatherAndFuseExportSolids(solidsParams) {
       for (const op of ops) {
         if (op.type === 'fillet') {
           shape = applyFilletOrChamfer(shape, op)
+        } else if (op.type === 'shell') {
+          shape = applyShell(shape, op)
         } else {
           shape = cutTolerant(shape, buildCutShape(clampCutDepth(op.params, base)))
         }
@@ -101,7 +112,32 @@ function cutTolerant(a, b) {
   const op = r(new oc.BRepAlgoAPI_Cut_3(a.wrapped, b.wrapped, progress))
   op.SetFuzzyValue(FUSE_FUZZY_TOL)
   op.Build(progress)
+  // Was silently absent — a failed boolean (e.g. a cut tool exactly
+  // coincident with the target's own face) previously fell through to
+  // cast(op.Shape()) regardless, returning whatever partial/unmodified
+  // shape OCC happened to leave behind with no error at all, which is
+  // exactly what made a genuinely failed spring cut look like "nothing
+  // happened" instead of a clear failure.
+  if (!op.IsDone() || op.HasErrors()) {
+    gc()
+    throw new Error('Cut failed — the cut geometry may not actually intersect the target, or is too complex for this boolean to resolve.')
+  }
   const result = cast(op.Shape())
+  // IsDone()/HasErrors() only catch the algorithm itself erroring out — OCC
+  // can report a cut as cleanly "done" while still handing back a Compound
+  // of the untouched target PLUS the leftover cut tool as a separate solid,
+  // instead of a real single subtracted body (same failure class joinShapes'
+  // own solid-count check below guards against, for the opposite operation:
+  // a fuse that never actually welds). A genuine cut that doesn't sever the
+  // material always stays exactly one solid; more than one here means the
+  // "cut" silently no-op'd — visually a full, uncut target with the tool's
+  // own faint edges bleeding through it, which is exactly what made this
+  // look like "nothing happened" instead of a clear failure.
+  const solidCount = [...result._iterTopo('solid')].length
+  if (solidCount !== 1) {
+    gc()
+    throw new Error(`Cut failed — the boolean produced ${solidCount} separate bodies instead of one cleanly cut solid. Try a different wire size or pitch.`)
+  }
   gc()
   return result
 }
@@ -344,6 +380,33 @@ function clampCutDepth(cut, baseParams) {
   return cut.depthMm > maxSensible ? { ...cut, depthMm: maxSensible } : cut
 }
 
+// Spring-cut equivalent of extendLoftCutProfiles/extendSweepCutPath below —
+// same "avoid an exactly-coincident cut face" purpose (a cut tube whose
+// length exactly matches the material it's punching through — e.g. a coil
+// cut sketched to run the full height of a cylinder — leaves both its flat
+// end caps exactly coincident with the target's own top/bottom faces, which
+// OCC's boolean can't reliably classify as "definitely overlapping").
+// Unlike extendSweepCutPath's path (a sampled polyline/curve whose start
+// tangent is only ever a best-effort approximation of what the sketched
+// profile was actually anchored to), a helix's tangent is a pure function
+// of its pitch/radius/angle of revolution — translating its origin along
+// its own axis doesn't change that tangent at all, so it's safe to extend
+// BOTH ends here, not just the far one the way extendSweepCutPath must.
+// This only ever touches the CUT TOOL's final geometry (called from
+// buildCutShape below) — it never touches computeSpringPathPlane's own
+// origin/height, so the profile the user actually sketched stays anchored
+// exactly where they drew it.
+const SPRING_CUT_OVH_MM = 1
+function extendSpringCutPath(cut) {
+  const { origin, normal, heightMm } = cut
+  const [nx, ny, nz] = normal
+  return {
+    ...cut,
+    origin: [origin[0] - nx*SPRING_CUT_OVH_MM, origin[1] - ny*SPRING_CUT_OVH_MM, origin[2] - nz*SPRING_CUT_OVH_MM],
+    heightMm: heightMm + 2*SPRING_CUT_OVH_MM,
+  }
+}
+
 // Builds the shape to subtract for one cut op — linear extrude (plain),
 // revolve (`axis` present), or loft (`profiles` present, e.g. a tapered
 // pocket cut via App3D.jsx's Loft Cutout tool). Same discriminator
@@ -351,18 +414,13 @@ function clampCutDepth(cut, baseParams) {
 // this is the cut-shape counterpart, shared by every op-replay loop
 // (subtract, mirrorShape, joinShapes, exportSTL) so all four stay in sync.
 // isCut adds a 1mm protrusion so a cut ending flush with a solid's face
-// doesn't fail on coincident-face booleans — see extendLoftCutProfiles and
-// extendSweepCutPath for the loft- and sweep-shaped-cut equivalents
-// (buildRevolve has no such treatment yet).
+// doesn't fail on coincident-face booleans — see extendLoftCutProfiles,
+// extendSpringCutPath, and extendSweepCutPath for the loft-, spring-, and
+// sweep-shaped-cut equivalents (buildRevolve has no such treatment yet).
 function buildCutShape(cut) {
   return cut.profiles ? buildLoft({ ...cut, profiles: extendLoftCutProfiles(cut.profiles) })
     : cut.axis ? buildRevolve(cut)
-    // No flush-face overhang margin — same posture buildRevolve's cut path
-    // already ships with, and unlike extendSweepCutPath's arc/spline-
-    // tangent-approximation concern, a helix's start point/tangent are
-    // exact by construction (see computeSpringPathPlane), so there's no
-    // equivalent risk to guard against here even if a margin is added later.
-    : cut.pitchMm !== undefined ? buildSpring(cut)
+    : cut.pitchMm !== undefined ? buildSpring(extendSpringCutPath(cut))
     : cut.pathPts ? buildSweep(extendSweepCutPath(cut))
     : buildExtrude({ ...cut, isCut: true })
 }
@@ -684,6 +742,32 @@ self.onmessage = async function(e) {
         if (!valid) throw new Error(`${opLabel} failed: radius too large for the selected edge(s) — try a smaller radius`)
       }
       shapeStore.set(params.solidId, shape)
+    } else if (type==='shell3d') {
+      // Face-pick shell: applies to whatever this solid currently looks like,
+      // same shapeStore-or-cold-rebuild fallback fillet3d uses. facePoints is
+      // an array of [x,y,z] mm points, each near a picked face to remove.
+      let base = shapeStore.get(params.solidId)
+      if (!base) {
+        if (!params.base) throw new Error(`Shell-MISS: base not in store and no fallback params`)
+        console.warn('[cadWorker] shapeStore miss — rebuilding base from params')
+        base = await buildBase(params.base)
+      }
+      try {
+        shape = applyShell(base, params)
+      } catch(e) {
+        throw new Error(`Shell failed: ${e.message}`)
+      }
+      // Same self-intersection guard fillet3d uses — a wall thickness too
+      // large for the local geometry can report success while the offset
+      // faces actually collide.
+      {
+        const oc = getOC()
+        const analyzer = new oc.BRepCheck_Analyzer(shape.wrapped, true, false)
+        const valid = analyzer.IsValid_2()
+        analyzer.delete()
+        if (!valid) throw new Error('Shell failed: wall thickness too large for this geometry — try a smaller thickness')
+      }
+      shapeStore.set(params.solidId, shape)
     } else if (type==='subtract') {
       let base = shapeStore.get(params.baseSolidId)
       const fromStore = !!base
@@ -741,6 +825,8 @@ self.onmessage = async function(e) {
       for (const op of params.ops || []) {
         if (op.type === 'fillet') {
           base = applyFilletOrChamfer(base, op)
+        } else if (op.type === 'shell') {
+          base = applyShell(base, op)
         } else {
           base = cutTolerant(base, buildCutShape(clampCutDepth(op.params, params.base)))
         }
@@ -771,6 +857,8 @@ self.onmessage = async function(e) {
           for (const op of m.ops || []) {
             if (op.type === 'fillet') {
               s = applyFilletOrChamfer(s, op)
+            } else if (op.type === 'shell') {
+              s = applyShell(s, op)
             } else {
               s = cutTolerant(s, buildCutShape(clampCutDepth(op.params, m.base)))
             }
@@ -831,6 +919,8 @@ self.onmessage = async function(e) {
         for (const op of params.ops || []) {
           if (op.type === 'fillet') {
             base = applyFilletOrChamfer(base, op)
+          } else if (op.type === 'shell') {
+            base = applyShell(base, op)
           } else {
             base = cutTolerant(base, buildCutShape(clampCutDepth(op.params, params.base)))
           }
@@ -1231,6 +1321,21 @@ function buildSweep({ pathPts, planeId, normal, origin, uAxis, profilePts, profi
 // center, dir, lefthand) builds the whole helical Sketch directly from plain
 // [x,y,z] arrays — no Plane/Vector wrapping, no makePath involved.
 function buildSpring({ pitchMm, heightMm, coilRadiusMm, origin, normal, lefthand=false, profilePts, profileCircle }) {
+  // A circular wire whose diameter reaches or exceeds the pitch means
+  // consecutive coils physically overlap before any sweep math even runs —
+  // BRepCheck_Analyzer's validity guard below only catches LOCAL topological
+  // defects (gaps, bad winding) on a single coil, not this kind of GLOBAL
+  // self-intersection between separate turns of the same solid, so a
+  // self-overlapping spring can silently build into a fused/degenerate lump
+  // instead of failing. Catch the unambiguous case (a true circular wire —
+  // profileCircle.r is still in raw px/SCALE units here, same convention
+  // makeProfileOnPlane divides out below) up front with an actionable error.
+  if (profileCircle) {
+    const wireDiameterMm = (profileCircle.r / SCALE) * 2
+    if (wireDiameterMm >= pitchMm) {
+      throw new Error(`Spring failed: wire diameter (${wireDiameterMm.toFixed(2)}mm) must be smaller than the pitch (${pitchMm}mm), or consecutive coils will overlap — increase pitch or use a thinner wire`)
+    }
+  }
   const pathSketch = sketchHelix(pitchMm, heightMm, coilRadiusMm, origin, normal, lefthand)
   // frenet:true is required here — replicad's genericSweep defaults to
   // frenet:false (OCC's "CorrectedFrenet" trihedron law), which deliberately

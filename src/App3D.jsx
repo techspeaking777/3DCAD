@@ -77,6 +77,14 @@ const SOLID_ICON_COMPONENTS = {
   // cutout pair above uses.
   springcut: IconSpring3D,
 }
+// Sidebar rows hidden in Simple mode (see the simpleMode state declaration) —
+// Extrude/Cutout, Fillet/Mirror, and Join/Move-Copy stay available in both
+// modes as the "beginner" tool set; everything else here is considered
+// advanced.
+const ADVANCED_SOLID_TOOL_IDS = new Set([
+  'revolve', 'revolvecut', 'loft3d', 'loftcutout',
+  'sweep3d', 'sweepcut', 'spring3d', 'springcut', 'shell3d',
+])
 
 // Pixel-art view-preset icons (src/assets/view-op-icons.png) — same
 // background-position cropping trick as SOLID_OP_CELLS, but each icon's own
@@ -1573,6 +1581,20 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   const viewport3dRef=useRef(null)
   const [tool,setTool]=useState(null)
+  // Simple/Complex sidebar mode — hides the advanced solid tools (Revolve,
+  // Loft, Sweep, Spring, Shell) from the 3D sidebar for beginner users,
+  // leaving Extrude/Cutout/Fillet/Mirror/Join/Move-Copy plus the always-on
+  // Measure/Face DXF buttons. Purely a button-visibility filter: it never
+  // touches `tool` state or the Feature Tree, so a project that already has
+  // an advanced feature (e.g. a Revolve) still shows and edits it normally —
+  // Simple mode only hides the ability to START a new one. Persisted across
+  // sessions since it's a per-user preference, not per-project.
+  const [simpleMode, setSimpleMode] = useState(() => {
+    try { return localStorage.getItem('cad3d.simpleMode') === '1' } catch { return false }
+  })
+  useEffect(() => {
+    try { localStorage.setItem('cad3d.simpleMode', simpleMode ? '1' : '0') } catch {}
+  }, [simpleMode])
   // Sketch-only tools' toolbar buttons only render while sketchMode is true,
   // but `tool` itself isn't reset just because sketchMode ends (most exit
   // paths — cancelFeature, finishing a feature, etc. — only clear sketchMode/
@@ -11270,7 +11292,9 @@ const App3D = forwardRef(function App3D(props, ref) {
               [{id:'fillet3d', label:'FILLET',  color:'#A470F2'}, {id:'mirror3d', label:'MIRROR', color:'#8E65F3'}],
               [{id:'join3d',   label:'JOIN',    color:'#FFEE88'}, {id:'movecopy3d', label:'MOVE/COPY', color:'#FF9800'}],
               [{id:'shell3d',  label:'SHELL',   color:'#4DB6AC'}],
-            ].map((row, rowIdx) => {
+            ]
+            .filter(row => !simpleMode || !row.some(btn => ADVANCED_SOLID_TOOL_IDS.has(btn.id)))
+            .map((row, rowIdx) => {
               const paired = row.length > 1
               return (
               <div key={rowIdx} style={{display:'flex', gap:4}}>
@@ -11545,6 +11569,28 @@ const App3D = forwardRef(function App3D(props, ref) {
                 <IconFitView/>
                 <span style={{fontSize:9,fontFamily:'monospace',color:'#6688aa',
                   letterSpacing:'0.06em'}}>FIT</span>
+              </button>
+              <div style={{width:1,height:44,background:'#2a2a4a',margin:'0 6px'}}/>
+              {/* Simple/Complex — hides the advanced solid tools (Revolve,
+                  Loft, Sweep, Spring, Shell) from the sidebar below for
+                  beginner users. Pure UI filter; see the simpleMode state
+                  declaration for why this never touches existing features. */}
+              <button key="simplemode" title="Toggle beginner-friendly tool set"
+                onClick={()=>setSimpleMode(v=>!v)}
+                style={{...btnBase,background:'transparent',
+                  outline: simpleMode ? '1px solid #4DB6AC' : '1px solid #2a2a4a',
+                  outlineOffset:'-2px',
+                  flexDirection:'column',gap:4,width:'auto',padding:'0 10px',height:70}}>
+                <div style={{width:32,height:16,borderRadius:8,background:'#0d0d1a',
+                  border:'1px solid #2a2a4a',position:'relative'}}>
+                  <div style={{position:'absolute',top:1,left: simpleMode ? 17 : 1,
+                    width:14,height:14,borderRadius:7,
+                    background: simpleMode ? '#4DB6AC' : '#555',
+                    transition:'left 0.15s ease'}}/>
+                </div>
+                <span style={{fontSize:9,fontFamily:'monospace',
+                  color: simpleMode ? '#4DB6AC' : '#6688aa',
+                  letterSpacing:'0.06em'}}>{simpleMode ? 'SIMPLE' : 'COMPLEX'}</span>
               </button>
             </>
           )}

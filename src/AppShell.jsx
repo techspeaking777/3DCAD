@@ -72,6 +72,21 @@ export default function AppShell() {
           DRAWING
         </button>
 
+        {/* Tagline — sits in the otherwise-empty stretch between the tabs
+            and the wordmark. Same neon-glow text-shadow treatment as the
+            RETRO CAD wordmark below, just smaller/dimmer so it reads as a
+            tagline, not a second logo competing with it. */}
+        <div style={{ display: 'flex', alignItems: 'center', marginLeft: 22 }}>
+          <span style={{
+            fontFamily: 'monospace', fontStyle: 'italic', fontSize: 13,
+            letterSpacing: '0.03em', color: '#7fe0ff',
+            textShadow: '0 0 6px #3ad6ff99, 0 0 14px #3ad6ff44',
+            whiteSpace: 'nowrap',
+          }}>
+            Depth in Simplicity
+          </span>
+        </div>
+
         {/* Wordmark — lives here (the one bar that's never in either app's own
             toolbar, so it can't get crowded out by tool groups) rather than
             inside App3D's sketch toolbar, which needed the width back. */}

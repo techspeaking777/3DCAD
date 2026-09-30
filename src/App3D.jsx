@@ -85,6 +85,15 @@ const ADVANCED_SOLID_TOOL_IDS = new Set([
   'revolve', 'revolvecut', 'loft3d', 'loftcutout',
   'sweep3d', 'sweepcut', 'spring3d', 'springcut', 'shell3d',
 ])
+// Move/Copy's rotate-drag angle snap, gated by the same gridSnap toggle the
+// move-drag's distance snap already uses. A fixed degree step rather than
+// tied to gridSizeMm — that dropdown is a linear-mm concept (0.5-50mm) with
+// no meaningful angular equivalent, so reusing its numeric value would be a
+// coincidence, not a relationship. Rotate has no equivalent "step size"
+// picker of its own (would be one more control in an already-crowded
+// SmartStep action row for a case 10° covers well), so this stays a plain
+// constant until a real need for a different step size shows up.
+const MOVE_COPY_ROTATE_SNAP_DEG = 10
 
 // Pixel-art view-preset icons (src/assets/view-op-icons.png) — same
 // background-position cropping trick as SOLID_OP_CELLS, but each icon's own
@@ -101,7 +110,7 @@ const VIEW_OP_CELLS = {
   side:  { x: 1176, y: 389, w: 107, h: 201 },
   iso:   { x: 1453, y: 383, w: 204, h: 225 },
 }
-const VIEW_OP_ICON_H = 52   // 25% smaller than the 70px extrude/cutout/fillet icons — those felt too big here
+const VIEW_OP_ICON_H = 36   // Down from 52 — the whole View row (icon+label+padding) was eating a disproportionate amount of the top toolbar for a secondary, occasional-use control
 
 function viewOpIconStyle(id) {
   const cell = VIEW_OP_CELLS[id]
@@ -831,6 +840,15 @@ function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEP
           that exact button with no ref/getBoundingClientRect bookkeeping,
           and it stays correctly placed even if the bar's layout shifts. */}
       {actions.map((a, i) => {
+        // A plain visual separator between button clusters — e.g. Move/
+        // Copy's tool grouping bar splits its primary mode toggle from its
+        // secondary positioning aids (Snap Move, Set Pivot) this way, so a
+        // growing action row still reads as two short groups instead of one
+        // long flat list. Not a real action: no onClick/label, just a
+        // divider in the actions array so callers can place it exactly
+        // between the items they want split without SmartStepBar needing to
+        // know anything about which tool is using it.
+        if (a.divider) return <div key={i} style={{width:1,height:24,background:'#2a2a4a',marginRight:16,flexShrink:0}}/>
         // `active` is a separate concept from `enabled`: it's for a set of
         // mutually-exclusive toggle buttons (e.g. Move/Copy) where BOTH
         // stay clickable but only one should look "on" at a time — using
@@ -5383,6 +5401,19 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [moveCopy3dSnapStep, setMoveCopy3dSnapStep] = useState(0)
   const [moveCopy3dSnapP1, setMoveCopy3dSnapP1] = useState(null)       // {solidId, point:[x,y,z]mm} | null
   const [moveCopy3dSnapHover, setMoveCopy3dSnapHover] = useState(null) // same shape, current hover candidate
+  // Custom rotate pivot — a fourth mode alongside Move/Rotate/Snap Move.
+  // Same single-click-on-ANY-solid picking Snap Move's step 2 already uses
+  // (raycastSolidEdges + getEdgeSnapCandidates, which snaps to vertices AND
+  // circle centers — exactly what "grab the wheel's own axis" needs), but
+  // only one click, and the result overrides the gizmo's pivot instead of
+  // computing a move delta. Deliberately NOT cleared on solid re-selection —
+  // the whole point is picking one pivot (a wheel's center) once, then
+  // rotate-copying many different small parts around it in a row without
+  // re-picking each time. Cleared only by explicit user action (the Clear
+  // Pivot button) or leaving the Move/Copy tool entirely (resetMoveCopy3D).
+  const [moveCopy3dPivotOverride, setMoveCopy3dPivotOverride] = useState(null) // {x,y,z} mm, or null
+  const [moveCopy3dPivotPicking, setMoveCopy3dPivotPicking] = useState(false)
+  const [moveCopy3dPivotHover, setMoveCopy3dPivotHover] = useState(null) // {solidId, point:[x,y,z]mm} | null
   // Grab-time reference basis for the rotate drag's angle math (see
   // handleMoveCopy3DDragMove) — a plain ref, not state: write-once the
   // instant a ring is grabbed, read every mouse move after that, no
@@ -5431,6 +5462,11 @@ const App3D = forwardRef(function App3D(props, ref) {
     setExtrudeState(null)
     setEditingFeatureId(null)
     resetMoveCopy3D()
+    // Cleared only on a fresh (re)activation of the tool, NOT inside
+    // resetMoveCopy3D — that also runs after every single commit, and the
+    // whole point of a custom pivot is rotate-copying many parts around the
+    // same picked center (e.g. a wheel's axis) without re-picking each time.
+    setMoveCopy3dPivotOverride(null)
   }
 
   // skipPreviewReset: passed through to hideMoveGizmo — see its own comment.
@@ -5448,6 +5484,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     setMoveCopy3dSnapStep(0)
     setMoveCopy3dSnapP1(null)
     setMoveCopy3dSnapHover(null)
+    setMoveCopy3dPivotPicking(false)
+    setMoveCopy3dPivotHover(null)
     moveCopy3dRotateBasisRef.current = null
     viewport3dRef.current?.clearSolidHighlight()
     viewport3dRef.current?.clearSolidHover()
@@ -5475,18 +5513,26 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   useEffect(() => {
-    // No gizmo while Snap Move is engaged — that mode is pure point-to-point
-    // clicking, no handle to drag, and showing the arrows/rings alongside it
-    // would be confusing about which interaction is actually live.
-    if (tool !== 'movecopy3d' || moveCopy3dSel == null || moveCopy3dSnapStep > 0) {
+    // No gizmo while Snap Move or Set Pivot is engaged — both are pure
+    // point-to-point clicking, no handle to drag, and showing the arrows/
+    // rings alongside them would be confusing about which interaction is
+    // actually live.
+    if (tool !== 'movecopy3d' || moveCopy3dSel == null || moveCopy3dSnapStep > 0 || moveCopy3dPivotPicking) {
       viewport3dRef.current?.clearSolidHighlight()
       viewport3dRef.current?.hideMoveGizmo()
       return
     }
     const solid = solids.find(s => s.id === moveCopy3dSel)
     viewport3dRef.current?.highlightSolid(moveCopy3dSel)
-    viewport3dRef.current?.showMoveGizmo(moveCopy3dSel, rotationToQuat(solid?.transform?.rotation))
-  }, [moveCopy3dSel, tool, moveCopy3dSnapStep])
+    // moveCopy3dPivotOverride (mm) → scene units, matching the bbox-center
+    // Vector3 showMoveGizmo would otherwise compute on its own — see that
+    // function's own comment for why overriding this one value is enough to
+    // correctly re-pivot the whole drag/commit chain.
+    const pivotOverride = moveCopy3dPivotOverride
+      ? new THREE.Vector3(mmToPx(moveCopy3dPivotOverride[0]), mmToPx(moveCopy3dPivotOverride[1]), mmToPx(moveCopy3dPivotOverride[2]))
+      : null
+    viewport3dRef.current?.showMoveGizmo(moveCopy3dSel, rotationToQuat(solid?.transform?.rotation), pivotOverride)
+  }, [moveCopy3dSel, tool, moveCopy3dSnapStep, moveCopy3dPivotPicking, moveCopy3dPivotOverride])
 
   useEffect(() => {
     if (tool !== 'movecopy3d' || moveCopy3dHoverSolidId==null) { viewport3dRef.current?.clearSolidHover(); return }
@@ -5563,7 +5609,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     const hitPt = vp.raycastPlaneWorld?.(e.clientX, e.clientY, origin, { x:basis.axisDir.x, y:basis.axisDir.y, z:basis.axisDir.z })
     if (!hitPt) return
     const v = new THREE.Vector3(hitPt.x-basis.pivot.x, hitPt.y-basis.pivot.y, hitPt.z-basis.pivot.z)
-    const deg = Math.atan2(v.dot(basis.perp), v.dot(basis.ref)) * 180/Math.PI
+    let deg = Math.atan2(v.dot(basis.perp), v.dot(basis.ref)) * 180/Math.PI
+    if (gridSnap) deg = Math.round(deg/MOVE_COPY_ROTATE_SNAP_DEG)*MOVE_COPY_ROTATE_SNAP_DEG
     setMoveCopy3dAngleInput(String(Math.round(deg*10)/10))
   }
 
@@ -5623,6 +5670,28 @@ const App3D = forwardRef(function App3D(props, ref) {
     commitSnapMove()
   }
 
+  // Set Pivot — one click, any solid (not just the selected body), same
+  // raycastSolidEdges+getEdgeSnapCandidates snap-to-vertex/circle-center
+  // pass Snap Move uses above. Unlike Snap Move this doesn't move anything;
+  // it just overrides where the rotate gizmo's pivot sits (see
+  // moveCopy3dPivotOverride's own comment for why it outlives the pick).
+  function handleSetPivotHover(e) {
+    if (tool !== 'movecopy3d' || !moveCopy3dPivotPicking) return
+    const vp = viewport3dRef.current; if (!vp) return
+    const edgeHit = vp.raycastSolidEdges(e.clientX, e.clientY)
+    if (!edgeHit || edgeHit.edgeId == null) { setMoveCopy3dPivotHover(null); return }
+    const candidates = getEdgeSnapCandidates(vp, edgeHit.solidId, edgeHit.edgeId)
+    const nearest = nearestSnapCandidate(candidates, edgeHit.point)
+    setMoveCopy3dPivotHover(nearest ? { solidId: edgeHit.solidId, point: nearest.point } : null)
+  }
+
+  function handleSetPivotClick(e) {
+    if (tool !== 'movecopy3d' || !moveCopy3dPivotPicking || !moveCopy3dPivotHover) return
+    setMoveCopy3dPivotOverride(moveCopy3dPivotHover.point)
+    setMoveCopy3dPivotPicking(false)
+    setMoveCopy3dPivotHover(null)
+  }
+
   // Dot-at-P1 + dot-at-hover + dashed connector, same shared overlay canvas
   // and drawing shape as drawMeasureOverlay/clearMeasureOverlay (never
   // active at the same time — Measure and Move/Copy are different tools) —
@@ -5675,6 +5744,14 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (!vp || tool !== 'movecopy3d' || moveCopy3dSnapStep === 0) { clearSnapMoveOverlay(); return }
     drawSnapMoveOverlay(vp, moveCopy3dSnapP1, moveCopy3dSnapHover)
   }, [tool, moveCopy3dSnapStep, moveCopy3dSnapP1, moveCopy3dSnapHover])
+
+  // Set Pivot's own hover marker — same dot-drawing helper, no p1/connector
+  // since it's a single click, not a two-point pick.
+  useEffect(() => {
+    const vp = viewport3dRef.current
+    if (!vp || tool !== 'movecopy3d' || !moveCopy3dPivotPicking) { clearSnapMoveOverlay(); return }
+    drawSnapMoveOverlay(vp, null, moveCopy3dPivotHover)
+  }, [tool, moveCopy3dPivotPicking, moveCopy3dPivotHover])
 
   // Recolors/isolates the armed handle the moment it's grabbed, and
   // restores every handle to its idle state once the drag is
@@ -9600,6 +9677,12 @@ const App3D = forwardRef(function App3D(props, ref) {
       handleSnapMoveClick(e)
       return
     }
+    // Set Pivot: one click on any solid overrides the rotate gizmo's pivot —
+    // takes over clicks entirely while active, same as Snap Move above.
+    if (tool==='movecopy3d' && moveCopy3dPivotPicking) {
+      handleSetPivotClick(e)
+      return
+    }
     // Move/Copy step 2a: body picked, no handle armed yet — a click only
     // does something if it actually lands on a gizmo arrow/ring (arms that
     // handle); anything else is ignored rather than reinterpreted as
@@ -10498,6 +10581,10 @@ const App3D = forwardRef(function App3D(props, ref) {
         moveCopy3dRotateBasisRef.current = null
         return
       }
+      // Set Pivot: Escape backs out of picking without changing whatever
+      // pivot override was already active (if any) — only the explicit
+      // Clear Pivot button removes an already-set one.
+      if (moveCopy3dPivotPicking) { setMoveCopy3dPivotPicking(false); setMoveCopy3dPivotHover(null); return }
       // Snap Move: step 2 backs out to step 1 (clear P1, keep picking on
       // the same body); step 1 exits Snap Move entirely back to the gizmo.
       if (moveCopy3dSnapStep === 2) { setMoveCopy3dSnapP1(null); setMoveCopy3dSnapHover(null); setMoveCopy3dSnapStep(1); return }
@@ -11185,7 +11272,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   return (
     <div ref={rootDivRef} style={{display:'flex',height:'100%',outline:'none'}} tabIndex={0}
       onKeyDown={handleKeyDown}
-      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e); handleMirror3DOffsetDragMove(e); handleExtrudeOffsetDragMove(e); handleSweepOffsetDragMove(e); handleSpringOffsetDragMove(e); handleMoveCopy3DDragMove(e); handleMoveCopy3DGizmoHover(e); handleSnapMoveHover(e) }}
+      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e); handleMirror3DOffsetDragMove(e); handleExtrudeOffsetDragMove(e); handleSweepOffsetDragMove(e); handleSpringOffsetDragMove(e); handleMoveCopy3DDragMove(e); handleMoveCopy3DGizmoHover(e); handleSnapMoveHover(e); handleSetPivotHover(e) }}
       onMouseUp={e=>{ }}
     >
 
@@ -11555,22 +11642,22 @@ const App3D = forwardRef(function App3D(props, ref) {
                 <button key={label} title={title} onClick={fn}
                   style={{...btnBase,background:'transparent',
                     outline:'1px solid #2a2a4a',outlineOffset:'-2px',
-                    flexDirection:'column',gap:2,width:'auto',padding:'0 10px',height:70}}>
+                    flexDirection:'column',gap:2,width:'auto',padding:'0 8px',height:52}}>
                   <div style={viewOpIconStyle(id)}/>
                   <span style={{fontSize:9,fontFamily:'monospace',color:'#6688aa',
                     letterSpacing:'0.06em'}}>{label}</span>
                 </button>
               ))}
-              <div style={{width:1,height:44,background:'#2a2a4a',margin:'0 6px'}}/>
+              <div style={{width:1,height:34,background:'#2a2a4a',margin:'0 6px'}}/>
               <button key="fit" title="Zoom to fit (F)" onClick={zoomToFit}
                 style={{...btnBase,background:'transparent',
                   outline:'1px solid #2a2a4a',outlineOffset:'-2px',
-                  flexDirection:'column',gap:2,width:'auto',padding:'0 10px',height:70}}>
+                  flexDirection:'column',gap:2,width:'auto',padding:'0 8px',height:52}}>
                 <IconFitView/>
                 <span style={{fontSize:9,fontFamily:'monospace',color:'#6688aa',
                   letterSpacing:'0.06em'}}>FIT</span>
               </button>
-              <div style={{width:1,height:44,background:'#2a2a4a',margin:'0 6px'}}/>
+              <div style={{width:1,height:34,background:'#2a2a4a',margin:'0 6px'}}/>
               {/* Simple/Complex — hides the advanced solid tools (Revolve,
                   Loft, Sweep, Spring, Shell) from the sidebar below for
                   beginner users. Pure UI filter; see the simpleMode state
@@ -11580,11 +11667,11 @@ const App3D = forwardRef(function App3D(props, ref) {
                 style={{...btnBase,background:'transparent',
                   outline: simpleMode ? '1px solid #4DB6AC' : '1px solid #2a2a4a',
                   outlineOffset:'-2px',
-                  flexDirection:'column',gap:4,width:'auto',padding:'0 10px',height:70}}>
-                <div style={{width:32,height:16,borderRadius:8,background:'#0d0d1a',
+                  flexDirection:'column',gap:3,width:'auto',padding:'0 8px',height:52}}>
+                <div style={{width:26,height:13,borderRadius:6.5,background:'#0d0d1a',
                   border:'1px solid #2a2a4a',position:'relative'}}>
-                  <div style={{position:'absolute',top:1,left: simpleMode ? 17 : 1,
-                    width:14,height:14,borderRadius:7,
+                  <div style={{position:'absolute',top:1,left: simpleMode ? 14 : 1,
+                    width:11,height:11,borderRadius:5.5,
                     background: simpleMode ? '#4DB6AC' : '#555',
                     transition:'left 0.15s ease'}}/>
                 </div>
@@ -11879,15 +11966,21 @@ const App3D = forwardRef(function App3D(props, ref) {
           <SmartStepBar
             op={tool==='movecopy3d' ? 'MOVE/COPY' : null}
             steps={[{ id:1, label:'Select Body' }, { id:2, label:
-              moveCopy3dSnapStep>0 ? 'Snap Move' : moveCopy3dDragHandle?.kind==='rotate' ? 'Rotate' : 'Move' }]}
+              moveCopy3dPivotPicking ? 'Set Pivot' : moveCopy3dSnapStep>0 ? 'Snap Move'
+                : moveCopy3dDragHandle?.kind==='rotate' ? 'Rotate' : moveCopy3dDragHandle?.kind==='move' ? 'Move'
+                // Nothing armed yet — either handle is still on the table,
+                // so the step label shouldn't imply only Move is available.
+                : 'Move/Rotate' }]}
             currentStep={moveCopy3dSel!=null ? 2 : 1}
             color="#FF9800"
             hint={moveCopy3dSel==null
               ? 'Click a body to move or copy'
+              : moveCopy3dPivotPicking ? 'Click a vertex or circle center on any body to pivot around'
               : moveCopy3dSnapStep===1 ? 'Click a point on the body to move'
               : moveCopy3dSnapStep===2 ? 'Click a point on the target'
               : moveCopy3dDragHandle
                 ? `Move the mouse or type ${moveCopy3dDragHandle.kind==='rotate' ? 'an angle' : 'a distance'}, click or Enter to confirm`
+                : moveCopy3dPivotOverride ? 'Click an axis arrow/ring on the gizmo — rotating around the custom pivot'
                 : 'Click an axis arrow/ring on the gizmo, or Snap Move'}
             action={moveCopy3dSel==null ? null : [
               // Two separate always-clickable buttons, only one highlighted
@@ -11896,6 +11989,13 @@ const App3D = forwardRef(function App3D(props, ref) {
               // name the current mode, or what clicking switches to?).
               { label:'Move', enabled:true, active: moveCopy3dMode!=='copy', onClick: () => setMoveCopy3dMode('move') },
               { label:'Copy', enabled:true, active: moveCopy3dMode==='copy', onClick: () => setMoveCopy3dMode('copy') },
+              // Divider — splits the primary Move/Copy mode toggle from the
+              // secondary positioning aids after it (Snap Move, Set Pivot),
+              // so the row reads as two short clusters instead of one long
+              // flat list as those aids have grown. Hidden mid-drag along
+              // with the buttons themselves, so it doesn't leave a stray
+              // dangling separator with nothing after it.
+              ...(moveCopy3dDragHandle ? [] : [{ divider: true }]),
               // Snap Move toggle — hidden mid-drag (a gizmo handle already
               // armed), since the two interactions are mutually exclusive.
               ...(moveCopy3dDragHandle ? [] : [{
@@ -11903,6 +12003,28 @@ const App3D = forwardRef(function App3D(props, ref) {
                 onClick: () => {
                   if (moveCopy3dSnapStep>0) { setMoveCopy3dSnapStep(0); setMoveCopy3dSnapP1(null); setMoveCopy3dSnapHover(null) }
                   else setMoveCopy3dSnapStep(1)
+                },
+              }]),
+              // Set/Clear Pivot — ONE button covering all three states,
+              // rather than two separate buttons that only ever show one at
+              // a time anyway (Set Pivot was never visible alongside Clear
+              // Pivot). Overrides where the ROTATE gizmo's pivot sits, e.g.
+              // a small part rotate-copied around a wheel's own axis instead
+              // of its own bounding-box center. Deliberately separate from
+              // Snap Move (which moves the selected body) — this picks on
+              // ANY body and only repositions the gizmo, never moves
+              // anything. An active override stays set across re-selecting
+              // a different body (see moveCopy3dPivotOverride's own
+              // comment) — re-picking a different pivot point is Clear then
+              // Set again, a small added click in exchange for one fewer
+              // button sitting in this row the rest of the time.
+              ...(moveCopy3dDragHandle ? [] : [{
+                label: moveCopy3dPivotPicking ? '⊙ Picking…' : moveCopy3dPivotOverride ? '⊙ Clear Pivot' : '⊙ Set Pivot',
+                enabled:true, active: moveCopy3dPivotPicking || !!moveCopy3dPivotOverride,
+                onClick: () => {
+                  if (moveCopy3dPivotPicking) { setMoveCopy3dPivotPicking(false); setMoveCopy3dPivotHover(null) }
+                  else if (moveCopy3dPivotOverride) setMoveCopy3dPivotOverride(null)
+                  else setMoveCopy3dPivotPicking(true)
                 },
               }]),
               ...(moveCopy3dDragHandle ? [{

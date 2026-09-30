@@ -1771,12 +1771,19 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
 
     /**
      * Move/Copy tool: shows 3 draggable axis arrows on the selected solid's
-     * bounding-box center. Colors follow this app's own plane-color
-     * convention (SketchPlane.js's planeColor) mapped from "the plane whose
-     * NORMAL is this axis" — X↔YZ-plane green, Y↔XZ-plane red, Z↔XY-plane
-     * blue — rather than the generic red/green/blue CAD convention, so it
-     * reads consistently with the work-plane colors already taught
-     * elsewhere in this app.
+     * bounding-box center, or on `pivotOverride` (a THREE.Vector3 in scene
+     * units) when given — App3D.jsx's Set Pivot action feeds one in once the
+     * user clicks a vertex/circle-center on ANY solid (e.g. a wheel's own
+     * axis), so a small part can be rotate-copied around a center that isn't
+     * its own. This is the ONLY place that needs to know about the override:
+     * both the live rotate-drag math (previewRotateSolid) and the commit
+     * path (App3D.jsx's commitMoveCopy3D, via getMoveGizmoOrigin()) already
+     * pivot around whatever `basePosition` ends up being, set once below.
+     * Colors follow this app's own plane-color convention (SketchPlane.js's
+     * planeColor) mapped from "the plane whose NORMAL is this axis" —
+     * X↔YZ-plane green, Y↔XZ-plane red, Z↔XY-plane blue — rather than the
+     * generic red/green/blue CAD convention, so it reads consistently with
+     * the work-plane colors already taught elsewhere in this app.
      *
      * Each arrow is a real cylinder (shaft) + cone (head) mesh pair, NOT
      * THREE.ArrowHelper's built-in thin Line — confirmed via live testing
@@ -1789,11 +1796,11 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
      * arrows always point along world axes — reorienting to a solid's own
      * local axes is a Stage 2 concern once rotation exists).
      */
-    showMoveGizmo(solidId, rotationQuat=null) {
+    showMoveGizmo(solidId, rotationQuat=null, pivotOverride=null) {
       const s = stateRef.current; if (!s?.solidsGroup) return
       const group = s.solidsGroup.children.find(g => g.userData?.solidId === solidId)
       if (!group) return
-      const center = new THREE.Box3().setFromObject(group).getCenter(new THREE.Vector3())
+      const center = pivotOverride ? pivotOverride.clone() : new THREE.Box3().setFromObject(group).getCenter(new THREE.Vector3())
       const bodyQuat = rotationQuat ? rotationQuat.clone() : new THREE.Quaternion()
       let gizmo = moveGizmoRef.current
       if (!gizmo) {
@@ -1909,7 +1916,15 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     hideMoveGizmo(skipPreviewReset=false) {
       if (moveGizmoRef.current) moveGizmoRef.current.visible = false
       const { group } = moveGizmoStateRef.current
-      if (group && !skipPreviewReset) group.position.set(0,0,0)
+      // Both position AND quaternion — a rotate-drag's previewRotateSolid
+      // mutates both (see its own external-pivot comment), so resetting
+      // only position left a rotate-then-COPY's original body rendered with
+      // its rotation still applied but position zeroed instead of restored,
+      // which (especially with an off-body custom pivot) could visually
+      // land right on top of the freshly created copy. A move-drag only
+      // ever touches position, so resetting quaternion here is a harmless
+      // no-op for that case.
+      if (group && !skipPreviewReset) { group.position.set(0,0,0); group.quaternion.identity() }
       moveGizmoStateRef.current = { solidId: null, basePosition: null, group: null }
     },
 

@@ -12,6 +12,7 @@ import { nearestOffsetEntity, computeOffsetPreview, distToEntity } from './tools
 import { nearestMirrorEntity, buildMirror } from './tools/mirrorMath.js'
 import { nearestMoveCopyEntity, buildCopies, removeSelected } from './tools/moveCopyMath.js'
 import { nearestRotateCopyEntity, rotatePoint, buildRotatedCopies } from './tools/rotateCopyMath.js'
+import { buildRectangularOffsets, buildCircularAngles, circularStepAngleDeg } from './tools/patternMath.js'
 import { nearestScaleEntity, buildScaled } from './tools/scaleMath.js'
 import { nearestFilletLine, computeFillet } from './tools/filletMath.js'
 import { computeExtendPreview } from './tools/extendMath.js'
@@ -27,6 +28,7 @@ import { replicadMeshToThree } from './cadMesh.js'
 import TracerPanel from './tools/TracerPanel.jsx'
 import TextPanel from './tools/TextPanel.jsx'
 import SpringPanel from './tools/SpringPanel.jsx'
+import PatternPanel from './tools/PatternPanel.jsx'
 import PageSetupPanel from './tools/PageSetupPanel.jsx'
 import GuidePanel from './tools/GuidePanel.jsx'
 import SaveAsPanel from './tools/SaveAsPanel.jsx'
@@ -50,7 +52,7 @@ import {
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
   IconUndo, IconRedo, IconFitView, IconReframe, IconNew, IconSave, IconLoad, IconCloudSave, IconCloudLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
   IconIncludeEdge,
-  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D, IconRevolve3D, IconSpring3D, IconShell3D,
+  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D, IconRevolve3D, IconSpring3D, IconShell3D, IconPattern3D,
 } from './draw/ToolIcons.jsx'
 import { glowStroke, glowFill } from './draw/vectorTheme.js'
 
@@ -60,7 +62,7 @@ import { glowStroke, glowFill } from './draw/vectorTheme.js'
 const SOLID_ICON_COMPONENTS = {
   extrude: IconExtrude3D, cutout: IconCutout3D, fillet3d: IconFillet3D,
   mirror3d: IconMirror3D, loft3d: IconLoft3D, join3d: IconJoin3D, movecopy3d: IconMoveCopy3D,
-  sweep3d: IconSweep3D, revolve: IconRevolve3D, spring3d: IconSpring3D, shell3d: IconShell3D,
+  sweep3d: IconSweep3D, revolve: IconRevolve3D, spring3d: IconSpring3D, shell3d: IconShell3D, pattern3d: IconPattern3D,
   // Reuses the additive Sweep icon's shape, rendered in Cutout's color —
   // same "one glyph, color signals cut variant" convention loftcutout/
   // revolvecut use.
@@ -83,7 +85,7 @@ const SOLID_ICON_COMPONENTS = {
 // advanced.
 const ADVANCED_SOLID_TOOL_IDS = new Set([
   'revolve', 'revolvecut', 'loft3d', 'loftcutout',
-  'sweep3d', 'sweepcut', 'spring3d', 'springcut', 'shell3d',
+  'sweep3d', 'sweepcut', 'spring3d', 'springcut', 'shell3d', 'pattern3d',
 ])
 // Move/Copy's rotate-drag angle snap, gated by the same gridSnap toggle the
 // move-drag's distance snap already uses. A fixed degree step rather than
@@ -1480,6 +1482,14 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [extrudeOffsetMode,setExtrudeOffsetMode]=useState(false)
   const [extrudeOffsetBase,setExtrudeOffsetBase]=useState(null)
   const [extrudeOffsetDistInput,setExtrudeOffsetDistInput]=useState('20')
+  // Set true the instant the user types into the offset-distance popover
+  // directly (its onChange) — same "typing it IS locking it" behavior as
+  // Extrude's own depthLocked/moveCopy3dDistLocked. While true, the
+  // matching handleXOffsetDragMove below leaves the typed value alone
+  // instead of overwriting it on the very next pixel of mouse movement.
+  // Reset to false wherever a fresh base plane gets picked, so each new
+  // offset starts out mouse-driven again.
+  const [extrudeOffsetDistLocked,setExtrudeOffsetDistLocked]=useState(false)
   // Offset (parallel) plane for Sweep's path-plane pick step — same idea as
   // Extrude/Mirror's own offset-plane pick just above, kept as its own
   // parallel implementation for the same reason theirs are (see
@@ -1487,12 +1497,14 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [sweepOffsetMode,setSweepOffsetMode]=useState(false)
   const [sweepOffsetBase,setSweepOffsetBase]=useState(null)
   const [sweepOffsetDistInput,setSweepOffsetDistInput]=useState('20')
+  const [sweepOffsetDistLocked,setSweepOffsetDistLocked]=useState(false)  // see extrudeOffsetDistLocked's comment
   // Offset (parallel) plane for Spring's own plane-pick step — same idea,
   // its own parallel implementation for the same reason (additive-only,
   // zero risk to Sweep/Extrude's already-shipped versions).
   const [springOffsetMode,setSpringOffsetMode]=useState(false)
   const [springOffsetBase,setSpringOffsetBase]=useState(null)
   const [springOffsetDistInput,setSpringOffsetDistInput]=useState('20')
+  const [springOffsetDistLocked,setSpringOffsetDistLocked]=useState(false)  // see extrudeOffsetDistLocked's comment
   const extrudePanelDrag = useDraggablePanel()
   const cutoutPanelDrag = useDraggablePanel()
   const loftPanelDrag = useDraggablePanel()
@@ -1779,7 +1791,10 @@ const App3D = forwardRef(function App3D(props, ref) {
   // is nearer at that pixel. Reset on every fresh activation rather than
   // persisting indefinitely — a stale "planes off" from a previous session
   // would otherwise silently make plane-picking impossible next time too.
-  const [hidePlanesForExtrude,setHidePlanesForExtrude]=useState(false)
+  // Shared by every tool family with a "pick a work plane/face" step —
+  // originally Extrude-only, now also Sweep's (both its path-pick step and
+  // its own offset-plane sub-step reuse this same toggle/button).
+  const [hideWorkPlanesManual,setHideWorkPlanesManual]=useState(false)
   const [gridSnap,setGridSnap]=useState(true)
   const [gridSizeMm,setGridSizeMm]=useState(10)
   const [textInsertPt,setTextInsertPt]=useState(null)
@@ -1967,6 +1982,15 @@ const App3D = forwardRef(function App3D(props, ref) {
   // whenever a *different* project is loaded, so saves after Opening a file
   // don't silently overwrite the previous one.
   const projectFileHandleRef=useRef(null)
+  // Display-only name for whatever's currently open — shown in AppShell's
+  // top bar (push-based, same convention as getSheetData/onSheetLoaded)
+  // since that bar lives outside this component. Set on every successful
+  // save/open/cloud-load; stays null for a brand-new, never-saved project.
+  const [projectName,setProjectName]=useState(null)
+  function updateProjectName(name) {
+    setProjectName(name)
+    props.onProjectNameChange?.(name)
+  }
   const [loadError,setLoadError]=useState(null)
   useEffect(()=>{trackedPtsRef.current=trackedPts},[trackedPts])
   useEffect(()=>{splinePointsRef.current=splinePoints},[splinePoints])
@@ -2017,8 +2041,29 @@ const App3D = forwardRef(function App3D(props, ref) {
   async function handleSaveProject(){
     if (canPickSaveLocation()) {
       try {
-        const { status, handle } = await saveProjectFileAs(features, solids, 'drawing.trc', projectFileHandleRef.current, props.getSheetData?.())
-        if (handle) projectFileHandleRef.current = handle
+        const { status, handle } = await saveProjectFileAs(features, solids, projectName || 'drawing.trc', projectFileHandleRef.current, props.getSheetData?.())
+        if (handle) { projectFileHandleRef.current = handle; updateProjectName(handle.name) }
+        if (status==='saved'||status==='downloaded') flashSaved()
+      } catch (err) {
+        setCadError('Save failed: ' + (err.message || String(err)))
+        setTimeout(() => setCadError(null), 6000)
+      }
+    } else {
+      setSaveAsOpen('project')
+    }
+  }
+
+  // Save As — same primitive as handleSaveProject, but ALWAYS opens the
+  // native picker (existingHandle forced null) instead of silently
+  // rewriting whatever file was opened/saved last. On a browser with no
+  // File System Access API, every save already prompts for a filename
+  // (see SaveAsPanel below), so there's nothing extra to distinguish —
+  // falls through to the exact same fallback as a plain Save there.
+  async function handleSaveProjectAs(){
+    if (canPickSaveLocation()) {
+      try {
+        const { status, handle } = await saveProjectFileAs(features, solids, projectName || 'drawing.trc', null, props.getSheetData?.())
+        if (handle) { projectFileHandleRef.current = handle; updateProjectName(handle.name) }
         if (status==='saved'||status==='downloaded') flashSaved()
       } catch (err) {
         setCadError('Save failed: ' + (err.message || String(err)))
@@ -2097,6 +2142,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       return
     }
     resetAllToolState()
+    updateProjectName(file.name)
     // Opening a project reads it via a plain <input type="file"> (no
     // writable handle), and it's a DIFFERENT file from whatever was saved
     // before — clear the cached handle/cloud-id so the next Save prompts
@@ -2144,6 +2190,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       const dataObj = JSON.parse(serializeProject(features, solids, props.getSheetData?.()))
       const saved = await saveNewCloudProject(name, classId, dataObj)
       cloudProjectIdRef.current = saved.id
+      updateProjectName(name)
       flashSaved('Saved to your account')
     } catch (err) {
       setCadError('Cloud save failed: ' + err.message)
@@ -2164,12 +2211,13 @@ const App3D = forwardRef(function App3D(props, ref) {
   async function handleCloudProjectPicked(id) {
     setCloudOpenOpen(false)
     try {
-      const { data } = await loadCloudProject(id)
+      const { data, name } = await loadCloudProject(id)
       const projectData = parseProjectData(data)
       resetAllToolState()
       projectFileHandleRef.current = null
       await applyLoadedProject(projectData)
       cloudProjectIdRef.current = id
+      updateProjectName(name)
     } catch (err) {
       setLoadError(err.message || 'Could not open project')
       setTimeout(() => setLoadError(null), 3000)
@@ -3741,7 +3789,16 @@ const App3D = forwardRef(function App3D(props, ref) {
           const dx=sl.x2-sl.x1, dy=sl.y2-sl.y1, len=Math.hypot(dx,dy)
           if (len>1e-10){
             const px=-dy/len, py=dx/len
-            const t=(mousePos.x-startPoint.x)*px+(mousePos.y-startPoint.y)*py
+            let t=(mousePos.x-startPoint.x)*px+(mousePos.y-startPoint.y)*py
+            // Unlike the plain line tool (computeEnd, which already reads
+            // dimLocked), this perp-FROM branch builds its own endpoint
+            // straight from the live mouse projection and never checked
+            // dimLocked at all — a typed+locked length kept getting
+            // silently overridden by the next mousemove. Mouse still picks
+            // which SIDE of start to extend toward (sign of t), same
+            // "mouse flips side, typed value fixes magnitude" pattern as
+            // Extrude's depth lock (handleExtrudeDragMove).
+            if (dimLocked) t=Math.sign(t||1)*mmToPx(parseFloat(dimInput)||0)
             endPt={x:startPoint.x+t*px, y:startPoint.y+t*py}
           } else endPt=mousePos
           drawPreviewLine(ctx,startPoint.x,startPoint.y,endPt.x,endPt.y,'#00BCD4',1,sc)
@@ -4168,7 +4225,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // handleFaceClick/handlePlaneClick below since both need identical branching.
   function handleMirror3DPlanePick(pick) {
     if (mirror3dOffsetMode) {
-      if (!mirror3dOffsetBase) setMirror3dOffsetBase(pick)
+      if (!mirror3dOffsetBase) { setMirror3dOffsetBase(pick); setMirror3dOffsetDistLocked(false) }
       else commitMirror3DOffset()  // base already picked — any further click accepts the live distance
       return
     }
@@ -4695,7 +4752,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     setExtrudeState(null)
     setExtrudeHandlePos(null)
     setEditingFeatureId(null)
-    setHidePlanesForExtrude(false)
+    setHideWorkPlanesManual(false)
     setExtrudeOffsetMode(false)
     setExtrudeOffsetBase(null)
     setExtrudeOffsetDistInput('20')
@@ -4877,7 +4934,11 @@ const App3D = forwardRef(function App3D(props, ref) {
     const toCenter = abXac.clone().cross(ab).multiplyScalar(ac.lengthSq())
       .add(ac.clone().cross(abXac).multiplyScalar(ab.lengthSq()))
       .multiplyScalar(1 / (2 * abXacLenSq))
-    return { center: A.clone().add(toCenter), radius: toCenter.length() }
+    // abXac IS the fit plane's normal already (unnormalized) — Circular
+    // Pattern's axis-picking reuses this so clicking a circular edge hands
+    // it both pivot point AND rotation axis in one click, see
+    // classifyEdgeGeometry's circular branch below.
+    return { center: A.clone().add(toCenter), radius: toCenter.length(), normal: abXac.clone().normalize() }
   }
 
   // Classifies one edge from its point samples (getEdgePolyline) as straight
@@ -4921,7 +4982,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (fit) {
       const tol = Math.max(0.05, fit.radius * 0.02)
       const fits = pts.every(p => Math.abs(p.distanceTo(fit.center) - fit.radius) < tol)
-      if (fits) return { kind: 'circular', radius: fit.radius, diameter: fit.radius*2, center: fit.center, points: pts }
+      if (fits) return { kind: 'circular', radius: fit.radius, diameter: fit.radius*2, center: fit.center, normal: fit.normal, points: pts }
     }
     return { kind: 'curve', length: segLen, points: pts }
   }
@@ -4945,7 +5006,12 @@ const App3D = forwardRef(function App3D(props, ref) {
     // corners are — first/last there are just a tessellation artifact, not
     // a meaningful snap target — so center is the only candidate offered.
     if (geo.kind === 'circular') {
-      return [{ point: [geo.center.x, geo.center.y, geo.center.z] }]
+      // `normal` rides along on this one candidate (undefined on every
+      // other branch/kind) — Circular Pattern's own hover handler reads it
+      // to derive a rotation axis from the same click, Snap Move/Set Pivot
+      // simply never look at it. Purely additive: no existing caller reads
+      // anything but `.point`.
+      return [{ point: [geo.center.x, geo.center.y, geo.center.z], normal: [geo.normal.x, geo.normal.y, geo.normal.z] }]
     }
     const pts = geo.points
     const first = pts[0], last = pts[pts.length-1]
@@ -5288,6 +5354,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [mirror3dOffsetMode, setMirror3dOffsetMode] = useState(false)
   const [mirror3dOffsetBase, setMirror3dOffsetBase] = useState(null)   // {kind:'workplane',planeId} | {kind:'face',facePlane} | null
   const [mirror3dOffsetDistInput, setMirror3dOffsetDistInput] = useState('20')
+  const [mirror3dOffsetDistLocked, setMirror3dOffsetDistLocked] = useState(false)  // see extrudeOffsetDistLocked's comment
 
   // Given a solid clicked in the viewport, finds the ONE feature that owns it
   // (the extrude/revolve/loft/join/mirror row — never a cutout/fillet, which
@@ -5391,6 +5458,14 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [moveCopy3dDragHandle, setMoveCopy3dDragHandle] = useState(null) // {kind:'move'|'rotate', axis:'x'|'y'|'z'} | null
   const [moveCopy3dDistInput, setMoveCopy3dDistInput] = useState('0')   // signed mm, kind:'move'
   const [moveCopy3dAngleInput, setMoveCopy3dAngleInput] = useState('0') // signed degrees, kind:'rotate'
+  // Set true the instant the user types into the popover directly (its
+  // onChange, no separate Tab/lock step — same "typing it IS locking it"
+  // behavior Extrude's depth box already has via depthLocked). While true,
+  // handleMoveCopy3DDragMove's mousemove handler leaves the typed value
+  // alone instead of overwriting it on the very next pixel of mouse
+  // movement, which is what made this box impossible to set exactly before.
+  const [moveCopy3dDistLocked, setMoveCopy3dDistLocked] = useState(false)
+  const [moveCopy3dAngleLocked, setMoveCopy3dAngleLocked] = useState(false)
   // Stage 3 — Snap Move: a third mode alongside the gizmo, entered once a
   // body is selected. No dragging at all — click a point ON the selected
   // body, then click a target point on any solid (self or other); the body
@@ -5481,6 +5556,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     setMoveCopy3dDragHandle(null)
     setMoveCopy3dDistInput('0')
     setMoveCopy3dAngleInput('0')
+    setMoveCopy3dDistLocked(false)
+    setMoveCopy3dAngleLocked(false)
     setMoveCopy3dSnapStep(0)
     setMoveCopy3dSnapP1(null)
     setMoveCopy3dSnapHover(null)
@@ -5549,6 +5626,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     setMoveCopy3dDragHandle({ kind: hit.kind, axis: hit.axis })
     setMoveCopy3dDistInput('0')
     setMoveCopy3dAngleInput('0')
+    setMoveCopy3dDistLocked(false)
+    setMoveCopy3dAngleLocked(false)
     moveCopy3dRotateBasisRef.current = null
     if (hit.kind !== 'rotate') return
     const vp = viewport3dRef.current
@@ -5586,6 +5665,11 @@ const App3D = forwardRef(function App3D(props, ref) {
     const { kind, axis } = moveCopy3dDragHandle
 
     if (kind === 'move') {
+      // Locked (user typed directly into the popover — see
+      // moveCopy3dDistLocked's own comment) means leave the typed value
+      // alone; without this, the very next mousemove silently clobbered
+      // whatever exact number was just typed.
+      if (moveCopy3dDistLocked) return
       const dir = vp.getGizmoAxisWorldDir?.(axis)
       if (!dir) return
       const p0 = vp.worldToScreen(origin.x, origin.y, origin.z)
@@ -5604,6 +5688,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       return
     }
 
+    if (moveCopy3dAngleLocked) return
     const basis = moveCopy3dRotateBasisRef.current
     if (!basis) return
     const hitPt = vp.raycastPlaneWorld?.(e.clientX, e.clientY, origin, { x:basis.axisDir.x, y:basis.axisDir.y, z:basis.axisDir.z })
@@ -5779,6 +5864,32 @@ const App3D = forwardRef(function App3D(props, ref) {
   // so Snap Move (which computes its own position-only delta from two
   // picked points, not a gizmo handle) can commit through the exact same
   // path instead of duplicating the copy/move branching.
+  // Creates ONE new solid+feature from `solid`/`feat`, transformed by
+  // workerParams ({position:[dx,dy,dz]} or {rotation:{angleDeg,axis,pivot}})
+  // relative to the SOURCE's current geometry, named via `nameFn(feat)`.
+  // Extracted from commitMoveCopy3DTransform's own copy branch (below) so
+  // Pattern's commit can call this in a loop — once per generated instance
+  // — without duplicating the worker call / state-push shape. `+Math.random()`
+  // on the id: a single Move/Copy commit never collided since it's one call,
+  // but a tight Pattern loop calling this many times can land two calls in
+  // the same millisecond, which Date.now() alone can't tell apart.
+  async function createTransformedCopy(solid, feat, workerParams, newTransform, nameFn) {
+    const newSolidId = Date.now() + Math.random()
+    const base = buildBaseWorkerParams(solid)
+    const ops = buildSolidOpsForWorker(solid, features)
+    const meshData = await cadEngine.transformShape({
+      solidId: newSolidId, sourceSolidId: solid.id, base, ops, ...workerParams,
+    })
+    const group = replicadMeshToThree(meshData, solid.color, newSolidId)
+    const newFeatId = `${feat.id}-copy-${newSolidId}`
+    setSolids(prev => [...prev, { ...solid, id: newSolidId, group, transform: newTransform }])
+    setFeatures(prev => [...prev, {
+      ...feat, id: newFeatId, solidId: newSolidId, name: nameFn(feat),
+      transform: newTransform, joinedInto: undefined,
+    }])
+    return newSolidId
+  }
+
   async function commitMoveCopy3DTransform(solidId, workerParams, newTransform) {
     const solid = solids.find(s => s.id === solidId)
     const feat = baseFeatureForSolid(solidId)
@@ -5786,19 +5897,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     feat3d.commit(features)
     try {
       if (moveCopy3dMode === 'copy') {
-        const newSolidId = Date.now()
-        const base = buildBaseWorkerParams(solid)
-        const ops = buildSolidOpsForWorker(solid, features)
-        const meshData = await cadEngine.transformShape({
-          solidId: newSolidId, sourceSolidId: solidId, base, ops, ...workerParams,
-        })
-        const group = replicadMeshToThree(meshData, solid.color, newSolidId)
-        const newFeatId = `${feat.id}-copy-${newSolidId}`
-        setSolids(prev => [...prev, { ...solid, id: newSolidId, group, transform: newTransform }])
-        setFeatures(prev => [...prev, {
-          ...feat, id: newFeatId, solidId: newSolidId, name: `${feat.name} Copy`,
-          transform: newTransform, joinedInto: undefined,
-        }])
+        await createTransformedCopy(solid, feat, workerParams, newTransform, f => `${f.name} Copy`)
       } else {
         const meshData = await cadEngine.transformShape({ solidId, ...workerParams })
         const group = replicadMeshToThree(meshData, solid.color, solidId)
@@ -5866,6 +5965,181 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
     await commitMoveCopy3DTransform(solidId, { position: delta }, newTransform)
   }
+
+  // ── Pattern (Rectangular / Circular) state machine ────────────────────────
+  // Step 1: pick a body (identical to Move/Copy's own — raycastSolidFace +
+  // hover, handleMoveCopy3DBodyClick/Hover's pattern reused verbatim below).
+  // Step 2: PatternPanel modal collects every number up front (mirrors
+  // Spring's own "modal first" flow) — Rectangular has everything it needs
+  // right there (two plain X/Y/Z direction choices, no 3D picking) and
+  // commits straight from the panel; Circular can't type a 3D pivot point,
+  // so its Confirm just stashes the panel's params and opens Step 3.
+  // Step 3 (Circular only): click a circular edge on ANY body to derive
+  // BOTH pivot and axis in one click (reusing Set Pivot's exact snap
+  // machinery, extended to also read the `.normal` this session's Set-Pivot
+  // work added to getEdgeSnapCandidates) — a non-circular pick still snaps
+  // a point but has no normal to offer, so the axis falls back to world Z
+  // (surfaced in the hint text, not a silent guess).
+  const [pattern3dSel, setPattern3dSel] = useState(null)              // solidId
+  const [pattern3dHoverSolidId, setPattern3dHoverSolidId] = useState(null)
+  const [pattern3dShowPanel, setPattern3dShowPanel] = useState(false)
+  const [pattern3dParams, setPattern3dParams] = useState(null)        // circular: panel's output, held while picking axis
+  const [pattern3dAxisHover, setPattern3dAxisHover] = useState(null)  // {solidId, point:[x,y,z]mm, axis:{x,y,z}|null}
+
+  function resetPattern3D() {
+    setPattern3dSel(null)
+    setPattern3dHoverSolidId(null)
+    setPattern3dShowPanel(false)
+    setPattern3dParams(null)
+    setPattern3dAxisHover(null)
+    viewport3dRef.current?.clearSolidHighlight()
+    viewport3dRef.current?.clearSolidHover()
+  }
+
+  function activatePattern3DTool() {
+    resetSelection()
+    resetDrawState()
+    restoreHiddenEditSolid()
+    if (sketchModeRef.current) {
+      setSketchMode(false)
+      setActivePlane(null)
+      setActiveSketchId(null)
+      activePlaneRef.current = null
+      viewport3dRef.current?.restoreSavedView()
+    }
+    setTool('pattern3d')
+    setExtrudeTool(null)
+    setExtrudeState(null)
+    setEditingFeatureId(null)
+    resetPattern3D()
+  }
+
+  function handlePattern3DBodyClick(e) {
+    if (tool !== 'pattern3d' || pattern3dSel != null) return
+    const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
+    if (!hit || hit.solidId==null) return
+    const feat = baseFeatureForSolid(hit.solidId)
+    if (!feat) return
+    setPattern3dSel(hit.solidId)
+    setPattern3dShowPanel(true)
+  }
+
+  function handlePattern3DHover(e) {
+    if (tool !== 'pattern3d' || pattern3dSel != null) { return }
+    const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
+    const solidId = hit?.solidId ?? null
+    setPattern3dHoverSolidId(prev => solidId === prev ? prev : solidId)
+  }
+
+  useEffect(() => {
+    if (tool !== 'pattern3d' || pattern3dHoverSolidId==null || pattern3dSel!=null) { viewport3dRef.current?.clearSolidHover(); return }
+    viewport3dRef.current?.hoverSolid(pattern3dHoverSolidId)
+  }, [tool, pattern3dHoverSolidId, pattern3dSel])
+
+  useEffect(() => {
+    if (tool !== 'pattern3d' || pattern3dSel==null) { viewport3dRef.current?.clearSolidHighlight(); return }
+    viewport3dRef.current?.highlightSolid(pattern3dSel)
+  }, [tool, pattern3dSel])
+
+  // World-axis unit vectors for Rectangular's plain X/Y/Z direction choice —
+  // no 3D picking needed there, unlike Circular's pivot/axis.
+  const PATTERN_AXIS_VECTORS = { x: {x:1,y:0,z:0}, y: {x:0,y:1,z:0}, z: {x:0,y:0,z:1} }
+
+  // Rectangular commits straight from the panel — every number it needs
+  // (two directions, each a plain world axis) is already in `params`.
+  async function commitRectangularPattern(params) {
+    const solidId = pattern3dSel
+    const solid = solids.find(s => s.id === solidId)
+    const feat = baseFeatureForSolid(solidId)
+    if (!solid || !feat) { resetPattern3D(); return }
+    const priorPos = solid.transform?.position || [0,0,0]
+    const priorRotation = solid.transform?.rotation || null
+    const dir1 = PATTERN_AXIS_VECTORS[params.dir1]
+    const dir2 = params.dir2 ? PATTERN_AXIS_VECTORS[params.dir2] : null
+    const offsets = buildRectangularOffsets(dir1, params.count1, params.spacing1, dir2, params.count2, params.spacing2)
+    resetPattern3D()
+    try {
+      for (let i = 1; i < offsets.length; i++) {
+        const { dx, dy, dz } = offsets[i]
+        const newTransform = { position: [priorPos[0]+dx, priorPos[1]+dy, priorPos[2]+dz], rotation: priorRotation }
+        await createTransformedCopy(solid, feat, { position: [dx,dy,dz] }, newTransform, f => `${f.name} Pattern ${i}`)
+      }
+    } catch (err) {
+      setCadError('Pattern failed: ' + (err.message || String(err)))
+      setTimeout(() => setCadError(null), 6000)
+    }
+  }
+
+  // Circular can't collect a 3D pivot in a modal — stash the panel's
+  // numbers and open the interactive axis-pick step instead of committing.
+  function handlePatternPanelConfirm(params) {
+    if (params.mode === 'rectangular') {
+      commitRectangularPattern(params)
+    } else {
+      setPattern3dParams(params)
+      setPattern3dShowPanel(false)
+    }
+  }
+
+  // Circular axis pick — same raycastSolidEdges+getEdgeSnapCandidates pass
+  // Snap Move/Set Pivot use, on ANY body (not just the selected one), but
+  // this one also reads `.normal` when the hovered edge is circular so a
+  // single click on a wheel's rim hands over pivot AND axis together.
+  function handlePatternAxisHover(e) {
+    if (tool !== 'pattern3d' || !pattern3dParams || pattern3dSel==null) return
+    const vp = viewport3dRef.current; if (!vp) return
+    const edgeHit = vp.raycastSolidEdges(e.clientX, e.clientY)
+    if (!edgeHit || edgeHit.edgeId == null) { setPattern3dAxisHover(null); return }
+    const candidates = getEdgeSnapCandidates(vp, edgeHit.solidId, edgeHit.edgeId)
+    const nearest = nearestSnapCandidate(candidates, edgeHit.point)
+    // nearest.normal (when present) is a plain [x,y,z] array, not an
+    // {x,y,z} object — every axis consumer below (THREE.Vector3, the
+    // worker's rotation.axis) expects {x,y,z}, so convert here. Passing the
+    // array through unconverted used to read as axis.x===undefined, which
+    // THREE.Vector3 silently defaults to 0 — a degenerate (0,0,0) axis that
+    // produced a zero-angle rotation on the first copy and corrupted OCC's
+    // cached shape for the second ("This object has been deleted").
+    const axis = nearest?.normal ? { x: nearest.normal[0], y: nearest.normal[1], z: nearest.normal[2] } : null
+    setPattern3dAxisHover(nearest ? { solidId: edgeHit.solidId, point: nearest.point, axis } : null)
+  }
+
+  async function handlePatternAxisClick(e) {
+    if (tool !== 'pattern3d' || !pattern3dParams || !pattern3dAxisHover) return
+    const params = pattern3dParams
+    const pivot = pattern3dAxisHover.point
+    // Falls back to world Z when the pick has no circular-edge normal to
+    // offer — surfaced in the hint text below, not a silent guess.
+    const axis = pattern3dAxisHover.axis || { x:0, y:0, z:1 }
+    const solidId = pattern3dSel
+    const solid = solids.find(s => s.id === solidId)
+    const feat = baseFeatureForSolid(solidId)
+    if (!solid || !feat) { resetPattern3D(); return }
+    const stepAngleDeg = circularStepAngleDeg(params.specifyVia, params.count, params.stepAngleDeg, params.totalAngleDeg)
+    const angles = buildCircularAngles(params.count, stepAngleDeg, params.reversed)
+    const priorPos = solid.transform?.position || [0,0,0]
+    const priorRotation = solid.transform?.rotation || null
+    resetPattern3D()
+    try {
+      for (let i = 1; i < angles.length; i++) {
+        const Rdelta = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(axis.x, axis.y, axis.z), THREE.MathUtils.degToRad(angles[i]))
+        const Rnew = Rdelta.multiply(rotationToQuat(priorRotation))
+        const newTransform = { position: priorPos, rotation: quatToAxisAngle(Rnew) }
+        const workerParams = { rotation: { angleDeg: angles[i], axis: [axis.x, axis.y, axis.z], pivot } }
+        await createTransformedCopy(solid, feat, workerParams, newTransform, f => `${f.name} Pattern ${i}`)
+      }
+    } catch (err) {
+      setCadError('Pattern failed: ' + (err.message || String(err)))
+      setTimeout(() => setCadError(null), 6000)
+    }
+  }
+
+  // Reuses the same dot-overlay drawing Snap Move/Set Pivot already use —
+  // see drawSnapMoveOverlay's own comment.
+  useEffect(() => {
+    const vp = viewport3dRef.current
+    if (!vp || tool !== 'pattern3d' || !pattern3dParams) { clearSnapMoveOverlay(); return }
+    drawSnapMoveOverlay(vp, null, pattern3dAxisHover)
+  }, [tool, pattern3dParams, pattern3dAxisHover])
 
   // ── Join (3D boolean union) state machine ─────────────────────────────────
   // Step 1: click bodies directly in the 3D view to accumulate joinSel
@@ -6090,6 +6364,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     setSweepState(null)
     setSweepOffsetMode(false)
     setSweepOffsetBase(null)
+    setHideWorkPlanesManual(false)
   }
 
   function resetSweep3D() {
@@ -6187,7 +6462,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   function handleSpringOffsetPlanePick(pick) {
-    if (!springOffsetBase) setSpringOffsetBase(pick)
+    if (!springOffsetBase) { setSpringOffsetBase(pick); setSpringOffsetDistLocked(false) }
     else commitSpringOffset()  // base already picked — any further click accepts the live distance
   }
 
@@ -6207,31 +6482,65 @@ const App3D = forwardRef(function App3D(props, ref) {
     setSpringOffsetMode(false)
     setSpringOffsetBase(null)
     viewport3dRef.current?.hideOffsetPlanePreview()
+    clearSnapMoveOverlay()
   }
 
-  // Drag-to-set-distance — same projection math as handleSweepOffsetDragMove
-  // just above, gated on the spring offset state instead of Sweep's.
-  function handleSpringOffsetDragMove(e) {
-    if (tool !== 'spring3d' || !springOffsetBase) return
-    const vp = viewport3dRef.current
-    if (!vp) return
-    const basis = springOffsetBase.kind === 'face' ? springOffsetBase.facePlane : planeIdBasis(springOffsetBase.planeId)
+  // Shared by every offset-plane drag-move handler below (Spring/Mirror/
+  // Extrude/Sweep) — projects the mouse onto the base plane's own normal
+  // for a free-hand distance, same as before, but FIRST checks whether the
+  // cursor is hovering a vertex/midpoint/circle-center on any solid — if
+  // so, the plane snaps to pass exactly through that point instead of the
+  // free-hand projection. Reuses the exact same raycastSolidEdges/
+  // getEdgeSnapCandidates/nearestSnapCandidate pipeline Set Pivot and
+  // Pattern's axis-pick already use for point snapping elsewhere in the 3D
+  // view. Returns null only when neither a snap nor a plain projection is
+  // possible (e.g. a degenerate screen-space normal at this camera angle).
+  function offsetPlaneDragDistanceMm(e, vp, basis) {
+    const edgeHit = vp.raycastSolidEdges?.(e.clientX, e.clientY)
+    if (edgeHit?.edgeId != null) {
+      const candidates = getEdgeSnapCandidates(vp, edgeHit.solidId, edgeHit.edgeId)
+      const nearest = nearestSnapCandidate(candidates, edgeHit.point)
+      if (nearest) {
+        const [sx, sy, sz] = nearest.point
+        const ox = pxToMm(basis.origin.x), oy = pxToMm(basis.origin.y), oz = pxToMm(basis.origin.z)
+        const mm = (sx-ox)*basis.normal.x + (sy-oy)*basis.normal.y + (sz-oz)*basis.normal.z
+        // `point` lets callers draw the same orange snap-dot Set Pivot/
+        // Pattern's axis-pick already use elsewhere, so a snapped offset
+        // actually SHOWS which vertex/midpoint/circle-center it locked
+        // onto, not just a number jumping in the popover.
+        return { mm, snapped: true, point: nearest.point }
+      }
+    }
     const p0 = vp.worldToScreen(basis.origin.x, basis.origin.y, basis.origin.z)
     const p1 = vp.worldToScreen(
       basis.origin.x + basis.normal.x * 2,
       basis.origin.y + basis.normal.y * 2,
       basis.origin.z + basis.normal.z * 2,
     )
-    if (!p0 || !p1) return
+    if (!p0 || !p1) return null
     const dx = p1.x - p0.x, dy = p1.y - p0.y
     const pxPerMm = Math.hypot(dx, dy)
-    if (!pxPerMm) return
+    if (!pxPerMm) return null
     const vpRect = vp.getDomElement?.()?.parentElement?.getBoundingClientRect?.()
-    if (!vpRect) return
+    if (!vpRect) return null
     const mx = e.clientX - vpRect.left, my = e.clientY - vpRect.top
     const proj = (mx - p0.x) * (dx / pxPerMm) + (my - p0.y) * (dy / pxPerMm)
-    let mm = proj / pxPerMm
-    if (gridSnap) mm = Math.round(mm / gridSizeMm) * gridSizeMm
+    return { mm: proj / pxPerMm, snapped: false, point: null }
+  }
+
+  // Drag-to-set-distance — gated on the spring offset state.
+  function handleSpringOffsetDragMove(e) {
+    if (tool !== 'spring3d' || !springOffsetBase || springOffsetDistLocked) return
+    const vp = viewport3dRef.current
+    if (!vp) return
+    const basis = springOffsetBase.kind === 'face' ? springOffsetBase.facePlane : planeIdBasis(springOffsetBase.planeId)
+    const res = offsetPlaneDragDistanceMm(e, vp, basis)
+    if (!res) return
+    if (res.snapped) drawSnapMoveOverlay(vp, null, { point: res.point }); else clearSnapMoveOverlay()
+    let mm = res.mm
+    // A snapped-to-a-point distance is already exact — rounding it to the
+    // grid would defeat the whole point of snapping onto it.
+    if (gridSnap && !res.snapped) mm = Math.round(mm / gridSizeMm) * gridSizeMm
     setSpringOffsetDistInput(String(Math.round(mm * 100) / 100))
   }
 
@@ -6859,6 +7168,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     const facePlane = mirror3dOffsetFacePlane()
     if (!facePlane) return
     commitMirror3DBatch({ kind: 'face', facePlane })
+    clearSnapMoveOverlay()
   }
 
   // Mirror step 2 (offset plane): moving the mouse over the viewport while a
@@ -6874,26 +7184,15 @@ const App3D = forwardRef(function App3D(props, ref) {
   // actually does. Signed, not abs()'d — the plane can go either side of
   // the base, not just outward.
   function handleMirror3DOffsetDragMove(e) {
-    if (tool !== 'mirror3d' || !mirror3dOffsetBase) return
+    if (tool !== 'mirror3d' || !mirror3dOffsetBase || mirror3dOffsetDistLocked) return
     const vp = viewport3dRef.current
     if (!vp) return
     const basis = mirror3dOffsetBase.kind === 'face' ? mirror3dOffsetBase.facePlane : planeIdBasis(mirror3dOffsetBase.planeId)
-    const p0 = vp.worldToScreen(basis.origin.x, basis.origin.y, basis.origin.z)
-    const p1 = vp.worldToScreen(
-      basis.origin.x + basis.normal.x * 2,
-      basis.origin.y + basis.normal.y * 2,
-      basis.origin.z + basis.normal.z * 2,
-    )
-    if (!p0 || !p1) return
-    const dx = p1.x - p0.x, dy = p1.y - p0.y
-    const pxPerMm = Math.hypot(dx, dy)
-    if (!pxPerMm) return
-    const vpRect = vp.getDomElement?.()?.parentElement?.getBoundingClientRect?.()
-    if (!vpRect) return
-    const mx = e.clientX - vpRect.left, my = e.clientY - vpRect.top
-    const proj = (mx - p0.x) * (dx / pxPerMm) + (my - p0.y) * (dy / pxPerMm)
-    let mm = proj / pxPerMm
-    if (gridSnap) mm = Math.round(mm / gridSizeMm) * gridSizeMm
+    const res = offsetPlaneDragDistanceMm(e, vp, basis)
+    if (!res) return
+    if (res.snapped) drawSnapMoveOverlay(vp, null, { point: res.point }); else clearSnapMoveOverlay()
+    let mm = res.mm
+    if (gridSnap && !res.snapped) mm = Math.round(mm / gridSizeMm) * gridSizeMm
     setMirror3dOffsetDistInput(String(Math.round(mm * 100) / 100))
   }
 
@@ -6921,7 +7220,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   function handleExtrudeOffsetPlanePick(pick) {
-    if (!extrudeOffsetBase) setExtrudeOffsetBase(pick)
+    if (!extrudeOffsetBase) { setExtrudeOffsetBase(pick); setExtrudeOffsetDistLocked(false) }
     else commitExtrudeOffset()  // base already picked — any further click accepts the live distance
   }
 
@@ -6938,31 +7237,21 @@ const App3D = forwardRef(function App3D(props, ref) {
     setExtrudeOffsetMode(false)
     setExtrudeOffsetBase(null)
     viewport3dRef.current?.hideOffsetPlanePreview()
+    clearSnapMoveOverlay()
   }
 
   // Drag-to-set-distance — same projection math as handleMirror3DOffsetDragMove
   // just above, gated on the extrude offset state instead of Mirror's.
   function handleExtrudeOffsetDragMove(e) {
-    if (!extrudeTool || !extrudeOffsetBase) return
+    if (!extrudeTool || !extrudeOffsetBase || extrudeOffsetDistLocked) return
     const vp = viewport3dRef.current
     if (!vp) return
     const basis = extrudeOffsetBase.kind === 'face' ? extrudeOffsetBase.facePlane : planeIdBasis(extrudeOffsetBase.planeId)
-    const p0 = vp.worldToScreen(basis.origin.x, basis.origin.y, basis.origin.z)
-    const p1 = vp.worldToScreen(
-      basis.origin.x + basis.normal.x * 2,
-      basis.origin.y + basis.normal.y * 2,
-      basis.origin.z + basis.normal.z * 2,
-    )
-    if (!p0 || !p1) return
-    const dx = p1.x - p0.x, dy = p1.y - p0.y
-    const pxPerMm = Math.hypot(dx, dy)
-    if (!pxPerMm) return
-    const vpRect = vp.getDomElement?.()?.parentElement?.getBoundingClientRect?.()
-    if (!vpRect) return
-    const mx = e.clientX - vpRect.left, my = e.clientY - vpRect.top
-    const proj = (mx - p0.x) * (dx / pxPerMm) + (my - p0.y) * (dy / pxPerMm)
-    let mm = proj / pxPerMm
-    if (gridSnap) mm = Math.round(mm / gridSizeMm) * gridSizeMm
+    const res = offsetPlaneDragDistanceMm(e, vp, basis)
+    if (!res) return
+    if (res.snapped) drawSnapMoveOverlay(vp, null, { point: res.point }); else clearSnapMoveOverlay()
+    let mm = res.mm
+    if (gridSnap && !res.snapped) mm = Math.round(mm / gridSizeMm) * gridSizeMm
     setExtrudeOffsetDistInput(String(Math.round(mm * 100) / 100))
   }
 
@@ -6987,7 +7276,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   function handleSweepOffsetPlanePick(pick) {
-    if (!sweepOffsetBase) setSweepOffsetBase(pick)
+    if (!sweepOffsetBase) { setSweepOffsetBase(pick); setSweepOffsetDistLocked(false) }
     else commitSweepOffset()  // base already picked — any further click accepts the live distance
   }
 
@@ -7004,31 +7293,21 @@ const App3D = forwardRef(function App3D(props, ref) {
     setSweepOffsetMode(false)
     setSweepOffsetBase(null)
     viewport3dRef.current?.hideOffsetPlanePreview()
+    clearSnapMoveOverlay()
   }
 
   // Drag-to-set-distance — same projection math as handleExtrudeOffsetDragMove
   // just above, gated on the sweep offset state instead of Extrude's.
   function handleSweepOffsetDragMove(e) {
-    if (tool !== 'sweep3d' || !sweepOffsetBase) return
+    if (tool !== 'sweep3d' || !sweepOffsetBase || sweepOffsetDistLocked) return
     const vp = viewport3dRef.current
     if (!vp) return
     const basis = sweepOffsetBase.kind === 'face' ? sweepOffsetBase.facePlane : planeIdBasis(sweepOffsetBase.planeId)
-    const p0 = vp.worldToScreen(basis.origin.x, basis.origin.y, basis.origin.z)
-    const p1 = vp.worldToScreen(
-      basis.origin.x + basis.normal.x * 2,
-      basis.origin.y + basis.normal.y * 2,
-      basis.origin.z + basis.normal.z * 2,
-    )
-    if (!p0 || !p1) return
-    const dx = p1.x - p0.x, dy = p1.y - p0.y
-    const pxPerMm = Math.hypot(dx, dy)
-    if (!pxPerMm) return
-    const vpRect = vp.getDomElement?.()?.parentElement?.getBoundingClientRect?.()
-    if (!vpRect) return
-    const mx = e.clientX - vpRect.left, my = e.clientY - vpRect.top
-    const proj = (mx - p0.x) * (dx / pxPerMm) + (my - p0.y) * (dy / pxPerMm)
-    let mm = proj / pxPerMm
-    if (gridSnap) mm = Math.round(mm / gridSizeMm) * gridSizeMm
+    const res = offsetPlaneDragDistanceMm(e, vp, basis)
+    if (!res) return
+    if (res.snapped) drawSnapMoveOverlay(vp, null, { point: res.point }); else clearSnapMoveOverlay()
+    let mm = res.mm
+    if (gridSnap && !res.snapped) mm = Math.round(mm / gridSizeMm) * gridSizeMm
     setSweepOffsetDistInput(String(Math.round(mm * 100) / 100))
   }
 
@@ -9698,6 +9977,20 @@ const App3D = forwardRef(function App3D(props, ref) {
       return
     }
 
+    // Pattern: Circular's axis pick — takes over clicks entirely while the
+    // panel has handed off to it (mirrors Set Pivot's own click-takeover).
+    if (tool==='pattern3d' && pattern3dParams) {
+      handlePatternAxisClick(e)
+      return
+    }
+    // Pattern step 1: pick the body — opens the PatternPanel modal on a hit
+    // (see handlePattern3DBodyClick), so there's nothing further to arm here
+    // the way Move/Copy's gizmo needs.
+    if (tool==='pattern3d' && pattern3dSel == null) {
+      handlePattern3DBodyClick(e)
+      return
+    }
+
     if (tool==='color') {
       handleColorClick(e)
       return
@@ -10131,7 +10424,9 @@ const App3D = forwardRef(function App3D(props, ref) {
             const dx=sl.x2-sl.x1, dy=sl.y2-sl.y1, len=Math.hypot(dx,dy)
             if (len>1e-10) {
               const px=-dy/len, py=dx/len
-              const t=(raw.x-startPoint.x)*px+(raw.y-startPoint.y)*py
+              let t=(raw.x-startPoint.x)*px+(raw.y-startPoint.y)*py
+              // Must match the preview branch above — see its comment.
+              if (dimLocked) t=Math.sign(t||1)*mmToPx(parseFloat(dimInput)||0)
               endPt={x:startPoint.x+t*px, y:startPoint.y+t*py}
             } else { endPt=raw }
           } else {
@@ -10421,6 +10716,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       else if (!feat3dBusy) feat3d.redo(features,restore3D)
       return
     }
+    if (e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==='s'){e.preventDefault();if(!sketchMode)handleSaveProjectAs();return}
     if (e.ctrlKey&&e.key==='s'){e.preventDefault();sketchMode?handleSave():handleSaveProject();return}
     if ((e.key==='f'||e.key==='F')&&!e.ctrlKey){zoomToFit();return}
     // Escape in sketch mode: cancel whatever 2D tool is mid-interaction only
@@ -10578,6 +10874,8 @@ const App3D = forwardRef(function App3D(props, ref) {
         setMoveCopy3dDragHandle(null)
         setMoveCopy3dDistInput('0')
         setMoveCopy3dAngleInput('0')
+        setMoveCopy3dDistLocked(false)
+        setMoveCopy3dAngleLocked(false)
         moveCopy3dRotateBasisRef.current = null
         return
       }
@@ -10591,6 +10889,16 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (moveCopy3dSnapStep === 1) { setMoveCopy3dSnapStep(0); setMoveCopy3dSnapHover(null); return }
       if (moveCopy3dSel != null) { setMoveCopy3dSel(null); return }
       resetMoveCopy3D(); setTool('select'); return
+    }
+    if (e.key==='Escape'&&tool==='pattern3d'){
+      // Circular's axis-pick step backs out all the way to Step 1 rather
+      // than reopening the panel — PatternPanel holds its fields as plain
+      // local state, so there's no saved values to restore it with anyway;
+      // simplest to just re-pick and re-enter the numbers.
+      if (pattern3dParams) { resetPattern3D(); return }
+      if (pattern3dShowPanel) { resetPattern3D(); return }
+      if (pattern3dSel != null) { setPattern3dSel(null); return }
+      resetPattern3D(); setTool('select'); return
     }
     if (e.key==='Escape'&&tool==='measure'){
       // First Escape clears the current result or a pending first point;
@@ -11272,7 +11580,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   return (
     <div ref={rootDivRef} style={{display:'flex',height:'100%',outline:'none'}} tabIndex={0}
       onKeyDown={handleKeyDown}
-      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e); handleMirror3DOffsetDragMove(e); handleExtrudeOffsetDragMove(e); handleSweepOffsetDragMove(e); handleSpringOffsetDragMove(e); handleMoveCopy3DDragMove(e); handleMoveCopy3DGizmoHover(e); handleSnapMoveHover(e); handleSetPivotHover(e) }}
+      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e); handleMirror3DOffsetDragMove(e); handleExtrudeOffsetDragMove(e); handleSweepOffsetDragMove(e); handleSpringOffsetDragMove(e); handleMoveCopy3DDragMove(e); handleMoveCopy3DGizmoHover(e); handleSnapMoveHover(e); handleSetPivotHover(e); handlePattern3DHover(e); handlePatternAxisHover(e) }}
       onMouseUp={e=>{ }}
     >
 
@@ -11378,7 +11686,7 @@ const App3D = forwardRef(function App3D(props, ref) {
               // layout, matching the pairs above.
               [{id:'fillet3d', label:'FILLET',  color:'#A470F2'}, {id:'mirror3d', label:'MIRROR', color:'#8E65F3'}],
               [{id:'join3d',   label:'JOIN',    color:'#FFEE88'}, {id:'movecopy3d', label:'MOVE/COPY', color:'#FF9800'}],
-              [{id:'shell3d',  label:'SHELL',   color:'#4DB6AC'}],
+              [{id:'shell3d',  label:'SHELL',   color:'#4DB6AC'}, {id:'pattern3d', label:'PATTERN', color:'#4DB6AC'}],
             ]
             .filter(row => !simpleMode || !row.some(btn => ADVANCED_SOLID_TOOL_IDS.has(btn.id)))
             .map((row, rowIdx) => {
@@ -11386,7 +11694,7 @@ const App3D = forwardRef(function App3D(props, ref) {
               return (
               <div key={rowIdx} style={{display:'flex', gap:4}}>
                 {row.map(({id,label,color}) => {
-                  const isActive = id==='fillet3d' ? tool==='fillet3d' : id==='shell3d' ? tool==='shell3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
+                  const isActive = id==='fillet3d' ? tool==='fillet3d' : id==='shell3d' ? tool==='shell3d' : id==='pattern3d' ? tool==='pattern3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
                     : id==='loft3d' ? ((tool==='loft3d' || !!loftState) && loftTool!=='loftcutout')
                     : id==='loftcutout' ? ((tool==='loft3d' || !!loftState) && loftTool==='loftcutout')
                     : id==='sweep3d' ? ((tool==='sweep3d' || !!sweepState) && sweepTool!=='sweepcut')
@@ -11403,6 +11711,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                       if (id==='extrude'||id==='cutout'||id==='revolve'||id==='revolvecut') activateExtrudeTool(id)
                       else if (id==='fillet3d') activateFillet3DTool()
                       else if (id==='shell3d') activateShell3DTool()
+                      else if (id==='pattern3d') activatePattern3DTool()
                       else if (id==='mirror3d') activateMirror3DTool()
                       else if (id==='join3d') activateJoin3DTool()
                       else if (id==='loft3d') activateLoft3DTool('loft')
@@ -11761,13 +12070,25 @@ const App3D = forwardRef(function App3D(props, ref) {
             onScaleChange={handleScaleChange}
             onPlaneClick={handlePlaneClick}
             onFaceClick={handleFaceClick}
-            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode) || (tool==='mirror3d' && mirror3dSelectionDone) || (tool==='loft3d' && !loftState) || (tool==='sweep3d' && !sweepState) || (tool==='spring3d' && !springState) || tool==='exportfacedxf' || (tool==='shell3d' && !shell3dAccepted)}
+            // Each offset-plane flow (Extrude/Mirror/Sweep/Spring) stays
+            // "sketch armed" for its WHOLE step 2 — picking the base plane/
+            // face AND the subsequent drag-to-set-distance sub-step — since
+            // neither extrudeState/mirror3dSelectionDone/sweepState/
+            // springState changes until the offset actually commits. The
+            // face-hover "click to sketch" square below only reads this
+            // flag, with no idea a base is already picked, so without the
+            // `!XOffsetBase` guards it kept rendering/reacting to whatever
+            // face the cursor passed over while just dragging for a
+            // distance — confusing visual noise with nothing to click.
+            // Once a base IS picked, face-hovering is no longer a pending
+            // pick, so sketchArmed should go false for that offset flow.
+            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode && !extrudeOffsetBase) || (tool==='mirror3d' && mirror3dSelectionDone && !mirror3dOffsetBase) || (tool==='loft3d' && !loftState) || (tool==='sweep3d' && !sweepState && !sweepOffsetBase) || (tool==='spring3d' && !springState && !springOffsetBase) || tool==='exportfacedxf' || (tool==='shell3d' && !shell3dAccepted)}
             mirrorPlanePickArmed={tool==='mirror3d' && mirror3dSelectionDone && !mirror3dOffsetBase}
             dxfPickMode={tool==='exportfacedxf' || tool==='shell3d'}
             dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : tool==='shell3d' ? shell3dSel : []}
             facePickLabel={tool==='shell3d' ? 'click to remove' : null}
             extrudeArmed={!!extrudeState || (!!loftState && !sketchMode)}
-            showWorkPlanes={!sketchMode && !cutoutTargetPicker && tool!=='fillet3d' && tool!=='shell3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && tool!=='movecopy3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hidePlanesForExtrude && (tool==='extrude' || tool==='cutout' || tool==='revolve' || tool==='revolvecut'))}
+            showWorkPlanes={!sketchMode && !cutoutTargetPicker && tool!=='fillet3d' && tool!=='shell3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && tool!=='movecopy3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hideWorkPlanesManual && (tool==='extrude' || tool==='cutout' || tool==='revolve' || tool==='revolvecut' || tool==='sweep3d'))}
             activePlane={activePlane}
             sketchMode={sketchMode}
             gridVisible={gridVisible}
@@ -11815,19 +12136,27 @@ const App3D = forwardRef(function App3D(props, ref) {
                   ? 'Move the mouse or type a distance, Enter to confirm'
                   : extrudeOffsetMode
                     ? 'Click a plane or face to offset from'
-                    : null)
+                    // No geometric rule can guess "which way is up" for an
+                    // arbitrary face — hovering one shows a green edge as the
+                    // sketch's bottom, picked by proximity to the cursor.
+                    // Surfacing the Tab-to-cycle escape hatch here (it
+                    // already existed, just undiscoverable) means a profile
+                    // that comes out flipped/rotated from what was expected
+                    // has an immediate fix, instead of looking like a fixed
+                    // bug with no way to correct it.
+                    : 'Click a plane or face — hovering a face: Tab/Shift+Tab cycles which edge is the sketch’s bottom')
               : ((extrudeTool === 'revolve' || extrudeTool === 'revolvecut') && sketchMode)
                 ? 'Draw a closed profile and an axis line (Revolve Axis tool), then Finish'
                 : null}
             action={
               (!extrudeState && !sketchMode)
                 ? [
-                    { label: hidePlanesForExtrude ? '◻ Show Planes' : '◻ Hide Planes', enabled:true,
-                      onClick: () => setHidePlanesForExtrude(p => !p) },
+                    { label: hideWorkPlanesManual ? '◻ Show Planes' : '◻ Hide Planes', enabled:true,
+                      onClick: () => setHideWorkPlanesManual(p => !p) },
                     extrudeOffsetBase
                       ? { label:'✓ Use Plane', enabled:true, onClick:commitExtrudeOffset,
                           popover: <OffsetDistancePopover color={(extrudeTool === 'cutout' || extrudeTool === 'revolvecut') ? '#e05a4e' : '#3a7bd5'}
-                            value={extrudeOffsetDistInput} onChange={setExtrudeOffsetDistInput}/> }
+                            value={extrudeOffsetDistInput} onChange={v=>{setExtrudeOffsetDistLocked(true);setExtrudeOffsetDistInput(v)}}/> }
                       : { label: extrudeOffsetMode ? '✕ Cancel Offset' : '+ Offset Plane', enabled:true,
                           onClick:()=>{
                             if (extrudeOffsetMode) { setExtrudeOffsetMode(false); setExtrudeOffsetBase(null) }
@@ -11936,7 +12265,7 @@ const App3D = forwardRef(function App3D(props, ref) {
               ? {label:'✓ Next', enabled:mirror3dSel.length>0, onClick:()=>setMirror3dSelectionDone(true)}
               : mirror3dOffsetBase
                 ? {label:'✓ Use Plane', enabled:true, onClick:commitMirror3DOffset,
-                    popover: <OffsetDistancePopover color="#8E65F3" value={mirror3dOffsetDistInput} onChange={setMirror3dOffsetDistInput}/>}
+                    popover: <OffsetDistancePopover color="#8E65F3" value={mirror3dOffsetDistInput} onChange={v=>{setMirror3dOffsetDistLocked(true);setMirror3dOffsetDistInput(v)}}/>}
                 : {label: mirror3dOffsetMode ? '✕ Cancel Offset' : '+ Offset Plane', enabled:true,
                     onClick:()=>{
                       if (mirror3dOffsetMode) { setMirror3dOffsetMode(false); setMirror3dOffsetBase(null) }
@@ -12031,12 +12360,33 @@ const App3D = forwardRef(function App3D(props, ref) {
                 label:'✓ Confirm', enabled:true, onClick:commitMoveCopy3D,
                 popover: moveCopy3dDragHandle.kind==='rotate'
                   ? <OffsetDistancePopover color="#FF9800" label={moveCopy3dMode==='copy' ? 'COPY' : 'ROTATE'}
-                      unit="°" value={moveCopy3dAngleInput} onChange={setMoveCopy3dAngleInput}/>
+                      unit="°" value={moveCopy3dAngleInput} onChange={v=>{setMoveCopy3dAngleLocked(true);setMoveCopy3dAngleInput(v)}}/>
                   : <OffsetDistancePopover color="#FF9800" label={moveCopy3dMode==='copy' ? 'COPY' : 'MOVE'}
-                      unit="mm" value={moveCopy3dDistInput} onChange={setMoveCopy3dDistInput}/>,
+                      unit="mm" value={moveCopy3dDistInput} onChange={v=>{setMoveCopy3dDistLocked(true);setMoveCopy3dDistInput(v)}}/>,
               }] : []),
             ]}
             onStepBack={step => { if (step === 1) resetMoveCopy3D() }}
+          />
+
+          {/* ── SmartStep bar: overlays bottom of viewport during Pattern ── */}
+          <SmartStepBar
+            op={tool==='pattern3d' ? 'PATTERN' : null}
+            steps={[
+              { id:1, label:'Select Body' },
+              { id:2, label: pattern3dParams ? 'Pick Axis' : 'Set Parameters' },
+            ]}
+            currentStep={pattern3dParams ? 2 : (pattern3dSel!=null || pattern3dShowPanel) ? 2 : 1}
+            color="#4DB6AC"
+            hint={pattern3dSel==null && !pattern3dShowPanel
+              ? 'Click a body to pattern'
+              : pattern3dParams
+                ? (pattern3dAxisHover?.axis
+                    ? 'Click to confirm — axis from the circular edge'
+                    : pattern3dAxisHover
+                      ? 'Click to confirm — no circular edge here, axis defaults to world Z'
+                      : 'Click a circular edge (auto pivot+axis), or any vertex (pivot only, axis = world Z)')
+                : ''}
+            onStepBack={step => { if (step === 1) resetPattern3D() }}
           />
 
           {/* ── SmartStep bar: overlays bottom of viewport during Loft ── */}
@@ -12071,10 +12421,12 @@ const App3D = forwardRef(function App3D(props, ref) {
             action={
               !sweepState
                 ? [
+                    { label: hideWorkPlanesManual ? '◻ Show Planes' : '◻ Hide Planes', enabled:true,
+                      onClick: () => setHideWorkPlanesManual(p => !p) },
                     sweepOffsetBase
                       ? { label:'✓ Use Plane', enabled:true, onClick:commitSweepOffset,
                           popover: <OffsetDistancePopover color={sweepTool==='sweepcut' ? '#53D3E4' : '#7ED957'}
-                            value={sweepOffsetDistInput} onChange={setSweepOffsetDistInput}/> }
+                            value={sweepOffsetDistInput} onChange={v=>{setSweepOffsetDistLocked(true);setSweepOffsetDistInput(v)}}/> }
                       : { label: sweepOffsetMode ? '✕ Cancel Offset' : '+ Offset Plane', enabled:true,
                           onClick:()=>{
                             if (sweepOffsetMode) { setSweepOffsetMode(false); setSweepOffsetBase(null) }
@@ -12111,7 +12463,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                     springOffsetBase
                       ? { label:'✓ Use Plane', enabled:true, onClick:commitSpringOffset,
                           popover: <OffsetDistancePopover color={springTool==='springcut' ? '#53D3E4' : '#F06292'}
-                            value={springOffsetDistInput} onChange={setSpringOffsetDistInput}/> }
+                            value={springOffsetDistInput} onChange={v=>{setSpringOffsetDistLocked(true);setSpringOffsetDistInput(v)}}/> }
                       : { label: springOffsetMode ? '✕ Cancel Offset' : '+ Offset Plane', enabled:true,
                           onClick:()=>{
                             if (springOffsetMode) { setSpringOffsetMode(false); setSpringOffsetBase(null) }
@@ -12344,6 +12696,10 @@ const App3D = forwardRef(function App3D(props, ref) {
               <button onClick={handleSaveProject} title="Save Project (Ctrl+S)" style={{...btnBase,flexDirection:'column',gap:2,background:'transparent',border:'none'}}>
                 <IconSave/>
                 <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>SAVE</span>
+              </button>
+              <button onClick={handleSaveProjectAs} title="Save Project As — always asks for a new file/name" style={{...btnBase,flexDirection:'column',gap:2,background:'transparent',border:'none'}}>
+                <IconSave/>
+                <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>SAVE AS</span>
               </button>
               <button onClick={()=>loadProjectFileRef.current.click()} title="Open Project" style={{...btnBase,flexDirection:'column',gap:2,background:'transparent',border:'none'}}>
                 <IconLoad/>
@@ -13574,7 +13930,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           extension={saveAsOpen==='project' ? '.trc' : '.json'}
           onSave={async filename=>{
             setSaveAsOpen(false)
-            if (saveAsOpen==='project') await saveProjectFileAs(features, solids, filename, null, props.getSheetData?.())
+            if (saveAsOpen==='project') { await saveProjectFileAs(features, solids, filename, null, props.getSheetData?.()); updateProjectName(filename) }
             else await saveProjectAs(lines,circles,arcs,splines,dims,filename)
           }}
           onClose={()=>setSaveAsOpen(false)}
@@ -13632,6 +13988,13 @@ const App3D = forwardRef(function App3D(props, ref) {
           // planeId==='face' && isCut convention) — a work-plane pick has
           // no such "outward" bias, so it defaults unreversed either way.
           initialReversed={springTool==='springcut' && springState?.pickKind==='face'}
+        />
+      )}
+      {pattern3dShowPanel && (
+        <PatternPanel
+          onConfirm={handlePatternPanelConfirm}
+          onClose={resetPattern3D}
+          color="#4DB6AC"
         />
       )}
     </div>

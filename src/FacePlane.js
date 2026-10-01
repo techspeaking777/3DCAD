@@ -183,8 +183,35 @@ export function faceHitToPlane(hit, overrideEdge = null) {
     // flip BOTH axes together (preserves vAxis = normal × uAxis, since
     // negating both leaves the cross product's sign unchanged, and keeps
     // whichever direction was chosen as horizontal).
+    //
+    // The centroid used here is area-weighted (per-triangle area as the
+    // weight), NOT `origin`'s plain per-vertex average above. A plain vertex
+    // average is skewed by tessellation density: a small feature that
+    // happens to be finely tessellated (e.g. a round hole punched right at
+    // the chosen bottom edge) contributes a disproportionate number of
+    // vertices for the tiny amount of actual area it covers, dragging the
+    // average toward itself. On a non-convex face (a V/fork-shaped arm, say)
+    // that's enough to pull the "centroid" across to the WRONG side of the
+    // chosen edge, flipping the whole sketch 180° from what the shape's
+    // actual bulk would suggest — confirmed live on a rocker-bogie arm with
+    // a pivot hole sketched at its valley edge. Weighting by each triangle's
+    // real area is immune to this: the hole's many tiny triangles contribute
+    // almost nothing to the sum regardless of how many of them there are.
+    let areaCentroid = origin
+    if (coplanarVerts.length >= 3) {
+      let areaSum = 0
+      const weighted = new THREE.Vector3()
+      for (let i = 0; i < coplanarVerts.length; i += 3) {
+        const p0 = coplanarVerts[i], p1 = coplanarVerts[i+1], p2 = coplanarVerts[i+2]
+        const area = p1.clone().sub(p0).cross(p2.clone().sub(p0)).length() * 0.5
+        const triCentroid = p0.clone().add(p1).add(p2).multiplyScalar(1/3)
+        weighted.addScaledVector(triCentroid, area)
+        areaSum += area
+      }
+      if (areaSum > 1e-9) areaCentroid = weighted.multiplyScalar(1/areaSum)
+    }
     const mid = nearest.a.clone().add(nearest.b).multiplyScalar(0.5)
-    if (vAxis.dot(origin.clone().sub(mid)) < 0) {
+    if (vAxis.dot(areaCentroid.clone().sub(mid)) < 0) {
       uAxis.negate()
       vAxis.negate()
     }
@@ -236,20 +263,59 @@ export function previewBottomEdge(hit, normal) {
 }
 
 /**
- * Flat, ordered list of a face's boundary edges as {a,b} world-space Vector3
- * pairs (all loops concatenated, each including its closing segment) — used
- * to Tab-cycle the bottom-edge preview through every candidate edge instead
- * of only following the cursor. Same {hit, normal} inputs as previewBottomEdge.
+ * The face's bounding RECTANGLE — in the same default orientation
+ * faceHitToPlane itself would pick (nearest boundary edge to hit.point,
+ * flipped toward the face's own area-weighted centroid) — as exactly 4
+ * {a,b} world-space edges, clockwise starting from that default bottom
+ * edge: bottom, left, top, right. Tab-cycling (Viewport3D's
+ * cycleFaceBottomEdge) steps through THESE instead of the real boundary's
+ * own segments (faceBoundarySegments) once Tab is first pressed.
+ *
+ * Why: a non-convex or irregular face boundary (an L-shape, a fork/V
+ * shape, anything with small fillet-curve segments) can have many boundary
+ * segments of wildly uneven length, in no order a user would predict —
+ * cycling through them directly made "press Tab a few times" unreliable,
+ * sometimes skipping past the orientation the user actually wanted or
+ * landing on two visually-identical tiny segments in a row. A face's
+ * bounding rectangle always has exactly 4 sides, independent of how
+ * irregular the real boundary underneath it is, so the cycle is always
+ * exactly 4 predictable stops.
+ *
+ * Which way each returned edge's `a`/`b` happens to point doesn't matter:
+ * faceHitToPlane's own flip-to-centroid correction resolves the bottom and
+ * top edges to the same final basis regardless of direction (same for the
+ * left/right pair), so every one of these 4 edges deterministically
+ * resolves to one of exactly 4 evenly-90°-apart orientations once fed back
+ * through it — this function only has to get a STABLE rectangle, not the
+ * final up/down decision (that's faceHitToPlane's job alone, same as ever).
  */
-export function faceBoundarySegments(hit, normal) {
+export function faceBoundingRectEdges(hit, normal) {
   const loops = extractFaceBoundaryLoops3D(hit, normal)
-  const segments = []
-  for (const loop of loops) {
-    for (let i = 0; i < loop.length - 1; i++) segments.push({ a: loop[i], b: loop[i+1] })
-    const first = loop[0], last = loop[loop.length-1]
-    if (keyOf3D(first) !== keyOf3D(last)) segments.push({ a: last, b: first })
+  if (!loops.length) return []
+  const nearest = nearestBoundarySegment(loops, hit.point)
+  if (!nearest) return []
+
+  const uAxis = nearest.b.clone().sub(nearest.a).normalize()
+  const vAxis = new THREE.Vector3().crossVectors(normal, uAxis).normalize()
+  const origin = nearest.a
+  const allPts = loops.flat()
+
+  let uMin=Infinity, uMax=-Infinity, vMin=Infinity, vMax=-Infinity
+  for (const p of allPts) {
+    const rel = p.clone().sub(origin)
+    const u = rel.dot(uAxis), v = rel.dot(vAxis)
+    if (u<uMin) uMin=u; if (u>uMax) uMax=u
+    if (v<vMin) vMin=v; if (v>vMax) vMax=v
   }
-  return segments
+  const corner = (u,v) => origin.clone().addScaledVector(uAxis,u).addScaledVector(vAxis,v)
+  const bl=corner(uMin,vMin), br=corner(uMax,vMin), tr=corner(uMax,vMax), tl=corner(uMin,vMax)
+
+  return [
+    { a: bl, b: br },  // bottom (the default nearest-edge orientation)
+    { a: bl, b: tl },  // left
+    { a: tl, b: tr },  // top
+    { a: br, b: tr },  // right
+  ]
 }
 
 /**
@@ -324,8 +390,47 @@ function closestPointOnSegment3D(p, a, b) {
 // separate instances even when numerically coincident).
 const keyOf3D = p => `${Math.round(p.x*100)}_${Math.round(p.y*100)}_${Math.round(p.z*100)}`
 
-/** Finds the boundary segment (across all loops) nearest to `point`. Returns {a, b} or null. */
-function nearestBoundarySegment(loops, point) {
+// Picks the OUTER boundary loop out of every loop a face has (its own
+// outline plus one loop per interior hole) — the one enclosing the largest
+// area, via the magnitude of each loop's 3D "area vector" (sum of
+// cross-products against an arbitrary shared point on the loop; robust to
+// winding direction and to the loop not being perfectly planar-aligned
+// with any single world axis). A hole is always strictly smaller than the
+// boundary it's cut from, so this is a reliable, order-independent way to
+// tell them apart without needing the face's own uAxis/vAxis yet (this
+// runs BEFORE those are chosen — see nearestBoundarySegment's callers).
+function loopArea(loop) {
+  if (loop.length < 3) return 0
+  const o = loop[0]
+  const areaVec = new THREE.Vector3()
+  for (let i = 1; i < loop.length - 1; i++) {
+    areaVec.add(loop[i].clone().sub(o).cross(loop[i+1].clone().sub(o)))
+  }
+  return areaVec.length()
+}
+function outerBoundaryLoop(loops) {
+  if (loops.length <= 1) return loops
+  let best = loops[0], bestArea = loopArea(best)
+  for (let i = 1; i < loops.length; i++) {
+    const a = loopArea(loops[i])
+    if (a > bestArea) { bestArea = a; best = loops[i] }
+  }
+  return [best]
+}
+
+/**
+ * Finds the boundary segment nearest to `point`, among the OUTER loop's
+ * segments only — never a hole's. Without this, hovering/clicking near a
+ * hole (a pivot hole sketched right at a fork/valley's natural "bottom",
+ * say) picks the globally nearest segment across EVERY loop including the
+ * hole's own tiny tessellated circle, handing back an effectively
+ * arbitrary tangent direction that has nothing to do with the face's real
+ * shape — confirmed live: a rocker-bogie arm's sketch orientation was
+ * unstable/wrong specifically because the click landed near its pivot
+ * hole. Returns {a, b} or null.
+ */
+function nearestBoundarySegment(allLoops, point) {
+  const loops = outerBoundaryLoop(allLoops)
   let best = null, bestDistSq = Infinity
   for (const loop of loops) {
     for (let i = 0; i < loop.length - 1; i++) {

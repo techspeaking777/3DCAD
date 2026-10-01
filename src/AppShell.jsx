@@ -9,6 +9,10 @@ import DrawingApp from './App.jsx'
 // already uses for its two superimposed 3D/2D-overlay canvases.
 export default function AppShell() {
   const [activeTab, setActiveTab] = useState('3d')   // '3d' | 'drawing'
+  // Pushed up from App3D (onProjectNameChange prop) on every successful
+  // save/open/cloud-load — lives here, not in App3D, since this bar is
+  // shared by both tabs and sits outside either app's own component.
+  const [projectName, setProjectName] = useState(null)
   const app3dRef = useRef(null)
   const drawingRef = useRef(null)
   const app3dWrapRef = useRef(null)
@@ -87,6 +91,21 @@ export default function AppShell() {
           </span>
         </div>
 
+        {/* Current project name — only once something's actually been saved
+            or opened (a brand-new, never-saved project shows nothing here
+            rather than a misleading "Untitled"). Pushed up from App3D via
+            onProjectNameChange on every save/open/cloud-load. */}
+        {projectName && (
+          <div style={{ display: 'flex', alignItems: 'center', marginLeft: 22, minWidth: 0 }}>
+            <span style={{
+              fontFamily: 'monospace', fontSize: 13, color: '#999',
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 220,
+            }} title={projectName}>
+              {projectName}
+            </span>
+          </div>
+        )}
+
         {/* Wordmark — lives here (the one bar that's never in either app's own
             toolbar, so it can't get crowded out by tool groups) rather than
             inside App3D's sketch toolbar, which needed the width back. */}
@@ -122,6 +141,7 @@ export default function AppShell() {
             ref={app3dRef}
             getSheetData={() => drawingRef.current?.getSheetData()}
             onSheetLoaded={sheet => drawingRef.current?.restoreSheetData(sheet)}
+            onProjectNameChange={setProjectName}
           />
         </div>
         <div ref={drawingWrapRef} style={{ display: activeTab === 'drawing' ? 'block' : 'none', height: '100%' }}>

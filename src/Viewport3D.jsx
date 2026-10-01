@@ -35,7 +35,7 @@ import { LineGeometry } from 'three/addons/lines/LineGeometry.js'
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
 import { createWorkPlanes, hitTestPlanes, setPlaneHover, setPlaneActive, setWorkPlanesVisible } from './WorkPlanes.js'
 import { SKETCH_PLANES } from './SketchPlane.js'
-import { faceHitToPlane, previewBottomEdge, faceBoundarySegments, facePickBoundaryLoops } from './FacePlane.js'
+import { faceHitToPlane, previewBottomEdge, faceBoundingRectEdges, facePickBoundaryLoops } from './FacePlane.js'
 import { mmToPx } from './constants.js'
 
 // Move/Copy/Rotate gizmo axis convention — colors match SketchPlane.js's
@@ -445,8 +445,8 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   // still read true for an unrelated reason.
   const extrudeArmedRef  = useRef(false)
   // Tab-cycled bottom-edge override (see cycleFaceBottomEdge) — null means
-  // "follow the cursor" (previewBottomEdge), a number is an index into that
-  // face's faceBoundarySegments() list. Reset whenever the hovered face's
+  // "follow the cursor" (previewBottomEdge), a number 0-3 indexes that
+  // face's faceBoundingRectEdges() list. Reset whenever the hovered face's
   // normal drifts (moved to a genuinely different face) or hover is cleared.
   const tabEdgeIndexRef  = useRef(null)
   const tabEdgeNormalRef = useRef(null)
@@ -695,8 +695,8 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
         // face — drawn every frame regardless of hover, so it doesn't vanish
         // the moment the cursor moves off it. facePickBoundaryLoops scopes to
         // just this one face's own outer loop + holes, not every coplanar
-        // loop on the mesh (that's faceBoundarySegments below, deliberately
-        // broader for the sketch bottom-edge preview) — otherwise selecting
+        // loop on the mesh (that's extractFaceBoundaryLoops3D's own default,
+        // used by the sketch bottom-edge preview below) — otherwise selecting
         // one letter would highlight every letter on the same flat surface.
         if (dxfPickModeRef.current && dxfSelectedFacesRef.current.length) {
           const s = stateRef.current
@@ -753,8 +753,8 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
               // picks the same edge — or honors the same override — at click time).
               let bottomEdge
               if (tabEdgeIndexRef.current !== null) {
-                const segs = faceBoundarySegments({ object: hf.mesh, point: hf.hit.point }, faceNormal)
-                bottomEdge = segs.length ? segs[tabEdgeIndexRef.current % segs.length] : null
+                const segs = faceBoundingRectEdges({ object: hf.mesh, point: hf.hit.point }, faceNormal)
+                bottomEdge = segs.length ? segs[tabEdgeIndexRef.current % 4] : null
               } else {
                 bottomEdge = previewBottomEdge({ object: hf.mesh, point: hf.hit.point }, faceNormal)
               }
@@ -1260,8 +1260,8 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       if (tabEdgeIndexRef.current !== null) {
         const hf = hoveredFaceRef.current
         const normal = getHoveredFaceNormal(hf)
-        const segs = faceBoundarySegments({ object: hf.mesh, point: hf.hit.point }, normal)
-        overrideEdge = segs.length ? segs[tabEdgeIndexRef.current % segs.length] : null
+        const segs = faceBoundingRectEdges({ object: hf.mesh, point: hf.hit.point }, normal)
+        overrideEdge = segs.length ? segs[tabEdgeIndexRef.current % 4] : null
       }
       const facePlane = faceHitToPlane(hitWithRay, overrideEdge)
       if (facePlane) {
@@ -1584,21 +1584,25 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
 
     /**
      * Steps the bottom-edge preview (see the green highlight in animate())
-     * through the hovered face's boundary edges, one per call, instead of
-     * only following the cursor — for edges the mouse can't easily land near.
-     * dir=1 forward / -1 backward (e.g. Shift+Tab). No-op (returns false) if
-     * no face is currently hovered. The chosen edge sticks until the mouse
-     * moves to a genuinely different face or the hover is cleared (see
-     * animate()'s normal-drift check and clearFaceHover).
+     * through the hovered face's bounding-RECTANGLE edges (see
+     * FacePlane.js's faceBoundingRectEdges — always exactly 4 stops,
+     * clockwise, regardless of how irregular the real face boundary is)
+     * instead of only following the cursor — for orientations the mouse
+     * can't easily land near, or faces whose real boundary has too many
+     * uneven segments to cycle through predictably. dir=1 forward / -1
+     * backward (e.g. Shift+Tab). No-op (returns false) if no face is
+     * currently hovered. The chosen edge sticks until the mouse moves to a
+     * genuinely different face or the hover is cleared (see animate()'s
+     * normal-drift check and clearFaceHover).
      */
     cycleFaceBottomEdge(dir = 1) {
       const hf = hoveredFaceRef.current
       if (!hf?.hit) return false
       const normal = getHoveredFaceNormal(hf)
-      const segs = faceBoundarySegments({ object: hf.mesh, point: hf.hit.point }, normal)
+      const segs = faceBoundingRectEdges({ object: hf.mesh, point: hf.hit.point }, normal)
       if (!segs.length) return false
       const cur = tabEdgeIndexRef.current
-      tabEdgeIndexRef.current = cur === null ? 0 : (cur + dir + segs.length) % segs.length
+      tabEdgeIndexRef.current = cur === null ? 0 : (cur + dir + 4) % 4
       tabEdgeNormalRef.current = normal
       return true
     },

@@ -818,6 +818,32 @@ self.onmessage = async function(e) {
       let base
       if (params.base) {
         base = await buildBase(params.base)
+        // A plain extrude's own inner-loop holes (profilePts.holes — see
+        // resolveNestedHoles in extrudeMath.js) are punched by App3D.jsx's
+        // commitExtrude/rebuildBaseMesh AFTER the bare extrude, via a
+        // separate client-side subtract call — buildBase/buildExtrude above
+        // only ever build the OUTER profile. Since buildBaseWorkerParams
+        // always returns a `base` for a plain-extrude mirror source (only a
+        // join/mirror source returns null, handled below), this cold-rebuild
+        // branch is the ONLY path a mirror ever takes for one — so without
+        // this, a mirrored extrude with holes in its sketch always came out
+        // solid (confirmed live: a rocker-bogie arm's pivot holes vanished
+        // on Mirror). Punch them here too, in the SOURCE's own unmirrored
+        // local frame, before the mirror transform below — mirroring the
+        // whole already-holed shape in one geometric op carries the holes
+        // along for free, with no coordinate math needed.
+        const holes = params.base.pts?.holes
+        if (holes && holes.length) {
+          for (const holePts of holes) {
+            const holeCut = {
+              pts: holePts, depthMm: (params.base.depthMm || 20) * 4 + 10,
+              planeId: params.base.planeId, direction: 'both',
+              circle: holePts.circleMeta || null,
+              normal: params.base.normal, origin: params.base.origin, uAxis: params.base.uAxis,
+            }
+            base = cutTolerant(base, buildCutShape(holeCut))
+          }
+        }
       } else {
         base = shapeStore.get(params.sourceSolidId)
         if (!base) throw new Error('Mirror source shape not found in cache (join/mirror source not yet built)')
@@ -925,6 +951,19 @@ self.onmessage = async function(e) {
             base = cutTolerant(base, buildCutShape(clampCutDepth(op.params, params.base)))
           }
         }
+      } else if (params.sourceSolidId != null && params.sourceSolidId !== params.solidId) {
+        // Copy/Pattern read the SOURCE body's own cached shape without
+        // overwriting it (Move, below, intentionally does overwrite its own
+        // entry) — but replicad's rotate()/translate() call this.delete() on
+        // their input after producing the transformed result, which would
+        // silently free the source's cached WASM shape right out from under
+        // it. Harmless for a single Copy (nothing reads sourceSolidId's
+        // cache again that message), but Pattern calls transformShape with
+        // the SAME sourceSolidId once per instance — the second call would
+        // then throw "This object has been deleted" fetching an already-
+        // freed shape. Cloning first gives rotate/translate their own
+        // disposable handle to consume, leaving the source's cache intact.
+        base = base.clone()
       }
       // rotation.pivot present = a live incremental rotate delta (App3D
       // already knows the body's CURRENT world pivot at drag time — the

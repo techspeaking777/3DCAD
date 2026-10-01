@@ -461,6 +461,30 @@ export function IconShell3D({ color = '#4DB6AC', size = 70 }) {
   )
 }
 
+export function IconPattern3D({ color = '#4DB6AC', size = 70 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>
+      <GroundShadow color={color} cy={62}/>
+      {/* Circular-pattern-specific glyph (replacing the earlier generic
+          repeated-cube array icon once Pattern narrowed to Circular only):
+          an isometric drum/cylinder — same top-ellipse-plus-vertical-sides
+          language as Revolve/Spring's own icons — with 4 X marks ringing
+          the rim where copies land, echoing the actual crosshair this tool
+          shows live when picking the pivot+axis on a circular edge. */}
+      <ellipse cx="35" cy="20" rx="20" ry="9" fill={color} fillOpacity="0.3" stroke={color} strokeWidth="1.75"/>
+      <line x1="15" y1="20" x2="15" y2="46" stroke={color} strokeWidth="1.75"/>
+      <line x1="55" y1="20" x2="55" y2="46" stroke={color} strokeWidth="1.75"/>
+      <path d="M15 46 A20 9 0 0 0 55 46" fill="none" stroke={color} strokeWidth="1.75"/>
+      <g stroke={color} strokeWidth="2.5" strokeLinecap="round">
+        <path d="M50 25 L58 33 M58 25 L50 33"/>
+        <path d="M12 25 L20 33 M20 25 L12 33"/>
+        <path d="M12 7 L20 15 M20 7 L12 15"/>
+        <path d="M50 7 L58 15 M58 7 L50 15"/>
+      </g>
+    </svg>
+  )
+}
+
 // ── MOVE ──────────────────────────────────────────────────────────────────────
 // x=c*3, y=r*3 from original raw pixel array
 export function IconMove({ active }) {

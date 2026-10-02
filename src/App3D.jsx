@@ -11648,8 +11648,8 @@ const App3D = forwardRef(function App3D(props, ref) {
       )}
 
       {/* ══ LEFT SIDEBAR ══════════════════════════════════════════════════════ */}
-      <div style={{width: sketchMode ? 72 : 124, background:'#1a1a2e',display:'flex',flexDirection:'column',
-        padding:'8px 4px',gap:4,overflowY:'auto',borderRight:'1px solid #2a2a4a',
+      <div style={{width: sketchMode ? 72 : 161, background:'#1a1a2e',display:'flex',flexDirection:'column',
+        padding:'8px 4px',gap:5,overflowY:'auto',borderRight:'1px solid #2a2a4a',
         transition:'background 0.3s, width 0.2s'}}>
 
         {sketchMode ? (
@@ -11692,7 +11692,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             .map((row, rowIdx) => {
               const paired = row.length > 1
               return (
-              <div key={rowIdx} style={{display:'flex', gap:4}}>
+              <div key={rowIdx} style={{display:'flex', gap:5}}>
                 {row.map(({id,label,color}) => {
                   const isActive = id==='fillet3d' ? tool==='fillet3d' : id==='shell3d' ? tool==='shell3d' : id==='pattern3d' ? tool==='pattern3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
                     : id==='loft3d' ? ((tool==='loft3d' || !!loftState) && loftTool!=='loftcutout')
@@ -11703,7 +11703,10 @@ const App3D = forwardRef(function App3D(props, ref) {
                     : id==='springcut' ? ((tool==='spring3d' || !!springState) && springTool==='springcut')
                     : id==='movecopy3d' ? tool==='movecopy3d'
                     : extrudeTool===id
-                  const iconSize = paired ? 34 : 48
+                  // 30% bigger than the original 34/48 — the sidebar's own
+                  // width (above) and button size (below) are scaled to
+                  // match, so icons don't just grow inside the same box.
+                  const iconSize = paired ? 44 : 62
                   return (
                   <button key={id}
                     title={label}
@@ -11724,7 +11727,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                     }}
                     style={{...btnBase, flexDirection:'column', gap:1,
                       flex: paired ? 1 : 'none',
-                      width: paired ? undefined : 76, height:76,
+                      width: paired ? undefined : 99, height:99,
                       background: isActive ? color+'33' : 'transparent',
                       outline: isActive ? `2px solid ${color}` : `1px dashed ${color}55`,
                       outlineOffset:'-2px',
@@ -11742,7 +11745,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                         </text>
                       </svg>
                     )}
-                    <span style={{fontSize:paired?7:8,fontFamily:'monospace',color,letterSpacing:'0.01em',textAlign:'center'}}>
+                    <span style={{fontSize:paired?9:10,fontFamily:'monospace',color,letterSpacing:'0.01em',textAlign:'center'}}>
                       {label}
                     </span>
                   </button>
@@ -11753,36 +11756,6 @@ const App3D = forwardRef(function App3D(props, ref) {
             })}
 
             <div style={{flex:1}}/>
-
-            {/* MEASURE — click an edge for its length/diameter, or two points
-                for the distance between them. Esc clears the current result. */}
-            <button title="Measure" onClick={activateMeasureTool}
-              style={{...btnBase, flexDirection:'column', gap:1,
-                width:76, height:76,
-                background: tool==='measure' ? '#4FC3F733' : 'transparent',
-                outline: tool==='measure' ? '2px solid #4FC3F7' : '1px dashed #4FC3F755',
-                outlineOffset:'-2px',
-              }}>
-              <IconMeasure3D color="#4FC3F7" size={40}/>
-              <span style={{fontSize:8,fontFamily:'monospace',color:'#4FC3F7',letterSpacing:'0.01em'}}>
-                MEASURE
-              </span>
-            </button>
-
-            {/* EXPORT FACE DXF — click a solid face to export its exact OCC
-                boundary (outer loop + every hole) as a .dxf file. */}
-            <button title="Export Face as DXF" onClick={activateExportFaceDXFTool}
-              style={{...btnBase, flexDirection:'column', gap:1,
-                width:76, height:76,
-                background: tool==='exportfacedxf' ? '#B47EFF33' : 'transparent',
-                outline: tool==='exportfacedxf' ? '2px solid #B47EFF' : '1px dashed #B47EFF55',
-                outlineOffset:'-2px',
-              }}>
-              <IconDXF/>
-              <span style={{fontSize:8,fontFamily:'monospace',color:'#B47EFF',letterSpacing:'0.01em'}}>
-                FACE DXF
-              </span>
-            </button>
           </>
         )}
       </div>
@@ -11987,6 +11960,29 @@ const App3D = forwardRef(function App3D(props, ref) {
                 <span style={{fontSize:9,fontFamily:'monospace',
                   color: simpleMode ? '#4DB6AC' : '#6688aa',
                   letterSpacing:'0.06em'}}>{simpleMode ? 'SIMPLE' : 'COMPLEX'}</span>
+              </button>
+              <div style={{width:1,height:34,background:'#2a2a4a',margin:'0 6px'}}/>
+              {/* Measure/Face DXF — moved here from the left sidebar once
+                  that sidebar's icons grew 30% bigger and these two no
+                  longer fit without scrolling (see their own tool-activate
+                  handlers, unchanged). */}
+              <button title="Measure" onClick={activateMeasureTool}
+                style={{...btnBase,background: tool==='measure' ? '#4FC3F733' : 'transparent',
+                  outline: tool==='measure' ? '2px solid #4FC3F7' : '1px solid #2a2a4a',
+                  outlineOffset:'-2px',
+                  flexDirection:'column',gap:2,width:'auto',padding:'0 8px',height:52}}>
+                <IconMeasure3D color="#4FC3F7" size={28}/>
+                <span style={{fontSize:9,fontFamily:'monospace',color:'#4FC3F7',
+                  letterSpacing:'0.06em'}}>MEASURE</span>
+              </button>
+              <button title="Export Face as DXF" onClick={activateExportFaceDXFTool}
+                style={{...btnBase,background: tool==='exportfacedxf' ? '#B47EFF33' : 'transparent',
+                  outline: tool==='exportfacedxf' ? '2px solid #B47EFF' : '1px solid #2a2a4a',
+                  outlineOffset:'-2px',
+                  flexDirection:'column',gap:2,width:'auto',padding:'0 8px',height:52}}>
+                <IconDXF/>
+                <span style={{fontSize:9,fontFamily:'monospace',color:'#B47EFF',
+                  letterSpacing:'0.06em'}}>FACE DXF</span>
               </button>
             </>
           )}

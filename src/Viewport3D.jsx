@@ -2282,6 +2282,52 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     },
 
     /**
+     * Tweens to an arbitrary axis-aligned view: camera sits along `dir`
+     * (world direction, need not be normalized) looking at the origin, with
+     * `up` as screen-up. Backs the ViewCube's six faces — snapToPlane only
+     * knows one direction per plane (no back/bottom/left), and zoom is kept
+     * as-is, same as the toolbar's TOP/FRONT/SIDE buttons.
+     */
+    snapToView(dir, up) {
+      const s=stateRef.current; if (!s) return Promise.resolve()
+      const {camera,controls,tween}=s
+      const toPos = new THREE.Vector3(dir[0], dir[1], dir[2]).normalize().multiplyScalar(800)
+      const toUp = new THREE.Vector3(up[0], up[1], up[2])
+
+      s.savedPos = camera.position.clone()
+      s.savedUp  = camera.up.clone()
+      s.savedTgt = controls.target.clone()
+
+      controls.enabled = false
+
+      tween.fromPos.copy(camera.position)
+      tween.fromUp .copy(camera.up)
+      tween.fromTgt.copy(controls.target)
+      tween.toPos  .copy(toPos)
+      tween.toUp   .copy(toUp)
+      tween.toTgt  .set(0, 0, 0)
+      tween.startMs = performance.now()
+      tween.active  = true
+
+      return new Promise(resolve => { tween.onDone = resolve })
+    },
+
+    /**
+     * Camera's right/up/toward-viewer unit vectors in world space — what the
+     * ViewCube needs to draw a cube that rotates with the view. Null before
+     * the scene exists.
+     */
+    getCameraAxes() {
+      const s=stateRef.current; if (!s) return null
+      const e = s.camera.matrixWorld.elements
+      return {
+        right: [e[0], e[1], e[2]],
+        up:    [e[4], e[5], e[6]],
+        back:  [e[8], e[9], e[10]],
+      }
+    },
+
+    /**
      * Tweens back to whatever camera state was saved by the last snapToPlane/
      * snapToFace/snapToIsometric call — used after finishing or canceling a
      * sketch/extrude flow to return exactly where the user was, rather than

@@ -29,6 +29,7 @@ import TracerPanel from './tools/TracerPanel.jsx'
 import TextPanel from './tools/TextPanel.jsx'
 import SpringPanel from './tools/SpringPanel.jsx'
 import PatternPanel from './tools/PatternPanel.jsx'
+import ViewCube from './tools/ViewCube.jsx'
 import PageSetupPanel from './tools/PageSetupPanel.jsx'
 import GuidePanel from './tools/GuidePanel.jsx'
 import SaveAsPanel from './tools/SaveAsPanel.jsx'
@@ -1610,6 +1611,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [treeCollapsed,setTreeCollapsed]=useState(false)
 
   const viewport3dRef=useRef(null)
+  const getViewCubeAxes=useCallback(()=>viewport3dRef.current?.getCameraAxes?.()??null,[])
   const [tool,setTool]=useState(null)
   // Simple/Complex sidebar mode — hides the advanced solid tools (Revolve,
   // Loft, Sweep, Spring, Shell) from the 3D sidebar for beginner users,
@@ -12049,6 +12051,15 @@ const App3D = forwardRef(function App3D(props, ref) {
           outline: sketchMode ? `3px solid ${getPlaneColor(activePlane)}` : 'none',
           outlineOffset: '-3px',
         }}>
+          {/* ViewCube — click a face to jump to that view. Hidden while
+              sketching, where the camera is locked to the sketch plane. */}
+          {!sketchMode && (
+            <div style={{position:'absolute',top:8,right:8,zIndex:5}}>
+              <ViewCube getAxes={getViewCubeAxes}
+                onSnap={(dir,up)=>viewport3dRef.current?.snapToView(dir,up)}
+                onHome={()=>viewport3dRef.current?.snapToIsometric()}/>
+            </div>
+          )}
           <div ref={canvasMountRef} style={{flex:1,overflow:'hidden',minWidth:0}}>
           <Viewport3D
             ref={viewport3dRef}

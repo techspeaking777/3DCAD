@@ -1612,6 +1612,18 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   const viewport3dRef=useRef(null)
   const getViewCubeAxes=useCallback(()=>viewport3dRef.current?.getCameraAxes?.()??null,[])
+  // On-screen Rotate/Pan/Zoom tools (null | 'rotate' | 'pan' | 'zoom'): while
+  // one is on, left-drag navigates the camera and plain clicks are ignored by
+  // the viewport. Picking any other tool, switching to sketch mode, or
+  // pressing Esc turns it back off (effects below, once tool state exists).
+  const [navMode,setNavMode]=useState(null)
+  useEffect(()=>{ viewport3dRef.current?.setNavMode(navMode) },[navMode])
+  useEffect(()=>{
+    if (!navMode) return
+    const onKey=e=>{ if (e.key==='Escape') setNavMode(null) }
+    window.addEventListener('keydown',onKey)
+    return ()=>window.removeEventListener('keydown',onKey)
+  },[navMode])
   const [tool,setTool]=useState(null)
   // Simple/Complex sidebar mode — hides the advanced solid tools (Revolve,
   // Loft, Sweep, Spring, Shell) from the 3D sidebar for beginner users,
@@ -2089,6 +2101,10 @@ const App3D = forwardRef(function App3D(props, ref) {
       window.location.reload()
     }
   }
+
+  // Picking a sidebar/top-bar tool (or entering a sketch) hands the left
+  // mouse button back to that tool — turn the on-screen nav tool off.
+  useEffect(()=>{ if (navMode) setNavMode(null) },[tool,extrudeTool,sketchMode])
 
   // Clears every tool's in-progress state — used before loading a project,
   // since opening a new file replaces everything currently on screen. Chains
@@ -12054,10 +12070,36 @@ const App3D = forwardRef(function App3D(props, ref) {
           {/* ViewCube — click a face to jump to that view. Hidden while
               sketching, where the camera is locked to the sketch plane. */}
           {!sketchMode && (
-            <div style={{position:'absolute',top:8,right:8,zIndex:5}}>
+            <div style={{position:'absolute',top:8,right:8,zIndex:5,
+              display:'flex',flexDirection:'column',alignItems:'center',gap:6}}>
               <ViewCube getAxes={getViewCubeAxes}
                 onSnap={(dir,up)=>viewport3dRef.current?.snapToView(dir,up)}
                 onHome={()=>viewport3dRef.current?.snapToIsometric()}/>
+              {/* Rotate / Pan / Zoom — click one, then left-drag in the view.
+                  Click it again (or press Esc) to go back to normal tools. */}
+              <div style={{display:'flex',gap:4}}>
+                {[
+                  {id:'rotate',title:'Rotate view — drag to orbit (Esc to exit)',
+                    icon:<path d="M12 5a7 7 0 1 0 6.5 4.4M18.5 3.5V9.6H12.4" />},
+                  {id:'pan',title:'Pan view — drag to move (Esc to exit)',
+                    icon:<path d="M12 3v18M3 12h18M12 3l-2.5 2.5M12 3l2.5 2.5M12 21l-2.5-2.5M12 21l2.5-2.5M3 12l2.5-2.5M3 12l2.5 2.5M21 12l-2.5-2.5M21 12l-2.5 2.5" />},
+                  {id:'zoom',title:'Zoom view — drag up/down (Esc to exit)',
+                    icon:<><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5.5 5.5M8 10.5h5M10.5 8v5"/></>},
+                ].map(({id,title,icon})=>{
+                  const on = navMode===id
+                  return (
+                    <button key={id} title={title} onClick={()=>setNavMode(on ? null : id)}
+                      style={{width:30,height:30,padding:0,cursor:'pointer',borderRadius:5,
+                        background: on ? '#3ad6ff33' : '#0d0d1acc',
+                        border:`1px solid ${on ? '#3ad6ff' : '#3ad6ff66'}`,
+                        display:'flex',alignItems:'center',justifyContent:'center'}}>
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                        stroke={on ? '#fff' : '#3ad6ff'} strokeWidth="1.8"
+                        strokeLinecap="round" strokeLinejoin="round">{icon}</svg>
+                    </button>
+                  )
+                })}
+              </div>
             </div>
           )}
           <div ref={canvasMountRef} style={{flex:1,overflow:'hidden',minWidth:0}}>

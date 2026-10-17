@@ -448,6 +448,10 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   // "follow the cursor" (previewBottomEdge), a number 0-3 indexes that
   // face's faceBoundingRectEdges() list. Reset whenever the hovered face's
   // normal drifts (moved to a genuinely different face) or hover is cleared.
+  // On-screen navigation tool (null | 'rotate' | 'pan' | 'zoom') — see
+  // setNavMode. While set, plain clicks are swallowed (handleClickInternal)
+  // so navigating can't also pick a plane/face or commit a tool step.
+  const navModeRef = useRef(null)
   const tabEdgeIndexRef  = useRef(null)
   const tabEdgeNormalRef = useRef(null)
   // Fillet edge highlight state — drawn every frame in animate() (reprojected
@@ -1242,6 +1246,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   }
 
   function handleClickInternal(e) {
+    if (navModeRef.current) return
     const s = stateRef.current
     sketchArmedRef.current = sketchArmed  // sync immediately
     extrudeArmedRef.current = extrudeArmed
@@ -2310,6 +2315,24 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       tween.active  = true
 
       return new Promise(resolve => { tween.onDone = resolve })
+    },
+
+    /**
+     * On-screen navigation tools: maps the LEFT mouse button to rotate / pan /
+     * zoom (null restores the normal "LEFT belongs to the active tool"
+     * binding — see the mouseButtons comment where controls are created).
+     * Also makes handleClickInternal ignore clicks while a nav tool is on,
+     * so a drag-then-release can't also pick a face/plane or commit a step.
+     */
+    setNavMode(mode) {
+      const s=stateRef.current; if (!s) return
+      navModeRef.current = mode || null
+      s.controls.mouseButtons.LEFT =
+        mode === 'rotate' ? THREE.MOUSE.ROTATE :
+        mode === 'pan'    ? THREE.MOUSE.PAN :
+        mode === 'zoom'   ? THREE.MOUSE.DOLLY : null
+      s.renderer.domElement.style.cursor =
+        mode === 'rotate' ? 'grab' : mode === 'pan' ? 'move' : mode === 'zoom' ? 'zoom-in' : ''
     },
 
     /**

@@ -630,6 +630,31 @@ function planeIdBasis(planeId) {
   return { origin, normal, uAxis, vAxis }
 }
 
+// ── Offset-plane helpers ──────────────────────────────────────────────────
+// Extrude/Cutout, Mirror, Sweep and Spring each have a "+ Offset Plane" step 1:
+// pick a base plane/face, then slide a parallel plane along its normal by a
+// distance (dragged or typed). These pure helpers are the shared maths; the
+// per-tool state, commit step and gating stay in each tool's own functions.
+
+// The FacePlane a picked base ({kind:'face', facePlane} | {kind:'workplane',
+// planeId}) describes.
+function resolveOffsetBasis(base) {
+  return base.kind === 'face' ? base.facePlane : planeIdBasis(base.planeId)
+}
+
+// Base pick + typed/dragged distance (mm string) → the offset FacePlane the
+// user sees previewed and gets on commit, or null with no base picked yet.
+// viewCenter follows the offset too, so the camera stays on the face centre.
+function offsetFacePlane(base, distInput) {
+  if (!base) return null
+  const basis = resolveOffsetBasis(base)
+  const distMm = parseFloat(distInput) || 0
+  const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(distMm))
+  const vAxis = new THREE.Vector3().crossVectors(basis.normal, basis.uAxis).normalize()
+  return new FacePlane(origin, basis.normal, basis.uAxis, vAxis,
+    basis.viewCenter ? basis.viewCenter.clone().addScaledVector(basis.normal, mmToPx(distMm)) : undefined)
+}
+
 // ── SmartStep Bar ─────────────────────────────────────────────────────────────
 // Shows the current step of the active Extrude / Cutout operation.
 // Completed steps show a ✓ and are clickable to go back.
@@ -1519,9 +1544,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [sweepOffsetBase,setSweepOffsetBase]=useState(null)
   const [sweepOffsetDistInput,setSweepOffsetDistInput]=useState('20')
   const [sweepOffsetDistLocked,setSweepOffsetDistLocked]=useState(false)  // see extrudeOffsetDistLocked's comment
-  // Offset (parallel) plane for Spring's own plane-pick step — same idea,
-  // its own parallel implementation for the same reason (additive-only,
-  // zero risk to Sweep/Extrude's already-shipped versions).
+  // Offset (parallel) plane for Spring's own plane-pick step (shared helpers).
   const [springOffsetMode,setSpringOffsetMode]=useState(false)
   const [springOffsetBase,setSpringOffsetBase]=useState(null)
   const [springOffsetDistInput,setSpringOffsetDistInput]=useState('20')
@@ -6719,25 +6742,15 @@ const App3D = forwardRef(function App3D(props, ref) {
     // startSpringProfileSketch below.
   }
 
-  // ── Spring step 1: offset (parallel) plane — same idea as Sweep's own
-  // offset plane just above, its own parallel implementation for the same
-  // "don't touch already-shipped tools" reason theirs is. ──
+  // ── Spring step 1: offset (parallel) plane — uses the shared offset-plane
+  // helpers (offsetFacePlane, dragOffsetDistance, syncOffsetPlanePreview,
+  // pickOffsetPlane); only the state and the commit step are Spring's own. ──
   function springOffsetFacePlane() {
-    if (!springOffsetBase) return null
-    const basis = springOffsetBase.kind === 'face'
-      ? springOffsetBase.facePlane
-      : planeIdBasis(springOffsetBase.planeId)
-    const distMm = parseFloat(springOffsetDistInput) || 0
-    const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(distMm))
-    const vAxis = new THREE.Vector3().crossVectors(basis.normal, basis.uAxis).normalize()
-    // viewCenter follows the offset too, so the camera stays on the face centre
-    return new FacePlane(origin, basis.normal, basis.uAxis, vAxis,
-      basis.viewCenter ? basis.viewCenter.clone().addScaledVector(basis.normal, mmToPx(distMm)) : undefined)
+    return offsetFacePlane(springOffsetBase, springOffsetDistInput)
   }
 
   function handleSpringOffsetPlanePick(pick) {
-    if (!springOffsetBase) { setSpringOffsetBase(pick); setSpringOffsetDistLocked(false) }
-    else commitSpringOffset()  // base already picked — any further click accepts the live distance
+    pickOffsetPlane(pick, springOffsetBase, setSpringOffsetBase, setSpringOffsetDistLocked, commitSpringOffset)
   }
 
   // Commits into the exact same startSpringPlanePick-shaped springState a
@@ -6802,26 +6815,46 @@ const App3D = forwardRef(function App3D(props, ref) {
     return { mm: proj / pxPerMm, snapped: false, point: null }
   }
 
-  // Drag-to-set-distance — gated on the spring offset state.
-  function handleSpringOffsetDragMove(e) {
-    if (tool !== 'spring3d' || !springOffsetBase || springOffsetDistLocked) return
+  // Shared tail of every offset-plane drag-move handler: the caller checks its
+  // own gate (right tool, base picked, distance not typed-locked), then this
+  // turns the mouse position into a distance (snapping to a vertex/midpoint/
+  // circle-centre when hovering one, else grid-rounded) and writes it back.
+  function dragOffsetDistance(e, base, setDistInput) {
     const vp = viewport3dRef.current
     if (!vp) return
-    const basis = springOffsetBase.kind === 'face' ? springOffsetBase.facePlane : planeIdBasis(springOffsetBase.planeId)
-    const res = offsetPlaneDragDistanceMm(e, vp, basis)
+    const res = offsetPlaneDragDistanceMm(e, vp, resolveOffsetBasis(base))
     if (!res) return
     if (res.snapped) drawSnapMoveOverlay(vp, null, { point: res.point }); else clearSnapMoveOverlay()
     let mm = res.mm
     // A snapped-to-a-point distance is already exact — rounding it to the
     // grid would defeat the whole point of snapping onto it.
     if (gridSnap && !res.snapped) mm = Math.round(mm / gridSizeMm) * gridSizeMm
-    setSpringOffsetDistInput(String(Math.round(mm * 100) / 100))
+    setDistInput(String(Math.round(mm * 100) / 100))
+  }
+
+  // Shared live preview: show the translucent offset plane while `active`,
+  // hide it otherwise.
+  function syncOffsetPlanePreview(active, fp) {
+    const vp = viewport3dRef.current
+    if (!active || !fp) { vp?.hideOffsetPlanePreview(); return }
+    vp?.showOffsetPlanePreview({ origin: fp.origin, normal: fp.normal, uAxis: fp.uAxis, vAxis: fp.vAxis })
+  }
+
+  // Shared pick handler: the first click picks the base; any further click
+  // accepts the live distance (commit).
+  function pickOffsetPlane(pick, base, setBase, setLocked, commit) {
+    if (!base) { setBase(pick); setLocked(false) }
+    else commit()
+  }
+
+  // Drag-to-set-distance — gated on the spring offset state.
+  function handleSpringOffsetDragMove(e) {
+    if (tool !== 'spring3d' || !springOffsetBase || springOffsetDistLocked) return
+    dragOffsetDistance(e, springOffsetBase, setSpringOffsetDistInput)
   }
 
   useEffect(() => {
-    if (tool !== 'spring3d' || !springOffsetBase) { viewport3dRef.current?.hideOffsetPlanePreview(); return }
-    const fp = springOffsetFacePlane()
-    if (fp) viewport3dRef.current?.showOffsetPlanePreview({ origin: fp.origin, normal: fp.normal, uAxis: fp.uAxis, vAxis: fp.vAxis })
+    syncOffsetPlanePreview(tool === 'spring3d' && !!springOffsetBase, springOffsetFacePlane())
   }, [tool, springOffsetBase, springOffsetDistInput])
 
   // SpringPanel's onConfirm — params is the resolved coil geometry (no
@@ -7447,16 +7480,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // preview effect (below) and commitMirror3DOffset, so the plane the user
   // sees is exactly the plane that gets committed.
   function mirror3dOffsetFacePlane() {
-    if (!mirror3dOffsetBase) return null
-    const basis = mirror3dOffsetBase.kind === 'face'
-      ? mirror3dOffsetBase.facePlane
-      : planeIdBasis(mirror3dOffsetBase.planeId)
-    const distMm = parseFloat(mirror3dOffsetDistInput) || 0
-    const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(distMm))
-    const vAxis = new THREE.Vector3().crossVectors(basis.normal, basis.uAxis).normalize()
-    // viewCenter follows the offset too, so the camera stays on the face centre
-    return new FacePlane(origin, basis.normal, basis.uAxis, vAxis,
-      basis.viewCenter ? basis.viewCenter.clone().addScaledVector(basis.normal, mmToPx(distMm)) : undefined)
+    return offsetFacePlane(mirror3dOffsetBase, mirror3dOffsetDistInput)
   }
 
   // Commits through the exact same {kind:'face', facePlane} path a directly-
@@ -7482,45 +7506,24 @@ const App3D = forwardRef(function App3D(props, ref) {
   // the base, not just outward.
   function handleMirror3DOffsetDragMove(e) {
     if (tool !== 'mirror3d' || !mirror3dOffsetBase || mirror3dOffsetDistLocked) return
-    const vp = viewport3dRef.current
-    if (!vp) return
-    const basis = mirror3dOffsetBase.kind === 'face' ? mirror3dOffsetBase.facePlane : planeIdBasis(mirror3dOffsetBase.planeId)
-    const res = offsetPlaneDragDistanceMm(e, vp, basis)
-    if (!res) return
-    if (res.snapped) drawSnapMoveOverlay(vp, null, { point: res.point }); else clearSnapMoveOverlay()
-    let mm = res.mm
-    if (gridSnap && !res.snapped) mm = Math.round(mm / gridSizeMm) * gridSizeMm
-    setMirror3dOffsetDistInput(String(Math.round(mm * 100) / 100))
+    dragOffsetDistance(e, mirror3dOffsetBase, setMirror3dOffsetDistInput)
   }
 
   // Live offset-plane preview — updates every time the base pick or the
   // distance input changes, so dragging/typing moves the translucent plane
   // in the 3D view in real time.
   useEffect(() => {
-    if (tool !== 'mirror3d' || !mirror3dOffsetBase) { viewport3dRef.current?.hideOffsetPlanePreview(); return }
-    const fp = mirror3dOffsetFacePlane()
-    if (fp) viewport3dRef.current?.showOffsetPlanePreview({ origin: fp.origin, normal: fp.normal, uAxis: fp.uAxis, vAxis: fp.vAxis })
+    syncOffsetPlanePreview(tool === 'mirror3d' && !!mirror3dOffsetBase, mirror3dOffsetFacePlane())
   }, [tool, mirror3dOffsetBase, mirror3dOffsetDistInput])
 
-  // ── Extrude/Cutout step 1: offset (parallel) plane — same idea as Mirror's
-  // offset plane just above, kept as its own parallel implementation (see
-  // the extrudeOffsetMode state comment for why). ──
+  // ── Extrude/Cutout step 1: offset (parallel) plane — shared offset-plane
+  // helpers; only the state and the commit step are Extrude's own. ──
   function extrudeOffsetFacePlane() {
-    if (!extrudeOffsetBase) return null
-    const basis = extrudeOffsetBase.kind === 'face'
-      ? extrudeOffsetBase.facePlane
-      : planeIdBasis(extrudeOffsetBase.planeId)
-    const distMm = parseFloat(extrudeOffsetDistInput) || 0
-    const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(distMm))
-    const vAxis = new THREE.Vector3().crossVectors(basis.normal, basis.uAxis).normalize()
-    // viewCenter follows the offset too, so the camera stays on the face centre
-    return new FacePlane(origin, basis.normal, basis.uAxis, vAxis,
-      basis.viewCenter ? basis.viewCenter.clone().addScaledVector(basis.normal, mmToPx(distMm)) : undefined)
+    return offsetFacePlane(extrudeOffsetBase, extrudeOffsetDistInput)
   }
 
   function handleExtrudeOffsetPlanePick(pick) {
-    if (!extrudeOffsetBase) { setExtrudeOffsetBase(pick); setExtrudeOffsetDistLocked(false) }
-    else commitExtrudeOffset()  // base already picked — any further click accepts the live distance
+    pickOffsetPlane(pick, extrudeOffsetBase, setExtrudeOffsetBase, setExtrudeOffsetDistLocked, commitExtrudeOffset)
   }
 
   // Commits through the exact same enterSketch(facePlane) path a directly-
@@ -7539,46 +7542,24 @@ const App3D = forwardRef(function App3D(props, ref) {
     clearSnapMoveOverlay()
   }
 
-  // Drag-to-set-distance — same projection math as handleMirror3DOffsetDragMove
-  // just above, gated on the extrude offset state instead of Mirror's.
+  // Drag-to-set-distance — gated on the extrude offset state.
   function handleExtrudeOffsetDragMove(e) {
     if (!extrudeTool || !extrudeOffsetBase || extrudeOffsetDistLocked) return
-    const vp = viewport3dRef.current
-    if (!vp) return
-    const basis = extrudeOffsetBase.kind === 'face' ? extrudeOffsetBase.facePlane : planeIdBasis(extrudeOffsetBase.planeId)
-    const res = offsetPlaneDragDistanceMm(e, vp, basis)
-    if (!res) return
-    if (res.snapped) drawSnapMoveOverlay(vp, null, { point: res.point }); else clearSnapMoveOverlay()
-    let mm = res.mm
-    if (gridSnap && !res.snapped) mm = Math.round(mm / gridSizeMm) * gridSizeMm
-    setExtrudeOffsetDistInput(String(Math.round(mm * 100) / 100))
+    dragOffsetDistance(e, extrudeOffsetBase, setExtrudeOffsetDistInput)
   }
 
   useEffect(() => {
-    if (!extrudeTool || !extrudeOffsetBase) { viewport3dRef.current?.hideOffsetPlanePreview(); return }
-    const fp = extrudeOffsetFacePlane()
-    if (fp) viewport3dRef.current?.showOffsetPlanePreview({ origin: fp.origin, normal: fp.normal, uAxis: fp.uAxis, vAxis: fp.vAxis })
+    syncOffsetPlanePreview(!!extrudeTool && !!extrudeOffsetBase, extrudeOffsetFacePlane())
   }, [extrudeTool, extrudeOffsetBase, extrudeOffsetDistInput])
 
-  // ── Sweep step 1: offset (parallel) plane — same idea as Extrude's own
-  // offset plane just above, its own parallel implementation for the same
-  // "don't touch already-shipped tools" reason theirs is. ──
+  // ── Sweep step 1: offset (parallel) plane — shared offset-plane helpers;
+  // only the state and the commit step are Sweep's own. ──
   function sweepOffsetFacePlane() {
-    if (!sweepOffsetBase) return null
-    const basis = sweepOffsetBase.kind === 'face'
-      ? sweepOffsetBase.facePlane
-      : planeIdBasis(sweepOffsetBase.planeId)
-    const distMm = parseFloat(sweepOffsetDistInput) || 0
-    const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(distMm))
-    const vAxis = new THREE.Vector3().crossVectors(basis.normal, basis.uAxis).normalize()
-    // viewCenter follows the offset too, so the camera stays on the face centre
-    return new FacePlane(origin, basis.normal, basis.uAxis, vAxis,
-      basis.viewCenter ? basis.viewCenter.clone().addScaledVector(basis.normal, mmToPx(distMm)) : undefined)
+    return offsetFacePlane(sweepOffsetBase, sweepOffsetDistInput)
   }
 
   function handleSweepOffsetPlanePick(pick) {
-    if (!sweepOffsetBase) { setSweepOffsetBase(pick); setSweepOffsetDistLocked(false) }
-    else commitSweepOffset()  // base already picked — any further click accepts the live distance
+    pickOffsetPlane(pick, sweepOffsetBase, setSweepOffsetBase, setSweepOffsetDistLocked, commitSweepOffset)
   }
 
   // Commits into the exact same startSweepPath-shaped sweepState a directly-
@@ -7597,25 +7578,14 @@ const App3D = forwardRef(function App3D(props, ref) {
     clearSnapMoveOverlay()
   }
 
-  // Drag-to-set-distance — same projection math as handleExtrudeOffsetDragMove
-  // just above, gated on the sweep offset state instead of Extrude's.
+  // Drag-to-set-distance — gated on the sweep offset state.
   function handleSweepOffsetDragMove(e) {
     if (tool !== 'sweep3d' || !sweepOffsetBase || sweepOffsetDistLocked) return
-    const vp = viewport3dRef.current
-    if (!vp) return
-    const basis = sweepOffsetBase.kind === 'face' ? sweepOffsetBase.facePlane : planeIdBasis(sweepOffsetBase.planeId)
-    const res = offsetPlaneDragDistanceMm(e, vp, basis)
-    if (!res) return
-    if (res.snapped) drawSnapMoveOverlay(vp, null, { point: res.point }); else clearSnapMoveOverlay()
-    let mm = res.mm
-    if (gridSnap && !res.snapped) mm = Math.round(mm / gridSizeMm) * gridSizeMm
-    setSweepOffsetDistInput(String(Math.round(mm * 100) / 100))
+    dragOffsetDistance(e, sweepOffsetBase, setSweepOffsetDistInput)
   }
 
   useEffect(() => {
-    if (tool !== 'sweep3d' || !sweepOffsetBase) { viewport3dRef.current?.hideOffsetPlanePreview(); return }
-    const fp = sweepOffsetFacePlane()
-    if (fp) viewport3dRef.current?.showOffsetPlanePreview({ origin: fp.origin, normal: fp.normal, uAxis: fp.uAxis, vAxis: fp.vAxis })
+    syncOffsetPlanePreview(tool === 'sweep3d' && !!sweepOffsetBase, sweepOffsetFacePlane())
   }, [tool, sweepOffsetBase, sweepOffsetDistInput])
 
   // Mirroring an EXTRUDE/REVOLVE produces a completely separate new solid —

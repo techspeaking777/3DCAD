@@ -11,8 +11,29 @@ const OPTIONS = [
   { id: 'open', label: '2 PLAYER', sub: 'Open Project' },
 ]
 
+// One-line tips cycled under the menu, arcade-attract-screen style. Each one
+// describes something a first-time student would otherwise have to discover.
+const TIPS = [
+  'Right-click and drag to orbit. Middle-click and drag to pan. Scroll to zoom.',
+  'Press Esc at any time to cancel the tool you are using.',
+  'Hover a face and press Tab to turn which way your sketch will face.',
+  'The yellow dot marks the bottom-left corner your sketch starts from.',
+  'Click Extrude, Revolve, Loft, Sweep or Spring, then pick Add (+) or Cut (−).',
+  'The ViewCube jumps to any side. Its house button returns to the isometric view.',
+  'Switch Complex to Simple to hide the advanced tools until you need them.',
+  'Type a number into a distance box to lock it exactly, then move the mouse freely.',
+  'Click the pattern button on a Cutout in the Feature Tree to repeat it in a grid.',
+  'Press Fit to zoom out and see your whole model.',
+]
+
 export default function SplashScreen({ onChoose }) {
   const [sel, setSel] = useState(0)
+  // Start on a random tip so repeat visitors don't always see the same one.
+  const [tip, setTip] = useState(() => Math.floor(Math.random() * TIPS.length))
+  useEffect(() => {
+    const t = setInterval(() => setTip(i => (i + 1) % TIPS.length), 6000)
+    return () => clearInterval(t)
+  }, [])
 
   useEffect(() => {
     function onKey(e) {
@@ -82,7 +103,22 @@ export default function SplashScreen({ onChoose }) {
         click, tap, or press enter
       </div>
 
-      <style>{`@keyframes splashBlink { 50% { opacity: 0; } }`}</style>
+      {/* Tip line — pinned near the bottom, ignores clicks so tapping anywhere
+          still starts. The key remounts it on each change to replay the fade. */}
+      <div style={{
+        position: 'absolute', left: 0, right: 0, bottom: 28, padding: '0 24px',
+        textAlign: 'center', pointerEvents: 'none',
+      }}>
+        <div key={tip} style={{ animation: 'splashFade 0.5s ease-out' }}>
+          <span style={{ fontFamily: PIXEL_FONT, fontSize: 10, color: '#FBDA2D', marginRight: 10 }}>TIP</span>
+          <span style={{ fontFamily: 'monospace', fontSize: 13, color: '#8fa0b8', letterSpacing: '0.03em' }}>
+            {TIPS[tip]}
+          </span>
+        </div>
+      </div>
+
+      <style>{`@keyframes splashBlink { 50% { opacity: 0; } }
+        @keyframes splashFade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }`}</style>
     </div>
   )
 }

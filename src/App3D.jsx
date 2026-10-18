@@ -12523,23 +12523,27 @@ const App3D = forwardRef(function App3D(props, ref) {
               sketchMode    ? 2 : 1
             }
             color={(extrudeTool === 'cutout' || extrudeTool === 'revolvecut') ? '#e05a4e' : '#3a7bd5'}
-            hint={(!extrudeState && !sketchMode)
-              ? (extrudeOffsetBase
-                  ? 'Move the mouse or type a distance, Enter to confirm'
-                  : extrudeOffsetMode
-                    ? 'Click a plane or face to offset from'
-                    // No geometric rule can guess "which way is up" for an
-                    // arbitrary face — hovering one shows a green edge as the
-                    // sketch's bottom, picked by proximity to the cursor.
-                    // Surfacing the Tab-to-cycle escape hatch here (it
-                    // already existed, just undiscoverable) means a profile
-                    // that comes out flipped/rotated from what was expected
-                    // has an immediate fix, instead of looking like a fixed
-                    // bug with no way to correct it.
-                    : 'Click a plane or face — hovering a face: Tab/Shift+Tab cycles which edge is the sketch’s bottom')
-              : ((extrudeTool === 'revolve' || extrudeTool === 'revolvecut') && sketchMode)
-                ? 'Draw a closed profile and an axis line (Revolve Axis tool), then Finish'
-                : null}
+            hint={(() => {
+              const isRev = extrudeTool === 'revolve' || extrudeTool === 'revolvecut'
+              const isCut = extrudeTool === 'cutout' || extrudeTool === 'revolvecut'
+              if (extrudeState) {
+                if (isRev) return 'Choose how far to spin it. 360° makes a full solid.'
+                return isCut ? 'Type a depth, or choose Through All, then press Enter.'
+                             : 'Drag or type how far to extrude, then press Enter.'
+              }
+              if (sketchMode) {
+                if (isRev) return 'Draw half of the shape, plus an axis line to spin it around, then press Finish.'
+                return isCut ? 'Draw the shape to remove, then press Finish.' : 'Draw a closed shape, then press Finish.'
+              }
+              if (extrudeOffsetBase) return 'Move the mouse or type a distance, Enter to confirm'
+              if (extrudeOffsetMode) return 'Click a plane or face to offset from'
+              // No geometric rule can guess "which way is up" for an arbitrary
+              // face, so the Tab escape hatch is named right in the hint.
+              if (isRev) return 'Click the plane your shape will be drawn on.'
+              return isCut
+                ? 'Click a plane or face on the solid you want to cut. Hover a face and press Tab to turn the sketch.'
+                : 'Click a flat plane or a face on your model to sketch on. Hover a face and press Tab to turn the sketch.'
+            })()}
             action={
               (!extrudeState && !sketchMode)
                 ? [
@@ -12652,7 +12656,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                 ? 'Move the mouse or type a distance, Enter to confirm'
                 : mirror3dOffsetMode
                   ? 'Click a plane or face to offset from'
-                  : 'Click a plane or face to mirror across — or create an offset plane'}
+                  : 'Click the plane or face to mirror across. Offset Plane moves it.'}
             action={!mirror3dSelectionDone
               ? {label:'✓ Next', enabled:mirror3dSel.length>0, onClick:()=>setMirror3dSelectionDone(true)}
               : mirror3dOffsetBase
@@ -12678,7 +12682,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             color="#FFEE88"
             hint={joinSel.length>0
               ? `${joinSel.length} selected — Enter to join`
-              : 'Click bodies to join (click again to remove)'}
+              : 'Click two or more bodies to merge into one, then press Enter.'}
             action={{label:'✓ Join', enabled:joinSel.length>=2, onClick:commitJoin}}
             onStepBack={()=>{}}
           />
@@ -12695,14 +12699,14 @@ const App3D = forwardRef(function App3D(props, ref) {
             currentStep={moveCopy3dSel!=null ? 2 : 1}
             color="#FF9800"
             hint={moveCopy3dSel==null
-              ? 'Click a body to move or copy'
+              ? 'Click the body you want to move or copy.'
               : moveCopy3dPivotPicking ? 'Click a vertex or circle center on any body to pivot around'
               : moveCopy3dSnapStep===1 ? 'Click a point on the body to move'
               : moveCopy3dSnapStep===2 ? 'Click a point on the target'
               : moveCopy3dDragHandle
                 ? `Move the mouse or type ${moveCopy3dDragHandle.kind==='rotate' ? 'an angle' : 'a distance'}, click or Enter to confirm`
                 : moveCopy3dPivotOverride ? 'Click an axis arrow/ring on the gizmo — rotating around the custom pivot'
-                : 'Click an axis arrow/ring on the gizmo, or Snap Move'}
+                : 'Click an arrow to move or a ring to rotate, then move the mouse. Copy keeps the original.'}
             action={moveCopy3dSel==null ? null : [
               // Two separate always-clickable buttons, only one highlighted
               // at a time — a single toggle button that renamed itself
@@ -12770,14 +12774,14 @@ const App3D = forwardRef(function App3D(props, ref) {
             currentStep={pattern3dParams ? 2 : (pattern3dSel!=null || pattern3dShowPanel) ? 2 : 1}
             color="#4DB6AC"
             hint={pattern3dSel==null && !pattern3dShowPanel
-              ? 'Click a body to pattern'
+              ? 'Click the body to repeat.'
               : pattern3dParams
                 ? (pattern3dAxisHover?.axis
                     ? 'Click to confirm — axis from the circular edge'
                     : pattern3dAxisHover
                       ? 'Click to confirm — no circular edge here, axis defaults to world Z'
-                      : 'Click a circular edge (auto pivot+axis), or any vertex (pivot only, axis = world Z)')
-                : ''}
+                      : 'Click a round edge to spin the copies around.')
+                : 'Choose a grid (rows and columns) or a circle, then set the spacing.'}
             onStepBack={step => { if (step === 1) resetPattern3D() }}
           />
 
@@ -12788,8 +12792,8 @@ const App3D = forwardRef(function App3D(props, ref) {
             currentStep={loftState ? 2 : 1}
             color={loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}
             hint={loftState
-              ? `Profile ${loftState.currentIdx+1} of ${Math.max(loftState.profiles.length, loftState.currentIdx+1)}${sketchMode ? ' · sketching' : ''}`
-              : 'Click a work plane or face'}
+              ? `Draw a shape, then Next to add another further along. (Profile ${loftState.currentIdx+1} of ${Math.max(loftState.profiles.length, loftState.currentIdx+1)})`
+              : 'Click the plane for your first shape.'}
             onStepBack={step => {
               if (step === 1) resetLoft3D()
             }}
@@ -12806,16 +12810,16 @@ const App3D = forwardRef(function App3D(props, ref) {
               : (sweepState?.path ? 2 : 1)}
             color={sweepTool==='sweepcut' ? '#53D3E4' : '#7ED957'}
             hint={sweepState?.awaitProject
-              ? 'Click the body to project the path onto (straight along the sketch plane\'s normal), or Skip'
+              ? 'Click the body to wrap your path onto, or Skip.'
               : !sweepState
               ? (sweepOffsetBase
                   ? 'Move the mouse or type a distance, Enter to confirm'
                   : sweepOffsetMode
                     ? 'Click a plane or face to offset from'
-                    : 'Click a work plane or face')
+                    : 'Click the plane your path will be drawn on.')
               : !sweepState.path
-                ? `Draw an open path, then Finish${sketchMode ? ' · sketching' : ''}`
-                : `Draw a closed profile, then Finish${sketchMode ? ' · sketching' : ''}`}
+                ? 'Draw the line your shape will travel along, then press Finish.'
+                : 'Draw the shape that follows the path (a circle makes a tube), then press Finish.'}
             action={
               !sweepState
                 ? [
@@ -12856,10 +12860,10 @@ const App3D = forwardRef(function App3D(props, ref) {
                   ? 'Move the mouse or type a distance, Enter to confirm'
                   : springOffsetMode
                     ? 'Click a plane or face to offset from'
-                    : 'Click a work plane or face')
+                    : 'Click the plane the spring will stand on.')
               : !springState.profilePlane
-                ? 'Set spring parameters, then continue'
-                : `Draw a closed profile, then Finish${sketchMode ? ' · sketching' : ''}`}
+                ? 'Choose coil size, pitch (gap between coils) and number of turns.'
+                : 'Draw the cross-section of the wire (a circle is the usual choice), then press Finish.'}
             action={
               !springState
                 ? [
@@ -12888,10 +12892,10 @@ const App3D = forwardRef(function App3D(props, ref) {
             color={fillet3dMode==='chamfer' ? FILLET3D_CHAMFER_COLOR : '#9c6ade'}
             hint={
               fillet3dAccepted
-                ? `${fillet3dMode==='chamfer' ? 'Distance' : 'Radius'} for ${fillet3dSel.length} edge${fillet3dSel.length!==1?'s':''} — Enter to apply`
+                ? `Type how big the ${fillet3dMode==='chamfer' ? 'bevel' : 'rounding'} should be (${fillet3dSel.length} edge${fillet3dSel.length!==1?'s':''}), then press Enter.`
                 : fillet3dSel.length>0
                   ? `${fillet3dSel.length} edge${fillet3dSel.length!==1?'s':''} selected — Enter to lock`
-                  : 'Click an edge to select it'
+                  : 'Click the edges to round off. Click again to deselect.'
             }
             action={[
               // Mode toggle — only meaningful before edges are locked (you
@@ -12918,10 +12922,10 @@ const App3D = forwardRef(function App3D(props, ref) {
             color="#4DB6AC"
             hint={
               shell3dAccepted
-                ? `Thickness for ${shell3dSel.length} face${shell3dSel.length!==1?'s':''} — Enter to apply`
+                ? 'Type the wall thickness, then press Enter.'
                 : shell3dSel.length>0
                   ? `${shell3dSel.length} face${shell3dSel.length!==1?'s':''} selected — Enter to lock`
-                  : 'Click a face to remove it'
+                  : 'Click the faces to open up. The rest becomes a hollow wall.'
             }
             action={
               !shell3dAccepted && shell3dSel.length>0

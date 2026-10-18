@@ -1,6 +1,7 @@
 import opencascade from 'replicad-opencascadejs/src/replicad_single.js'
 import opencascadeWasm from 'replicad-opencascadejs/src/replicad_single.wasm?url'
-import { setOC, Sketcher, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, Vector, importSTEP } from 'replicad'
+import { setOC, Sketcher, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, Vector, importSTEP, makeBSplineApproximation, assembleWire, genericSweep } from 'replicad'
+import { projectedProfilePlane, dedupePoints3d } from './tools/sweepProject.js'
 
 const SCALE = 2
 // Tolerance (mm) for matching a picked screen point to the actual OCC edge —
@@ -421,6 +422,7 @@ function buildCutShape(cut) {
   return cut.profiles ? buildLoft({ ...cut, profiles: extendLoftCutProfiles(cut.profiles) })
     : cut.axis ? buildRevolve(cut)
     : cut.pitchMm !== undefined ? buildSpring(extendSpringCutPath(cut))
+    : cut.pathPts3d ? buildSweep(extendSweepCutPath3d(cut))
     : cut.pathPts ? buildSweep(extendSweepCutPath(cut))
     : buildExtrude({ ...cut, isCut: true })
 }
@@ -522,6 +524,19 @@ function extendSweepCutPath(cut) {
   // existing point, so every curveSegments.startIdx still matches.
   if (pts.curveSegments) extended.curveSegments = pts.curveSegments
   return { ...cut, pathPts: extended }
+}
+
+// Projected-path (3D) equivalent of extendSweepCutPath — appends one point
+// SWEEP_CUT_OVH_MM past the far end along the last chord, never touching the
+// start (the profile plane is anchored there — see buildSweepProjected).
+function extendSweepCutPath3d(cut) {
+  const pts = cut.pathPts3d
+  if (!pts || pts.length < 2) return cut
+  const a = pts[pts.length-2], b = pts[pts.length-1]
+  const d = [b[0]-a[0], b[1]-a[1], b[2]-a[2]]
+  const l = Math.hypot(d[0], d[1], d[2]) || 1
+  const post = [b[0]+d[0]/l*SWEEP_CUT_OVH_MM, b[1]+d[1]/l*SWEEP_CUT_OVH_MM, b[2]+d[2]/l*SWEEP_CUT_OVH_MM]
+  return { ...cut, pathPts3d: [...pts, post] }
 }
 
 let ocReady = false
@@ -1333,7 +1348,9 @@ function buildLoft({ profiles, normal, origin, uAxis, ruled=false }) {
  * profile (see App3D.jsx's computeSweepProfilePlane), or the swept solid
  * comes out subtly rotated/twisted relative to what they saw on screen.
  */
-function buildSweep({ pathPts, planeId, normal, origin, uAxis, profilePts, profileCircle }) {
+function buildSweep(params) {
+  if (params.pathPts3d) return buildSweepProjected(params)
+  const { pathPts, planeId, normal, origin, uAxis, profilePts, profileCircle } = params
   const pathSketch = makePath(pathPts, planeId, normal, origin, uAxis)
   const shape = pathSketch.sweepSketch((plane) => makeProfileOnPlane(profilePts, plane, true, profileCircle))
   // sweepSketch has no built-in validity check (unlike fillet/chamfer,
@@ -1346,6 +1363,38 @@ function buildSweep({ pathPts, planeId, normal, origin, uAxis, profilePts, profi
   const valid = analyzer.IsValid_2()
   analyzer.delete()
   if (!valid) throw new Error('Sweep failed: could not build a valid solid from this path and profile')
+  return shape
+}
+
+/**
+ * Sweep along a path that was PROJECTED onto a body's surface (App3D's Sweep
+ * "Project onto surface" step). pathPts3d is already a list of mm points on
+ * that surface; a smooth B-spline is fitted through them and used as the
+ * spine. The profile plane comes from the same projectedProfilePlane() math
+ * App3D used to show the sketch plane, so the two always agree.
+ */
+function buildSweepProjected({ pathPts3d, projDir, profilePts, profileCircle }) {
+  const pts = dedupePoints3d(pathPts3d)
+  if (pts.length < 3) throw new Error('Sweep failed: projected path is too short')
+  // degMax 3 (cubic): higher-degree fits wiggle between samples, which the
+  // pipe-shell sweep is much less forgiving of.
+  const spine = assembleWire([makeBSplineApproximation(pts, { tolerance: 0.05, degMax: 3 })])
+  const { origin, normal, uAxis } = projectedProfilePlane(pts, projDir)
+  const plane = new Plane(origin, uAxis, normal)
+  const profile = makeProfileOnPlane(profilePts, plane, true, profileCircle)
+  let shape
+  try {
+    shape = genericSweep(profile.wire, spine, { forceProfileSpineOthogonality: true })
+  } catch (err) {
+    // OCC throws a bare numeric pointer here (nothing readable) when the pipe
+    // shell self-intersects — i.e. the path bends tighter than the profile is wide.
+    throw new Error('Sweep failed: the projected path bends too sharply for this profile — use a smoother path or a smaller profile')
+  }
+  const oc = getOC()
+  const analyzer = new oc.BRepCheck_Analyzer(shape.wrapped, true, false)
+  const valid = analyzer.IsValid_2()
+  analyzer.delete()
+  if (!valid) throw new Error('Sweep failed: could not build a valid solid from this projected path and profile')
   return shape
 }
 
@@ -1526,7 +1575,7 @@ async function buildBase(params) {
   // shapeStore-first fallback. Fixed alongside adding Spring's own params,
   // which would hit the identical gap otherwise.
   if (params.pitchMm !== undefined) return buildSpring(params)
-  if (params.pathPts) return buildSweep(params)
+  if (params.pathPts || params.pathPts3d) return buildSweep(params)
   return params.axis ? buildRevolve(params) : buildExtrude(params)
 }
 

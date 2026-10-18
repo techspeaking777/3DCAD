@@ -56,6 +56,7 @@ import {
   IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D, IconRevolve3D, IconSpring3D, IconShell3D, IconPattern3D,
 } from './draw/ToolIcons.jsx'
 import { glowStroke, glowFill } from './draw/vectorTheme.js'
+import { resamplePolyline, projectedProfilePlane, dedupePoints3d, smoothPoints3d } from './tools/sweepProject.js'
 
 // Vector-arcade icons for the six 3D solid-op sidebar tools (see
 // draw/ToolIcons.jsx's "3D-ENVIRONMENT VECTOR ICONS" section) — replaces
@@ -210,9 +211,9 @@ function buildCutWorkerParams(cutFeat) {
   // are already plain mm/unit-vector arrays on the feature (same shape
   // buildBaseWorkerParams' own sweep branch reads off a `solid` object), so
   // no facePlaneParams wrapping needed, same reasoning as the loft branch above.
-  if (cutFeat.pathPts) {
+  if (cutFeat.pathPts || cutFeat.pathPts3d) {
     return {
-      pathPts: cutFeat.pathPts, planeId: cutFeat.planeId,
+      pathPts: cutFeat.pathPts, pathPts3d: cutFeat.pathPts3d, projDir: cutFeat.projDir, planeId: cutFeat.planeId,
       normal: cutFeat.normal, origin: cutFeat.origin, uAxis: cutFeat.uAxis,
       profilePts: cutFeat.profilePts, profileCircle: cutFeat.profileCircle,
     }
@@ -296,7 +297,7 @@ function buildBaseWorkerParams(solid) {
   // the path's own sketch plane, always sufficient on their own.
   if (solid.operation === 'sweep') {
     return {
-      pathPts: solid.pathPts, planeId: solid.planeId,
+      pathPts: solid.pathPts, pathPts3d: solid.pathPts3d, projDir: solid.projDir, planeId: solid.planeId,
       normal: solid.normal, origin: solid.origin, uAxis: solid.uAxis,
       profilePts: solid.profilePts, profileCircle: solid.profileCircle,
     }
@@ -581,6 +582,20 @@ function sweepPathBoxPx(path, profile, basis) {
   for (const p of path.pts) {
     const w = basis.sketchToWorld(p.x, p.y)
     const v = new THREE.Vector3(w.x, w.y, w.z)
+    allPts.push(v.clone().addScalar(radius), v.clone().addScalar(-radius))
+  }
+  return new THREE.Box3().setFromPoints(allPts)
+}
+
+// sweepPathBoxPx's counterpart for a projected path: points are already
+// world-space mm, so only the unit conversion to scene px is needed.
+function sweepPathBoxPx3d(pathPts3d, profile) {
+  let radius = 0
+  for (const p of profile.pts) radius = Math.max(radius, Math.hypot(p.x, p.y))
+  if (profile.circle) radius = Math.max(radius, Math.hypot(profile.circle.cx, profile.circle.cy) + profile.circle.r)
+  const allPts = []
+  for (const p of pathPts3d) {
+    const v = new THREE.Vector3(mmToPx(p[0]), mmToPx(p[1]), mmToPx(p[2]))
     allPts.push(v.clone().addScalar(radius), v.clone().addScalar(-radius))
   }
   return new THREE.Box3().setFromPoints(allPts)
@@ -1065,7 +1080,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           // Same reasoning as isLoftCutout, for a sweep cutout — an ordinary
           // operation:'cutout' feature (see commitSweep's isSweepCut branch)
           // carrying pathPts instead of a linear depthMm/direction.
-          const isSweepCut = isExtrude && feat.operation === 'cutout' && !!feat.pathPts
+          const isSweepCut = isExtrude && feat.operation === 'cutout' && !!(feat.pathPts || feat.pathPts3d)
           // Same reasoning again, for a spring cutout — an ordinary
           // operation:'cutout' feature (see commitSpring's isSpringCut
           // branch) carrying pitchMm/coilRadiusMm instead of a linear
@@ -4525,6 +4540,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           setTimeout(() => setCadError(null), 6000)
           return
         }
+        if (sweepProjectOn) { startSweepProjectPick(path); return }
         const profilePlane = computeSweepProfilePlane(sweepState.basis, path)
         setSweepState(prev => ({ ...prev, path }))
         viewport3dRef.current?.snapToFace(profilePlane).then(() => {
@@ -6326,6 +6342,13 @@ const App3D = forwardRef(function App3D(props, ref) {
   // across resetSweep3D() the same way loftTool persists across
   // resetLoft3D(), only changing on the next activateSweep3DTool(op) call.
   const [sweepTool, setSweepTool] = useState('sweep')
+  // Optional "Project onto surface" step (Sweep ribbon, during the path
+  // sketch): when on, finishing the path sketch pauses for a body click and
+  // the path is ray-cast along the sketch plane's normal onto that body
+  // before the profile step (see handleSweepProjectClick). sweepState gains
+  // `awaitProject` while waiting and `projected` ({pathPts3d, projDir}) after.
+  const [sweepProjectOn, setSweepProjectOn] = useState(false)
+  const [sweepProjectHoverId, setSweepProjectHoverId] = useState(null)
 
   function activateLoft3DTool(op = 'loft') {
     resetSelection()
@@ -6382,6 +6405,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     setSweepState(null)
     setSweepOffsetMode(false)
     setSweepOffsetBase(null)
+    setSweepProjectOn(false)
     setHideWorkPlanesManual(false)
   }
 
@@ -6389,6 +6413,101 @@ const App3D = forwardRef(function App3D(props, ref) {
     setSweepState(null)
     setSweepOffsetMode(false)
     setSweepOffsetBase(null)
+    setSweepProjectOn(false)
+    setSweepProjectHoverId(null)
+    viewport3dRef.current?.hideProjectedPathPreview()
+    viewport3dRef.current?.clearSolidHover()
+  }
+
+  // Path sample spacing for projection: 1.5mm (3px) — dense enough to follow
+  // a curved rim, sparse enough that the fitted spline stays smooth.
+  const SWEEP_PROJECT_STEP_PX = 3
+
+  // World (scene px) positions of a flat sweep path, resampled densely.
+  function sweepPathWorldPx(basis, path) {
+    return resamplePolyline(path.pts, SWEEP_PROJECT_STEP_PX).map(p => basis.sketchToWorld(p.x, p.y))
+  }
+
+  // Path finished with "Project" on: pause for the user to pick the body.
+  // Camera goes isometric so the whole wheel is visible; the flat (unprojected)
+  // path is drawn as a reference line.
+  function startSweepProjectPick(path) {
+    const basis = sweepState.basis
+    setSweepState(prev => ({ ...prev, path, awaitProject: true }))
+    const vp = viewport3dRef.current
+    vp?.showProjectedPathPreview(sweepPathWorldPx(basis, path).map(v => [pxToMm(v.x), pxToMm(v.y), pxToMm(v.z)]))
+    vp?.snapToIsometric()
+  }
+
+  function handleSweepProjectHover(e) {
+    if (!sweepState?.awaitProject) return
+    const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
+    const id = hit?.solidId ?? null
+    setSweepProjectHoverId(prev => id === prev ? prev : id)
+  }
+
+  useEffect(() => {
+    if (!sweepState?.awaitProject || sweepProjectHoverId == null) { viewport3dRef.current?.clearSolidHover(); return }
+    viewport3dRef.current?.hoverSolid(sweepProjectHoverId)
+  }, [sweepState?.awaitProject, sweepProjectHoverId])
+
+  // Click on the target body: ray-cast every path sample along the sketch
+  // plane's normal onto it, keep the longest run that actually hit, and move
+  // on to the profile sketch on the plane at the projected path's start.
+  function handleSweepProjectClick(e) {
+    const vp = viewport3dRef.current
+    const hit = vp?.raycastSolidFace(e.clientX, e.clientY)
+    if (!hit || hit.solidId == null) return
+    const { basis, path } = sweepState
+    const dir = { x: basis.normal.x, y: basis.normal.y, z: basis.normal.z }
+    const projected = vp.projectPointsOntoSolid(hit.solidId, sweepPathWorldPx(basis, path), dir)
+    // Longest contiguous run of samples whose ray hit the body.
+    let best = [], run = []
+    for (const p of projected || []) {
+      if (p) run.push(p)
+      else { if (run.length > best.length) best = run; run = [] }
+    }
+    if (run.length > best.length) best = run
+    const pathPts3d = dedupePoints3d(smoothPoints3d(best))
+    if (pathPts3d.length < 3) {
+      setCadError('Projection missed that body — pick the body the path sits over (the path is projected straight along its sketch plane\'s normal).')
+      setTimeout(() => setCadError(null), 6000)
+      return
+    }
+    if (best.length < (projected?.length || 0)) {
+      setCadError('Part of the path did not land on the body — the projected path was trimmed to the part that did.')
+      setTimeout(() => setCadError(null), 6000)
+    }
+    const projDir = [dir.x, dir.y, dir.z]
+    const pl = projectedProfilePlane(pathPts3d, projDir)
+    const v3 = a => new THREE.Vector3(a[0], a[1], a[2])
+    const profilePlane = new FacePlane(
+      new THREE.Vector3(mmToPx(pl.origin[0]), mmToPx(pl.origin[1]), mmToPx(pl.origin[2])),
+      v3(pl.normal), v3(pl.uAxis), v3(pl.vAxis))
+    setSweepState(prev => ({ ...prev, awaitProject: false, projected: { pathPts3d, projDir } }))
+    setSweepProjectHoverId(null)
+    vp.clearSolidHover()
+    vp.showProjectedPathPreview(pathPts3d)
+    vp.snapToFace(profilePlane).then(() => {
+      enterSketch(profilePlane)
+      injectProjectedPathGhost(pathPts3d, profilePlane)
+    })
+  }
+
+  // "Skip projection" while waiting for the body pick: carry on with the flat
+  // path exactly as if Project had never been switched on.
+  function skipSweepProjection() {
+    const { basis, path } = sweepState
+    const profilePlane = computeSweepProfilePlane(basis, path)
+    setSweepState(prev => ({ ...prev, awaitProject: false }))
+    setSweepProjectOn(false)
+    setSweepProjectHoverId(null)
+    viewport3dRef.current?.hideProjectedPathPreview()
+    viewport3dRef.current?.clearSolidHover()
+    viewport3dRef.current?.snapToFace(profilePlane).then(() => {
+      enterSketch(profilePlane)
+      injectSweepPathGhost(path, basis, profilePlane)
+    })
   }
 
   async function startSweepPath(pick) {
@@ -6727,6 +6846,22 @@ const App3D = forwardRef(function App3D(props, ref) {
     setSweepState(prev => prev ? { ...prev, ghostEndpoint: endpoint } : prev)
   }
 
+  // Projected-path equivalent of injectSweepPathGhost: the path is already a
+  // list of 3D mm points, so each one just goes through profilePlane.worldToSketch.
+  function injectProjectedPathGhost(pathPts3d, profilePlane) {
+    const pts = pathPts3d.map(p => profilePlane.worldToSketch(new THREE.Vector3(mmToPx(p[0]), mmToPx(p[1]), mmToPx(p[2]))))
+    const ghostLines = []
+    for (let i = 0; i < pts.length - 1; i++) {
+      ghostLines.push({
+        x1: pts[i].x, y1: pts[i].y, x2: pts[i+1].x, y2: pts[i+1].y,
+        plane: 'face', facePlane: profilePlane, ghostRef: true,
+      })
+    }
+    setLines(prev => [...prev, ...ghostLines])
+    const endpoint = pts[pts.length - 1]
+    setSweepState(prev => prev ? { ...prev, ghostEndpoint: endpoint } : prev)
+  }
+
   // Spring's own "CENTER PROFILE HERE" marker (drawn in the sketch-overlay
   // effect below) sits at local (0,0) of the profile plane by construction
   // — but unlike Sweep's own marker, which happens to already be snappable
@@ -6964,6 +7099,10 @@ const App3D = forwardRef(function App3D(props, ref) {
   // sketched AT that plane with no offset).
   async function commitSweep(path, profile) {
     const basis = sweepState.basis
+    // Set when the path was projected onto a body (see handleSweepProjectClick):
+    // the swept spine is then the 3D pathPts3d, not the flat sketch path.
+    const projected = sweepState.projected || null
+    const pathFields = projected ? { pathPts3d: projected.pathPts3d, projDir: projected.projDir } : { pathPts: path.pts }
     // Captured before resetSweep3D() runs — same ordering commitLoft uses
     // for isLoftCutout, since sweepTool itself outlives the reset anyway.
     const isSweepCut = sweepTool === 'sweepcut'
@@ -6995,11 +7134,11 @@ const App3D = forwardRef(function App3D(props, ref) {
     // re-edit/groupId branch to port here — every sweep cut is created fresh.
     if (isSweepCut) {
       const cutParams = {
-        pathPts: path.pts, planeId, normal, origin, uAxis,
+        ...pathFields, planeId, normal, origin, uAxis,
         profilePts: profile.pts, profileCircle: profile.circle,
       }
       try {
-        const sweepBox = sweepPathBoxPx(path, profile, basis)
+        const sweepBox = projected ? sweepPathBoxPx3d(projected.pathPts3d, profile) : sweepPathBoxPx(path, profile, basis)
         const candidates = solids.filter(s => s.operation !== 'cutout' && s.group)
         const targets = candidates.filter(s => sweepBox.intersectsBox(new THREE.Box3().setFromObject(s.group)))
         if (targets.length === 0) throw new Error('No base solid to cut from')
@@ -7013,7 +7152,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           newFeats.push({
             id: `sweepcut-${target.id}-${Date.now()}-${newFeats.length}`,
             type: 'extrude', operation: 'cutout', name: nextCutoutName(),
-            solidId: target.id, pathPts: path.pts, planeId, normal, origin, uAxis, vAxis,
+            solidId: target.id, ...pathFields, planeId, normal, origin, uAxis, vAxis,
             profilePts: profile.pts, profileCircle: profile.circle, color: '#e05a4e',
           })
           await rebuildDependentMirrors(target)
@@ -7030,21 +7169,21 @@ const App3D = forwardRef(function App3D(props, ref) {
     try {
       const solidId = Date.now()
       const meshData = await cadEngine.sweep({
-        solidId, pathPts: path.pts, planeId, normal, origin, uAxis,
+        solidId, ...pathFields, planeId, normal, origin, uAxis,
         profilePts: profile.pts, profileCircle: profile.circle,
       })
       const color = extrudeColor
       const group = replicadMeshToThree(meshData, color, solidId)
       const solidData = {
         id: solidId, group, operation: 'sweep', color,
-        pathPts: path.pts, planeId, normal, origin, uAxis, vAxis,
+        ...pathFields, planeId, normal, origin, uAxis, vAxis,
         profilePts: profile.pts, profileCircle: profile.circle,
       }
       setSolids(prev => [...prev, solidData])
       const sweepName = nextSweepName()   // outside the updater — see nextSketchName's comment
       setFeatures(prev => [...prev, {
         id: `sweep-${solidId}`, type: 'extrude', operation: 'sweep', name: sweepName,
-        solidId, pathPts: path.pts, planeId, normal, origin, uAxis, vAxis,
+        solidId, ...pathFields, planeId, normal, origin, uAxis, vAxis,
         profilePts: profile.pts, profileCircle: profile.circle, color,
       }])
       await rebuildDependentMirrors(solidData)
@@ -7430,7 +7569,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       // Sweep's path curve + profile circle meta — normal/origin/uAxis/
       // profilePts above are shared with extrude/revolve's own fields, this
       // is just what's genuinely new (see buildBaseWorkerParams' sweep branch).
-      pathPts: feat.pathPts, profileCircle: feat.profileCircle,
+      pathPts: feat.pathPts, pathPts3d: feat.pathPts3d, projDir: feat.projDir, profileCircle: feat.profileCircle,
       // Spring's coil parameters — normal/origin above are shared with
       // Sweep/Loft's own fields, and profilePts/profileCircle (the hand-
       // sketched wire cross-section) are shared with Sweep's own fields
@@ -9852,6 +9991,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     // but checking first keeps this robust regardless of that ordering).
     if (cutoutTargetPicker) { handleCutoutTargetClick(e); return }
 
+    // Sweep "Project onto surface": path is drawn, waiting for the body click.
+    if (sweepState?.awaitProject) { handleSweepProjectClick(e); return }
+
     const rawWorld=screenToWorld(e.clientX,e.clientY)
     // Geometric snap (endpoint/tangent/on-circle/intersection/etc.) takes
     // priority over grid snap — grid-snapping unconditionally here rounded
@@ -11598,7 +11740,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   return (
     <div ref={rootDivRef} style={{display:'flex',height:'100%',outline:'none'}} tabIndex={0}
       onKeyDown={handleKeyDown}
-      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e); handleMirror3DOffsetDragMove(e); handleExtrudeOffsetDragMove(e); handleSweepOffsetDragMove(e); handleSpringOffsetDragMove(e); handleMoveCopy3DDragMove(e); handleMoveCopy3DGizmoHover(e); handleSnapMoveHover(e); handleSetPivotHover(e); handlePattern3DHover(e); handlePatternAxisHover(e) }}
+      onMouseMove={e=>{ handleExtrudeDragMove(e); handleLoftDragMove(e); handleMirror3DOffsetDragMove(e); handleExtrudeOffsetDragMove(e); handleSweepOffsetDragMove(e); handleSpringOffsetDragMove(e); handleMoveCopy3DDragMove(e); handleMoveCopy3DGizmoHover(e); handleSnapMoveHover(e); handleSetPivotHover(e); handlePattern3DHover(e); handlePatternAxisHover(e); handleSweepProjectHover(e) }}
       onMouseUp={e=>{ }}
     >
 
@@ -12455,10 +12597,16 @@ const App3D = forwardRef(function App3D(props, ref) {
           {/* ── SmartStep bar: overlays bottom of viewport during Sweep ── */}
           <SmartStepBar
             op={(tool==='sweep3d' || sweepState) ? (sweepTool==='sweepcut' ? 'SWEEP CUT' : 'SWEEP') : null}
-            steps={[{ id:1, label:'Sketch Path' }, { id:2, label:'Sketch Profile' }]}
-            currentStep={sweepState?.path ? 2 : 1}
+            steps={(sweepProjectOn || sweepState?.awaitProject || sweepState?.projected)
+              ? [{ id:1, label:'Sketch Path' }, { id:2, label:'Project' }, { id:3, label:'Sketch Profile' }]
+              : [{ id:1, label:'Sketch Path' }, { id:2, label:'Sketch Profile' }]}
+            currentStep={(sweepProjectOn || sweepState?.awaitProject || sweepState?.projected)
+              ? (!sweepState?.path ? 1 : sweepState.awaitProject ? 2 : 3)
+              : (sweepState?.path ? 2 : 1)}
             color={sweepTool==='sweepcut' ? '#53D3E4' : '#7ED957'}
-            hint={!sweepState
+            hint={sweepState?.awaitProject
+              ? 'Click the body to project the path onto (straight along the sketch plane\'s normal), or Skip'
+              : !sweepState
               ? (sweepOffsetBase
                   ? 'Move the mouse or type a distance, Enter to confirm'
                   : sweepOffsetMode
@@ -12482,7 +12630,12 @@ const App3D = forwardRef(function App3D(props, ref) {
                             else setSweepOffsetMode(true)
                           }},
                   ]
-                : null
+                : sweepState.awaitProject
+                  ? [{ label:'⏭ Skip Projection', enabled:true, onClick: skipSweepProjection }]
+                  : !sweepState.path
+                    ? [{ label: sweepProjectOn ? '⌖ Project: ON' : '⌖ Project onto Surface', enabled:true,
+                         onClick: () => setSweepProjectOn(p => !p) }]
+                    : null
             }
             onStepBack={step => {
               if (step === 1) resetSweep3D()

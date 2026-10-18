@@ -489,6 +489,9 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   // Built lazily on first use, repositioned in place on every call rather than
   // rebuilt — see showOffsetPlanePreview/hideOffsetPlanePreview.
   const offsetPlanePreviewRef = useRef(null)
+  // Sweep "Project onto surface": the projected path curve, drawn in 3D while
+  // the user confirms it — see showProjectedPathPreview.
+  const projectedPathPreviewRef = useRef(null)
   // Move/Copy tool: a group of 3 draggable axis arrows shown on the selected
   // solid, plus the base (pre-drag) position they're anchored to and which
   // solid/group they currently belong to — see showMoveGizmo/hideMoveGizmo/
@@ -1776,6 +1779,58 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     /** Hides whatever showOffsetPlanePreview() last showed, if anything. */
     hideOffsetPlanePreview() {
       if (offsetPlanePreviewRef.current) offsetPlanePreviewRef.current.visible = false
+    },
+
+    /**
+     * Sweep "Project onto surface": ray-casts each of `originsPx` (scene px,
+     * {x,y,z}) along ±`dir` (unit vector, the sketch plane's normal) against
+     * the meshes of solid `solidId`, keeping the NEAREST hit in either
+     * direction so a plane hovering on either side of the body still lands on
+     * its closest surface. Returns one [x,y,z] mm point per origin, or null
+     * where the ray missed the body entirely.
+     */
+    projectPointsOntoSolid(solidId, originsPx, dir) {
+      const s = stateRef.current; if (!s?.solidsGroup) return null
+      const group = s.solidsGroup.children.find(g => g.userData?.solidId === solidId)
+      if (!group) return null
+      const meshes = []
+      group.traverse(o => { if (o.isMesh && !o.userData?.isSolidEdge) meshes.push(o) })
+      group.updateMatrixWorld(true)
+      const SCALE = 2
+      const rc = new THREE.Raycaster()
+      rc.near = 0; rc.far = 1e7
+      const d = new THREE.Vector3(dir.x, dir.y, dir.z).normalize()
+      return originsPx.map(o => {
+        const origin = new THREE.Vector3(o.x, o.y, o.z)
+        let best = null, bestDist = Infinity
+        for (const sign of [1, -1]) {
+          rc.set(origin, d.clone().multiplyScalar(sign))
+          const hit = rc.intersectObjects(meshes, false)[0]
+          if (hit && hit.distance < bestDist) { bestDist = hit.distance; best = hit.point }
+        }
+        return best ? [best.x / SCALE, best.y / SCALE, best.z / SCALE] : null
+      })
+    },
+
+    /** Draws the projected path (array of [x,y,z] mm) as a bright 3D polyline. */
+    showProjectedPathPreview(ptsMm) {
+      const s = stateRef.current; if (!s?.scene) return
+      this.hideProjectedPathPreview()
+      if (!ptsMm || ptsMm.length < 2) return
+      const SCALE = 2
+      const geo = new THREE.BufferGeometry().setFromPoints(ptsMm.map(p => new THREE.Vector3(p[0] * SCALE, p[1] * SCALE, p[2] * SCALE)))
+      const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xffe14d, depthTest: false, transparent: true }))
+      line.renderOrder = 10
+      s.scene.add(line)
+      projectedPathPreviewRef.current = line
+    },
+
+    hideProjectedPathPreview() {
+      const line = projectedPathPreviewRef.current
+      if (!line) return
+      line.parent?.remove(line)
+      line.geometry.dispose(); line.material.dispose()
+      projectedPathPreviewRef.current = null
     },
 
     /**

@@ -89,6 +89,17 @@ const ADVANCED_SOLID_TOOL_IDS = new Set([
   'revolve', 'revolvecut', 'loft3d', 'loftcutout',
   'sweep3d', 'sweepcut', 'spring3d', 'springcut', 'shell3d', 'pattern3d',
 ])
+// Shape tools that share ONE sidebar button with a "+ add / − cut" flyout.
+// Keys are the button ids; add/cut are the underlying tool ids the existing
+// activate* handlers and SOLID_ICON_COMPONENTS already use.
+const SHAPE_OPS = {
+  extrude:  { add:'extrude',  cut:'cutout',     label:'EXTRUDE', cutLabel:'CUTOUT',      color:'#FBDA2D' },
+  revolve:  { add:'revolve',  cut:'revolvecut', label:'REVOLVE', cutLabel:'REVOLVE CUT', color:'#FBDA2D' },
+  loft3d:   { add:'loft3d',   cut:'loftcutout', label:'LOFT',    cutLabel:'LOFT CUT',    color:'#FBDA2D' },
+  sweep3d:  { add:'sweep3d',  cut:'sweepcut',   label:'SWEEP',   cutLabel:'SWEEP CUT',   color:'#7ED957' },
+  spring3d: { add:'spring3d', cut:'springcut',  label:'SPRING',  cutLabel:'SPRING CUT',  color:'#F06292' },
+}
+const CUT_COLOR = '#53D3E4'
 // Move/Copy's rotate-drag angle snap, gated by the same gridSnap toggle the
 // move-drag's distance snap already uses. A fixed degree step rather than
 // tied to gridSizeMm — that dropdown is a linear-mm concept (0.5-50mm) with
@@ -1680,6 +1691,38 @@ const App3D = forwardRef(function App3D(props, ref) {
   // an advanced feature (e.g. a Revolve) still shows and edits it normally —
   // Simple mode only hides the ability to START a new one. Persisted across
   // sessions since it's a per-user preference, not per-project.
+  // Sidebar Add/Cut flyout: {id, top, left} for whichever shape tool's (Extrude,
+  // Revolve, Loft, Sweep, Spring) "+ / −" picker is open, or null. Anchored to
+  // the clicked button with position:fixed, since the sidebar scrolls and would
+  // clip an absolutely-positioned child.
+  const [opFlyout, setOpFlyout] = useState(null)
+  useEffect(() => {
+    if (!opFlyout) return
+    const onDown = e => { if (!e.target.closest?.('[data-opflyout]')) setOpFlyout(null) }
+    const onKey = e => { if (e.key === 'Escape') setOpFlyout(null) }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey) }
+  }, [opFlyout])
+
+  // Starts whichever 3D solid tool a sidebar button (or its Add/Cut flyout
+  // option) names — the single place that maps a tool id to its activate*().
+  function activateSolidTool(id) {
+    if (id==='extrude'||id==='cutout'||id==='revolve'||id==='revolvecut') activateExtrudeTool(id)
+    else if (id==='fillet3d') activateFillet3DTool()
+    else if (id==='shell3d') activateShell3DTool()
+    else if (id==='pattern3d') activatePattern3DTool()
+    else if (id==='mirror3d') activateMirror3DTool()
+    else if (id==='join3d') activateJoin3DTool()
+    else if (id==='loft3d') activateLoft3DTool('loft')
+    else if (id==='loftcutout') activateLoft3DTool('loftcutout')
+    else if (id==='sweep3d') activateSweep3DTool('sweep')
+    else if (id==='sweepcut') activateSweep3DTool('sweepcut')
+    else if (id==='spring3d') activateSpring3DTool('spring')
+    else if (id==='springcut') activateSpring3DTool('springcut')
+    else if (id==='movecopy3d') activateMoveCopy3DTool()
+  }
+
   const [simpleMode, setSimpleMode] = useState(() => {
     try { return localStorage.getItem('cad3d.simpleMode') === '1' } catch { return false }
   })
@@ -11987,89 +12030,107 @@ const App3D = forwardRef(function App3D(props, ref) {
         ) : (
           /* ── 3D sidebar: solid operation placeholders ── */
           <>
-            {[
-              // Paired rows — each shape tool sits directly beside its cutout
-              // variant, so the pairing reads from position alone (additive
-              // on the left, subtractive on the right) with no extra click
-              // or toggle needed to see or reach either one.
-              [{id:'extrude',  label:'EXTRUDE', color:'#FBDA2D'}, {id:'cutout',     label:'CUTOUT',      color:'#53D3E4'}],
-              [{id:'revolve',  label:'REVOLVE', color:'#FBDA2D'}, {id:'revolvecut', label:'REVOLVE CUT', color:'#53D3E4'}],
-              [{id:'loft3d',   label:'LOFT',    color:'#FBDA2D'}, {id:'loftcutout', label:'LOFT CUT',    color:'#53D3E4'}],
-              [{id:'sweep3d',  label:'SWEEP',   color:'#7ED957'}, {id:'sweepcut',   label:'SWEEP CUT',   color:'#53D3E4'}],
-              [{id:'spring3d', label:'SPRING',  color:'#F06292'}, {id:'springcut', label:'SPRING CUT', color:'#53D3E4'}],
-              // No cutout counterpart — paired side by side (instead of each
-              // as its own full-width row) for a more compact, grid-like
-              // layout, matching the pairs above.
-              [{id:'fillet3d', label:'FILLET',  color:'#A470F2'}, {id:'mirror3d', label:'MIRROR', color:'#8E65F3'}],
-              [{id:'join3d',   label:'JOIN',    color:'#FFEE88'}, {id:'movecopy3d', label:'MOVE/COPY', color:'#FF9800'}],
-              [{id:'shell3d',  label:'SHELL',   color:'#4DB6AC'}, {id:'pattern3d', label:'PATTERN', color:'#4DB6AC'}],
-            ]
-            .filter(row => !simpleMode || !row.some(btn => ADVANCED_SOLID_TOOL_IDS.has(btn.id)))
-            .map((row, rowIdx) => {
-              const paired = row.length > 1
-              return (
-              <div key={rowIdx} style={{display:'flex', gap:5}}>
-                {row.map(({id,label,color}) => {
-                  const isActive = id==='fillet3d' ? tool==='fillet3d' : id==='shell3d' ? tool==='shell3d' : id==='pattern3d' ? tool==='pattern3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
-                    : id==='loft3d' ? ((tool==='loft3d' || !!loftState) && loftTool!=='loftcutout')
-                    : id==='loftcutout' ? ((tool==='loft3d' || !!loftState) && loftTool==='loftcutout')
-                    : id==='sweep3d' ? ((tool==='sweep3d' || !!sweepState) && sweepTool!=='sweepcut')
-                    : id==='sweepcut' ? ((tool==='sweep3d' || !!sweepState) && sweepTool==='sweepcut')
-                    : id==='spring3d' ? ((tool==='spring3d' || !!springState) && springTool!=='springcut')
-                    : id==='springcut' ? ((tool==='spring3d' || !!springState) && springTool==='springcut')
-                    : id==='movecopy3d' ? tool==='movecopy3d'
-                    : extrudeTool===id
-                  // 30% bigger than the original 34/48 — the sidebar's own
-                  // width (above) and button size (below) are scaled to
-                  // match, so icons don't just grow inside the same box.
-                  const iconSize = paired ? 44 : 62
-                  return (
-                  <button key={id}
-                    title={label}
-                    onClick={()=>{
-                      if (id==='extrude'||id==='cutout'||id==='revolve'||id==='revolvecut') activateExtrudeTool(id)
-                      else if (id==='fillet3d') activateFillet3DTool()
-                      else if (id==='shell3d') activateShell3DTool()
-                      else if (id==='pattern3d') activatePattern3DTool()
-                      else if (id==='mirror3d') activateMirror3DTool()
-                      else if (id==='join3d') activateJoin3DTool()
-                      else if (id==='loft3d') activateLoft3DTool('loft')
-                      else if (id==='loftcutout') activateLoft3DTool('loftcutout')
-                      else if (id==='sweep3d') activateSweep3DTool('sweep')
-                      else if (id==='sweepcut') activateSweep3DTool('sweepcut')
-                      else if (id==='spring3d') activateSpring3DTool('spring')
-                      else if (id==='springcut') activateSpring3DTool('springcut')
-                      else if (id==='movecopy3d') activateMoveCopy3DTool()
-                    }}
-                    style={{...btnBase, flexDirection:'column', gap:1,
-                      flex: paired ? 1 : 'none',
-                      width: paired ? undefined : 99, height:99,
-                      background: isActive ? color+'33' : 'transparent',
-                      outline: isActive ? `2px solid ${color}` : `1px dashed ${color}55`,
-                      outlineOffset:'-2px',
-                    }}>
-                    {SOLID_ICON_COMPONENTS[id] ? (
-                      (() => { const Icon = SOLID_ICON_COMPONENTS[id]; return <Icon color={color} size={iconSize}/> })()
-                    ) : (
-                      /* Placeholder icon — no vector icon for this one yet */
-                      <svg width={iconSize} height={iconSize} viewBox="0 0 70 70" fill="none">
-                        <rect x="7.5" y="7.5" width="55" height="55" rx="7.5"
-                          stroke={color} strokeWidth="3" fill={color+'11'} strokeDasharray="7.5 5"/>
-                        <text x="35" y="42.5" textAnchor="middle"
-                          style={{fontSize:17.5, fontFamily:'monospace', fill:color, letterSpacing:0}}>
-                          {label.slice(0,3)}
-                        </text>
-                      </svg>
-                    )}
-                    <span style={{fontSize:paired?9:10,fontFamily:'monospace',color,letterSpacing:'0.01em',textAlign:'center'}}>
-                      {label}
-                    </span>
-                  </button>
-                  )
-                })}
-              </div>
+            {(() => {
+              // One button per shape tool (Extrude/Revolve/Loft/Sweep/Spring):
+              // clicking it opens a small "+ add / − cut" flyout (see the
+              // opFlyout state) instead of showing a separate cut button for
+              // each — halves the sidebar's size. Tools with no cut variant
+              // (Shell, Fillet, ...) activate straight away as before.
+              const ROWS = [
+                [{id:'extrude',  label:'EXTRUDE', color:'#FBDA2D'}, {id:'revolve',   label:'REVOLVE', color:'#FBDA2D'}],
+                [{id:'loft3d',   label:'LOFT',    color:'#FBDA2D'}, {id:'sweep3d',   label:'SWEEP',   color:'#7ED957'}],
+                [{id:'spring3d', label:'SPRING',  color:'#F06292'}, {id:'shell3d',   label:'SHELL',   color:'#4DB6AC'}],
+                [{id:'fillet3d', label:'FILLET',  color:'#A470F2'}, {id:'mirror3d',  label:'MIRROR',  color:'#8E65F3'}],
+                [{id:'join3d',   label:'JOIN',    color:'#FFEE88'}, {id:'movecopy3d',label:'MOVE/COPY', color:'#FF9800'}],
+                [{id:'pattern3d',label:'PATTERN', color:'#4DB6AC'}],
+              ]
+              // Same "is this tool currently running" checks as before, now
+              // keyed by the underlying add/cut tool id so both variants of a
+              // shape button can light it up.
+              const toolActive = id =>
+                  id==='fillet3d' ? tool==='fillet3d' : id==='shell3d' ? tool==='shell3d' : id==='pattern3d' ? tool==='pattern3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
+                : id==='loft3d' ? ((tool==='loft3d' || !!loftState) && loftTool!=='loftcutout')
+                : id==='loftcutout' ? ((tool==='loft3d' || !!loftState) && loftTool==='loftcutout')
+                : id==='sweep3d' ? ((tool==='sweep3d' || !!sweepState) && sweepTool!=='sweepcut')
+                : id==='sweepcut' ? ((tool==='sweep3d' || !!sweepState) && sweepTool==='sweepcut')
+                : id==='spring3d' ? ((tool==='spring3d' || !!springState) && springTool!=='springcut')
+                : id==='springcut' ? ((tool==='spring3d' || !!springState) && springTool==='springcut')
+                : id==='movecopy3d' ? tool==='movecopy3d'
+                : extrudeTool===id
+              return ROWS
+                // Simple mode hides each advanced BUTTON (not whole rows, now
+                // that rows mix basic and advanced tools); empty rows vanish.
+                .map(row => row.filter(btn => !simpleMode || !(ADVANCED_SOLID_TOOL_IDS.has(btn.id))))
+                .filter(row => row.length > 0)
+                .map((row, rowIdx) => (
+                  <div key={rowIdx} style={{display:'flex', gap:5}}>
+                    {row.map(({id,label,color}) => {
+                      const op = SHAPE_OPS[id]
+                      const addActive = toolActive(id)
+                      const cutActive = op ? toolActive(op.cut) : false
+                      const isActive = addActive || cutActive
+                      // While the cut variant is running the button wears the
+                      // cut colour/label so what's active is always visible.
+                      const shownColor = cutActive ? CUT_COLOR : color
+                      const shownLabel = cutActive ? op.cutLabel : label
+                      const flyoutOpen = opFlyout?.id === id
+                      return (
+                        <button key={id}
+                          data-opflyout={op ? '1' : undefined}
+                          title={op ? `${label} — click to choose add (+) or cut (−)` : label}
+                          onClick={e => {
+                            if (!op) { setOpFlyout(null); activateSolidTool(id); return }
+                            if (flyoutOpen) { setOpFlyout(null); return }
+                            const r = e.currentTarget.getBoundingClientRect()
+                            setOpFlyout({ id, top: r.top, left: r.right + 6 })
+                          }}
+                          style={{...btnBase, flexDirection:'column', gap:1, position:'relative',
+                            flex: 1, minWidth:0, height:99,
+                            background: isActive || flyoutOpen ? shownColor+'33' : 'transparent',
+                            outline: isActive || flyoutOpen ? `2px solid ${shownColor}` : `1px dashed ${color}55`,
+                            outlineOffset:'-2px',
+                          }}>
+                          {(() => { const Icon = SOLID_ICON_COMPONENTS[id]; return <Icon color={shownColor} size={44}/> })()}
+                          <span style={{fontSize:9,fontFamily:'monospace',color:shownColor,letterSpacing:'0.01em',textAlign:'center'}}>
+                            {shownLabel}
+                          </span>
+                          {op && (
+                            // Tiny ± badge: the cut variant lives behind this button.
+                            <span style={{position:'absolute',top:3,right:5,fontSize:11,lineHeight:1,
+                              fontFamily:'monospace',fontWeight:'bold',color:CUT_COLOR,opacity:0.9}}>±</span>
+                          )}
+                        </button>
+                      )
+                    })}
+                    {row.length === 1 && <div style={{flex:1}}/>}
+                  </div>
+                ))
+            })()}
+
+            {/* Add / Cut flyout for the shape tools — position:fixed so the
+                scrolling sidebar can't clip it. Closes on outside click, Esc,
+                or picking either option. */}
+            {opFlyout && SHAPE_OPS[opFlyout.id] && (() => {
+              const op = SHAPE_OPS[opFlyout.id]
+              const pick = toolId => { setOpFlyout(null); activateSolidTool(toolId) }
+              const optBtn = (toolId, sign, text, color) => (
+                <button key={toolId} onClick={() => pick(toolId)} title={text}
+                  style={{...btnBase, flexDirection:'column', gap:1, width:84, height:92, position:'relative',
+                    background:'transparent', outline:`1px solid ${color}88`, outlineOffset:'-2px'}}>
+                  <span style={{position:'absolute',top:4,left:7,fontSize:18,lineHeight:1,fontFamily:'monospace',fontWeight:'bold',color}}>{sign}</span>
+                  {(() => { const Icon = SOLID_ICON_COMPONENTS[toolId]; return <Icon color={color} size={44}/> })()}
+                  <span style={{fontSize:9,fontFamily:'monospace',color,textAlign:'center'}}>{text}</span>
+                </button>
               )
-            })}
+              return (
+                <div data-opflyout="1" style={{position:'fixed', top:opFlyout.top, left:opFlyout.left, zIndex:1500,
+                  display:'flex', gap:6, padding:6, background:'#1a1a2e',
+                  border:'1px solid #3a3a5a', borderRadius:8, boxShadow:'0 6px 20px rgba(0,0,0,0.6)'}}>
+                  {optBtn(op.add, '+', op.label, op.color)}
+                  {optBtn(op.cut, '−', op.cutLabel, CUT_COLOR)}
+                </div>
+              )
+            })()}
 
             <div style={{flex:1}}/>
           </>

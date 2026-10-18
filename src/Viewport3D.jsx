@@ -492,6 +492,8 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   // Sweep "Project onto surface": the projected path curve, drawn in 3D while
   // the user confirms it — see showProjectedPathPreview.
   const projectedPathPreviewRef = useRef(null)
+  // Rectangular Pattern's ghost grid — see showPatternGhosts.
+  const patternGhostsRef = useRef(null)
   // Move/Copy tool: a group of 3 draggable axis arrows shown on the selected
   // solid, plus the base (pre-drag) position they're anchored to and which
   // solid/group they currently belong to — see showMoveGizmo/hideMoveGizmo/
@@ -1810,6 +1812,54 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
         }
         return best ? [best.x / SCALE, best.y / SCALE, best.z / SCALE] : null
       })
+    },
+
+    /** Bounding box of a solid in mm: {min:[x,y,z], max:[x,y,z]}, or null. */
+    getSolidBoundsMm(solidId) {
+      const s = stateRef.current; if (!s?.solidsGroup) return null
+      const group = s.solidsGroup.children.find(g => g.userData?.solidId === solidId)
+      if (!group) return null
+      group.updateMatrixWorld(true)
+      const box = new THREE.Box3().setFromObject(group)
+      if (box.isEmpty()) return null
+      const SCALE = 2
+      return {
+        min: [box.min.x / SCALE, box.min.y / SCALE, box.min.z / SCALE],
+        max: [box.max.x / SCALE, box.max.y / SCALE, box.max.z / SCALE],
+      }
+    },
+
+    /**
+     * Rectangular Pattern live preview: one wireframe box (the body's bounds,
+     * `boundsMm` from getSolidBoundsMm) at each of `offsetsMm` ([dx,dy,dz]
+     * each, the original's own spot excluded by the caller).
+     */
+    showPatternGhosts(boundsMm, offsetsMm) {
+      const s = stateRef.current; if (!s?.scene) return
+      this.hidePatternGhosts()
+      if (!boundsMm || !offsetsMm?.length) return
+      const SCALE = 2
+      const size = boundsMm.max.map((v, i) => (v - boundsMm.min[i]) * SCALE)
+      const center = boundsMm.max.map((v, i) => ((v + boundsMm.min[i]) / 2) * SCALE)
+      const edges = new THREE.EdgesGeometry(new THREE.BoxGeometry(size[0], size[1], size[2]))
+      const mat = new THREE.LineBasicMaterial({ color: 0x4db6ac, depthTest: false, transparent: true, opacity: 0.9 })
+      const group = new THREE.Group()
+      for (const o of offsetsMm) {
+        const box = new THREE.LineSegments(edges, mat)
+        box.position.set(center[0] + o[0] * SCALE, center[1] + o[1] * SCALE, center[2] + o[2] * SCALE)
+        box.renderOrder = 10
+        group.add(box)
+      }
+      s.scene.add(group)
+      patternGhostsRef.current = { group, edges, mat }
+    },
+
+    hidePatternGhosts() {
+      const g = patternGhostsRef.current
+      if (!g) return
+      g.group.parent?.remove(g.group)
+      g.edges.dispose(); g.mat.dispose()
+      patternGhostsRef.current = null
     },
 
     /** Draws the projected path (array of [x,y,z] mm) as a bright 3D polyline. */

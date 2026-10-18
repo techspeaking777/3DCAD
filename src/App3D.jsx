@@ -183,6 +183,14 @@ function profileCrossesAxis(pts, axis) {
 // delete, and STL export so all three agree on what a stored cut looks like;
 // `axis` presence is the discriminator the worker's subtract handler uses too.
 function buildCutWorkerParams(cutFeat) {
+  const params = buildCutWorkerParamsBase(cutFeat)
+  // Pattern copies of a cutout (see commitCutoutPattern) carry the rigid ops
+  // that move the original cut to this copy's spot — the worker applies them
+  // to the built cut shape (cadWorker.js's applyCutXform).
+  return cutFeat.patternXform ? { ...params, xform: cutFeat.patternXform } : params
+}
+
+function buildCutWorkerParamsBase(cutFeat) {
   const facePlaneParams = fp => fp ? {
     normal: [fp.normal.x, fp.normal.y, fp.normal.z],
     origin: [pxToMm(fp.origin.x), pxToMm(fp.origin.y), pxToMm(fp.origin.z)],
@@ -1006,7 +1014,7 @@ function CutoutGlyph({ color='#7fa8cc' }) {
   )
 }
 
-function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, onEditShellThickness, onEditLoft, hiddenSolidIds, onToggleBodyVisible, onConvertSketch, hasSolids }) {
+function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, onEditShellThickness, onEditLoft, hiddenSolidIds, onToggleBodyVisible, onConvertSketch, onPatternCutout, hasSolids }) {
   const [editingName, setEditingName] = useState(null)
   const [editDepthId, setEditDepthId] = useState(null)
   const [depthVal, setDepthVal]       = useState('')
@@ -1239,14 +1247,25 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                             padding:'1px 3px', display:'flex', alignItems:'center'}}
                         ><PencilGlyph/></button>
                       )}
-                      {!sketchMode && !isLoft && !isLoftCutout && feat.sketchLines !== undefined && (
+                      {/* Pattern — repeat this plain (straight-extruded) cutout in a
+                          grid/circle on the same solid. Not offered on copies
+                          themselves, nor on revolve/loft/sweep/spring cuts. */}
+                      {!sketchMode && feat.operation === 'cutout' && !isLoftCutout && !isSweepCut && !isSpringCut
+                        && !feat.revolveAxis && !feat.patternXform && (
+                        <button title="Pattern this cutout"
+                          onClick={e=>{e.stopPropagation(); onPatternCutout(feat.id)}}
+                          style={{background:'none',border:'none',cursor:'pointer',
+                            padding:'1px 3px', fontSize:12, color:'#4DB6AC'}}
+                        >▦</button>
+                      )}
+                      {!sketchMode && !isLoft && !isLoftCutout && !feat.patternXform && feat.sketchLines !== undefined && (
                         <button title="Edit sketch"
                           onClick={e=>{e.stopPropagation(); onEditSketch(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
                             padding:'1px 3px', display:'flex', alignItems:'center'}}
                         ><PencilGlyph/></button>
                       )}
-                      {!sketchMode && !isMirror && !isJoin && !isLoft && !isLoftCutout && !isSweep && !isSweepCut && !isSpring && !isSpringCut && (
+                      {!sketchMode && !isMirror && !isJoin && !isLoft && !isLoftCutout && !isSweep && !isSweepCut && !isSpring && !isSpringCut && !feat.patternXform && (
                         <button title={feat.operation==='cutout' ? 'Edit cutout extent' : 'Edit extrusion extent'}
                           onClick={e=>{e.stopPropagation(); onEditExtent(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
@@ -6020,7 +6039,18 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [pattern3dParams, setPattern3dParams] = useState(null)        // circular: panel's output, held while picking axis
   const [pattern3dAxisHover, setPattern3dAxisHover] = useState(null)  // {solidId, point:[x,y,z]mm, axis:{x,y,z}|null}
 
+  const [pattern3dRect, setPattern3dRect] = useState(null)           // rectangular: live panel params (ghost preview)
+  const [pattern3dBounds, setPattern3dBounds] = useState(null)       // picked body's {min,max} mm
+  const [pattern3dDefaultAxes, setPattern3dDefaultAxes] = useState(null)
+
+  const [pattern3dCutFeatId, setPattern3dCutFeatId] = useState(null)  // set => repeating this cutout feature, not a body
+
   function resetPattern3D() {
+    setPattern3dCutFeatId(null)
+    setPattern3dRect(null)
+    setPattern3dBounds(null)
+    setPattern3dDefaultAxes(null)
+    viewport3dRef.current?.hidePatternGhosts()
     setPattern3dSel(null)
     setPattern3dHoverSolidId(null)
     setPattern3dShowPanel(false)
@@ -6054,8 +6084,103 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (!hit || hit.solidId==null) return
     const feat = baseFeatureForSolid(hit.solidId)
     if (!feat) return
+    const vp = viewport3dRef.current
+    setPattern3dDefaultAxes(patternDefaultAxes())
+    setPattern3dBounds(vp?.getSolidBoundsMm(hit.solidId) || null)
     setPattern3dSel(hit.solidId)
     setPattern3dShowPanel(true)
+  }
+
+  // Grid defaults: columns run along whichever world axis points most
+  // "right" on screen, rows along the one most "up" (never the same axis),
+  // each signed so the grid grows right/up from the original. The grid lies
+  // in the plane being looked down onto: the world axis closest to the view
+  // direction is the plane's normal, and columns/rows use the other two.
+  // Any view with a real downward/upward tilt (isometric is ~0.5) counts as
+  // "looking at the ground"; only near-horizontal views (front/side) pick a
+  // vertical plane instead.
+  function patternDefaultAxes() {
+    const ax = viewport3dRef.current?.getCameraAxes?.()
+    if (!ax) return null
+    const bk = ax.back.map(Math.abs)
+    const n = bk[2] >= 0.35 ? 2 : (bk[0] >= bk[1] ? 0 : 1)
+    const [p, q] = [0, 1, 2].filter(i => i !== n)
+    const [c1, c2] = Math.abs(ax.right[p]) >= Math.abs(ax.right[q]) ? [p, q] : [q, p]
+    const names = ['x', 'y', 'z']
+    return {
+      a1: { axis: names[c1], sign: ax.right[c1] >= 0 ? 1 : -1 },
+      a2: { axis: names[c2], sign: ax.up[c2] >= 0 ? 1 : -1 },
+    }
+  }
+
+  // World-space bounds (mm) of a cutout's profile, used for the ghost grid and
+  // the default spacing — padded 0.5mm so a flat profile still draws a box.
+  function cutProfileBoundsMm(feat) {
+    const fp = feat.facePlane || (() => {
+      const b = workPlaneToFacePlaneBasisPx(feat.planeId)
+      return new FacePlane(b.origin, b.normal, b.uAxis, b.vAxis)
+    })()
+    const pts = feat.profilePts || []
+    if (pts.length === 0) return null
+    const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity]
+    for (const p of pts) {
+      const w = fp.sketchToWorld(p.x, p.y)
+      const mm = [pxToMm(w.x), pxToMm(w.y), pxToMm(w.z)]
+      for (let i = 0; i < 3; i++) { min[i] = Math.min(min[i], mm[i]); max[i] = Math.max(max[i], mm[i]) }
+    }
+    for (let i = 0; i < 3; i++) { min[i] -= 0.5; max[i] += 0.5 }
+    return { min, max }
+  }
+
+  // Feature Tree "Pattern" button on a plain cutout row — same panel as a body
+  // pattern, but the thing repeated is the cut itself, on its own solid.
+  function startCutoutPattern(featId) {
+    const feat = features.find(f => f.id === featId)
+    if (!feat) return
+    activatePattern3DTool()
+    setPattern3dCutFeatId(featId)
+    setPattern3dDefaultAxes(patternDefaultAxes())
+    setPattern3dBounds(cutProfileBoundsMm(feat))
+    setPattern3dSel(feat.solidId)
+    setPattern3dShowPanel(true)
+  }
+
+  // Repeats cutout `featId` once per entry of xformsList (each a list of rigid
+  // ops, see cadWorker.js's applyCutXform) on the cutout's own solid. Each copy
+  // becomes an ordinary cutout feature carrying `patternXform`, so rebuilds,
+  // mirrors and STL export replay it like any other cut. Copies share their own
+  // groupId (NOT the original's) so the tree shows one "× N" row and deleting
+  // it removes just the copies.
+  async function commitCutoutPattern(featId, xformsList) {
+    const feat = features.find(f => f.id === featId)
+    let target = feat ? solids.find(s => s.id === feat.solidId) : null
+    resetPattern3D()
+    if (!feat || !target || xformsList.length === 0) return
+    feat3d.commit(features)
+    const groupId = `patterngroup-${Date.now()}`
+    const base = buildBaseWorkerParams(target)
+    const newFeats = []
+    try {
+      for (let i = 0; i < xformsList.length; i++) {
+        const copyFeat = { ...feat, patternXform: [...(feat.patternXform || []), ...xformsList[i]] }
+        const meshData = await cadEngine.subtract({ baseSolidId: target.id, cut: buildCutWorkerParams(copyFeat), base })
+        const group = replicadMeshToThree(meshData, target.color, target.id)
+        target = { ...target, group }
+        const t = target
+        setSolids(prev => prev.map(s => s.id === t.id ? t : s))
+        newFeats.push({
+          ...copyFeat, id: `cutout-${target.id}-${Date.now()}-p${i}`, name: `${feat.name} Pattern`, groupId,
+        })
+      }
+      setFeatures(prev => [...prev, ...newFeats])
+      await rebuildDependentMirrors(target)
+    } catch (err) {
+      console.error('Cutout pattern failed:', err)
+      // Keep whatever copies did succeed — their cuts are already in the solid.
+      if (newFeats.length) setFeatures(prev => [...prev, ...newFeats])
+      setCadError('Pattern failed: ' + (err.message || String(err)))
+      setTimeout(() => setCadError(null), 6000)
+    }
   }
 
   function handlePattern3DHover(e) {
@@ -6075,9 +6200,17 @@ const App3D = forwardRef(function App3D(props, ref) {
     viewport3dRef.current?.highlightSolid(pattern3dSel)
   }, [tool, pattern3dSel])
 
-  // World-axis unit vectors for Rectangular's plain X/Y/Z direction choice —
-  // no 3D picking needed there, unlike Circular's pivot/axis.
-  const PATTERN_AXIS_VECTORS = { x: {x:1,y:0,z:0}, y: {x:0,y:1,z:0}, z: {x:0,y:0,z:1} }
+  // Rectangular: live panel params drive a ghost grid of wireframe boxes in
+  // the viewport (one per copy), so the 3 × 4 layout is visible before Create.
+  useEffect(() => {
+    const vp = viewport3dRef.current
+    if (!vp) return
+    if (tool !== 'pattern3d' || !pattern3dRect || !pattern3dBounds) { vp.hidePatternGhosts(); return }
+    const p = pattern3dRect
+    const offsets = buildRectangularOffsets(p.dir1, p.count1, p.spacing1, p.dir2, p.count2, p.spacing2)
+      .slice(1).map(o => [o.dx, o.dy, o.dz])
+    vp.showPatternGhosts(pattern3dBounds, offsets)
+  }, [tool, pattern3dRect, pattern3dBounds])
 
   // Rectangular commits straight from the panel — every number it needs
   // (two directions, each a plain world axis) is already in `params`.
@@ -6088,9 +6221,13 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (!solid || !feat) { resetPattern3D(); return }
     const priorPos = solid.transform?.position || [0,0,0]
     const priorRotation = solid.transform?.rotation || null
-    const dir1 = PATTERN_AXIS_VECTORS[params.dir1]
-    const dir2 = params.dir2 ? PATTERN_AXIS_VECTORS[params.dir2] : null
+    // dir1/dir2 arrive as signed {x,y,z} unit vectors straight from the panel.
+    const { dir1, dir2 } = params
     const offsets = buildRectangularOffsets(dir1, params.count1, params.spacing1, dir2, params.count2, params.spacing2)
+    if (pattern3dCutFeatId) {
+      commitCutoutPattern(pattern3dCutFeatId, offsets.slice(1).map(o => [{ type: 'translate', v: [o.dx, o.dy, o.dz] }]))
+      return
+    }
     resetPattern3D()
     try {
       for (let i = 1; i < offsets.length; i++) {
@@ -6150,6 +6287,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (!solid || !feat) { resetPattern3D(); return }
     const stepAngleDeg = circularStepAngleDeg(params.specifyVia, params.count, params.stepAngleDeg, params.totalAngleDeg)
     const angles = buildCircularAngles(params.count, stepAngleDeg, params.reversed)
+    if (pattern3dCutFeatId) {
+      commitCutoutPattern(pattern3dCutFeatId, angles.slice(1).map(a => [{ type: 'rotate', angleDeg: a, axis: [axis.x, axis.y, axis.z], pivot }]))
+      return
+    }
     const priorPos = solid.transform?.position || [0,0,0]
     const priorRotation = solid.transform?.rotation || null
     resetPattern3D()
@@ -13965,6 +14106,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         hiddenSolidIds={hiddenSolidIds}
         onToggleBodyVisible={handleToggleBodyVisible}
         onConvertSketch={convertSketchFeature}
+        onPatternCutout={startCutoutPattern}
         hasSolids={solids.length > 0}
       />
 
@@ -14196,6 +14338,10 @@ const App3D = forwardRef(function App3D(props, ref) {
         <PatternPanel
           onConfirm={handlePatternPanelConfirm}
           onClose={resetPattern3D}
+          onRectChange={setPattern3dRect}
+          isCutout={!!pattern3dCutFeatId}
+          bounds={pattern3dBounds}
+          defaultAxes={pattern3dDefaultAxes}
           color="#4DB6AC"
         />
       )}

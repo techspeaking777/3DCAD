@@ -419,6 +419,25 @@ function extendSpringCutPath(cut) {
 // extendSpringCutPath, and extendSweepCutPath for the loft-, spring-, and
 // sweep-shaped-cut equivalents (buildRevolve has no such treatment yet).
 function buildCutShape(cut) {
+  const shape = buildCutShapeBase(cut)
+  return cut.xform ? applyCutXform(shape, cut.xform) : shape
+}
+
+// Pattern-of-a-cutout copies: the original cut's own geometry, moved by a
+// stored list of rigid ops — [{type:'translate', v:[dx,dy,dz]} | {type:'rotate',
+// angleDeg, axis:[x,y,z], pivot:[x,y,z]}] (mm / degrees). Applying it here
+// (instead of re-deriving a moved sketch plane) keeps every direction/depth
+// convention of the original cut exactly as-is, for work-plane and face cuts alike.
+function applyCutXform(shape, xform) {
+  let s = shape
+  for (const op of xform) {
+    if (op.type === 'translate') s = s.translate(op.v)
+    else if (op.type === 'rotate') s = s.rotate(op.angleDeg, op.pivot, op.axis)
+  }
+  return s
+}
+
+function buildCutShapeBase(cut) {
   return cut.profiles ? buildLoft({ ...cut, profiles: extendLoftCutProfiles(cut.profiles) })
     : cut.axis ? buildRevolve(cut)
     : cut.pitchMm !== undefined ? buildSpring(extendSpringCutPath(cut))

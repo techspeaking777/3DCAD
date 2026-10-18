@@ -78,7 +78,7 @@ export class FacePlane {
  * @param {THREE.Intersection} hit  — result from raycaster.intersectObjects()
  * @returns {FacePlane|null}
  */
-export function faceHitToPlane(hit, overrideEdge = null) {
+export function faceHitToPlane(hit, overrideEdge = null, { frameOnly = false } = {}) {
   if (!hit?.face) return null
 
   // Face normal in world space
@@ -226,6 +226,29 @@ export function faceHitToPlane(hit, overrideEdge = null) {
   }
 
   const plane = new FacePlane(origin, normal, uAxis, vAxis)
+
+  // Hover preview only (Viewport3D's sketch-orientation frame): attach the
+  // face's bounding rectangle in THIS plane's own (u,v) basis — the exact
+  // orientation the sketch will open in if clicked — then stop before the
+  // expensive reference-geometry classification below. bl is the sketch's
+  // bottom-left corner (u grows toward br, v toward tl), which is where the
+  // preview draws the yellow dot.
+  if (frameOnly) {
+    const pts = boundaryLoops.flat()
+    if (pts.length) {
+      let uMin=Infinity, uMax=-Infinity, vMin=Infinity, vMax=-Infinity
+      for (const p of pts) {
+        const rel = p.clone().sub(origin)
+        const u = rel.dot(uAxis), v = rel.dot(vAxis)
+        if (u<uMin) uMin=u; if (u>uMax) uMax=u
+        if (v<vMin) vMin=v; if (v>vMax) vMax=v
+      }
+      const corner = (u,v) => origin.clone().addScaledVector(uAxis,u).addScaledVector(vAxis,v)
+      plane.frameCorners = { bl: corner(uMin,vMin), br: corner(uMax,vMin), tr: corner(uMax,vMax), tl: corner(uMin,vMax) }
+    }
+    return plane
+  }
+
   // Reference geometry is a best-effort bonus (snap targets + the dashed
   // outline + Include From Face) — never let a failure here break face
   // sketching/extruding itself. Each loop becomes exactly one of: a whole

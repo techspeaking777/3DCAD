@@ -35,7 +35,7 @@ import { LineGeometry } from 'three/addons/lines/LineGeometry.js'
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
 import { createWorkPlanes, hitTestPlanes, setPlaneHover, setPlaneActive, setWorkPlanesVisible } from './WorkPlanes.js'
 import { SKETCH_PLANES } from './SketchPlane.js'
-import { faceHitToPlane, previewBottomEdge, faceBoundingRectEdges, facePickBoundaryLoops } from './FacePlane.js'
+import { faceHitToPlane, faceBoundingRectEdges, facePickBoundaryLoops } from './FacePlane.js'
 import { mmToPx } from './constants.js'
 
 // Move/Copy/Rotate gizmo axis convention — colors match SketchPlane.js's
@@ -494,6 +494,10 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   const projectedPathPreviewRef = useRef(null)
   // Rectangular Pattern's ghost grid — see showPatternGhosts.
   const patternGhostsRef = useRef(null)
+  // Last sketch-orientation frame computed for the hovered face — see
+  // drawSketchFrame; keyed so an idle cursor doesn't re-extract boundary
+  // loops every animation frame.
+  const frameCacheRef = useRef(null)
   // Move/Copy tool: a group of 3 draggable axis arrows shown on the selected
   // solid, plus the base (pre-drag) position they're anchored to and which
   // solid/group they currently belong to — see showMoveGizmo/hideMoveGizmo/
@@ -700,6 +704,60 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
           ctx2.restore()
         }
 
+        // Sketch-orientation preview for a hovered face: the face's bounding
+        // rectangle drawn ON the sketch plane (not the solid), with a thick
+        // green line along its BOTTOM side and a yellow dot at that line's
+        // start — the sketch's bottom-left corner. It's computed by the very
+        // same faceHitToPlane a click uses (honoring a Tab-cycled edge), so what
+        // the preview shows is exactly how the sketch opens: dot at the
+        // bottom-left of the screen, green line along the bottom. Tab steps the
+        // dot through the four corners (the four 90° orientations).
+        const drawSketchFrame = (hfNow, faceNormal) => {
+          const s0 = stateRef.current
+          const ray = s0.raycaster.ray
+          const tabIdx = tabEdgeIndexRef.current
+          const pt = hfNow.hit.point
+          const key = `${hfNow.mesh.uuid}|${pt.x.toFixed(3)},${pt.y.toFixed(3)},${pt.z.toFixed(3)}|${tabIdx}`
+          let plane
+          if (frameCacheRef.current?.key === key) {
+            plane = frameCacheRef.current.plane
+          } else {
+            let overrideEdge = null
+            if (tabIdx !== null) {
+              const segs = faceBoundingRectEdges({ object: hfNow.mesh, point: pt }, faceNormal)
+              overrideEdge = segs.length ? segs[tabIdx % 4] : null
+            }
+            plane = faceHitToPlane({ ...hfNow.hit, ray: ray.clone() }, overrideEdge, { frameOnly: true })
+            frameCacheRef.current = { key, plane }
+          }
+          const fc = plane?.frameCorners
+          if (!fc) return
+          const bl = toScreenWorld(fc.bl), br = toScreenWorld(fc.br)
+          const tr = toScreenWorld(fc.tr), tl = toScreenWorld(fc.tl)
+          ctx2.save()
+          // Frame: faint fill + thin outline.
+          ctx2.beginPath()
+          ctx2.moveTo(bl.x, bl.y); ctx2.lineTo(br.x, br.y); ctx2.lineTo(tr.x, tr.y); ctx2.lineTo(tl.x, tl.y); ctx2.closePath()
+          ctx2.fillStyle = 'rgba(76,175,80,0.10)'; ctx2.fill()
+          ctx2.strokeStyle = 'rgba(76,175,80,0.7)'; ctx2.lineWidth = 1.5; ctx2.stroke()
+          // Bottom side: the thick green line.
+          ctx2.beginPath(); ctx2.moveTo(bl.x, bl.y); ctx2.lineTo(br.x, br.y)
+          ctx2.strokeStyle = '#4caf50'; ctx2.lineWidth = 5; ctx2.lineCap = 'round'; ctx2.stroke()
+          // Small arrow tip at the far end: sketch +X points this way.
+          const dx = br.x - bl.x, dy = br.y - bl.y, len = Math.hypot(dx, dy) || 1
+          const ux = dx / len, uy = dy / len
+          ctx2.beginPath()
+          ctx2.moveTo(br.x + ux * 7, br.y + uy * 7)
+          ctx2.lineTo(br.x - ux * 3 - uy * 6, br.y - uy * 3 + ux * 6)
+          ctx2.lineTo(br.x - ux * 3 + uy * 6, br.y - uy * 3 - ux * 6)
+          ctx2.closePath(); ctx2.fillStyle = '#4caf50'; ctx2.fill()
+          // Yellow dot: the sketch's bottom-left corner.
+          ctx2.beginPath(); ctx2.arc(bl.x, bl.y, 7, 0, Math.PI * 2)
+          ctx2.fillStyle = '#FFC107'; ctx2.fill()
+          ctx2.strokeStyle = '#1b1b1b'; ctx2.lineWidth = 1.5; ctx2.stroke()
+          ctx2.restore()
+        }
+
         // Persistent yellow outline for every already-picked Export Face DXF
         // face — drawn every frame regardless of hover, so it doesn't vanish
         // the moment the cursor moves off it. facePickBoundaryLoops scopes to
@@ -750,34 +808,10 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
               // what clicking adds" — instead of the generic square.
               strokeLoops(facePickBoundaryLoops({ object: hf.mesh, point: hf.hit.point }, faceNormal), '#4FC3F7', 3)
             } else {
-              facePlaneIndicator.position.copy(hf.hit.point).addScaledVector(faceNormal, 0.5)
-              facePlaneIndicator.quaternion.setFromRotationMatrix(
-                new THREE.Matrix4().makeBasis(uAxis, vAxis, faceNormal))
-              facePlaneIndicator.visible = true
-
-              // Preview which boundary edge is nearest the cursor right now (or,
-              // if Tab-cycled, whichever edge that selected) — this is the edge
-              // that will become the sketch's bottom/horizontal reference if the
-              // face is clicked now (see FacePlane.js's faceHitToPlane, which
-              // picks the same edge — or honors the same override — at click time).
-              let bottomEdge
-              if (tabEdgeIndexRef.current !== null) {
-                const segs = faceBoundingRectEdges({ object: hf.mesh, point: hf.hit.point }, faceNormal)
-                bottomEdge = segs.length ? segs[tabEdgeIndexRef.current % 4] : null
-              } else {
-                bottomEdge = previewBottomEdge({ object: hf.mesh, point: hf.hit.point }, faceNormal)
-              }
-              if (bottomEdge) {
-                const bp1 = toScreenWorld(bottomEdge.a)
-                const bp2 = toScreenWorld(bottomEdge.b)
-                ctx2.beginPath()
-                ctx2.moveTo(bp1.x, bp1.y)
-                ctx2.lineTo(bp2.x, bp2.y)
-                ctx2.strokeStyle = '#4caf50'
-                ctx2.lineWidth = 4
-                ctx2.lineCap = 'round'
-                ctx2.stroke()
-              }
+              // The sketch frame replaces the old generic square: it draws the
+              // exact orientation a click would give (see drawSketchFrame).
+              facePlaneIndicator.visible = false
+              drawSketchFrame(hf, faceNormal)
             }
 
             // Label at the cursor's hit point (the square indicator has no

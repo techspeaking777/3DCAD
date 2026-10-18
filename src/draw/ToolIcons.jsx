@@ -417,23 +417,25 @@ export function IconRevolve3D({ color = '#FBDA2D', size = 70 }) {
   )
 }
 
+// Spring — a wire coil seen from the side. The FRONT half of every turn is
+// drawn bold and the BACK half thin and faint, with a soft translucent band
+// behind the wire (the same "swept tube" cue IconSweep3D uses). That front/
+// back contrast is what keeps it reading as a coiled spring instead of a
+// chain of linked rings (an earlier version stacked full ellipses and did).
 export function IconSpring3D({ color = '#F06292', size = 70 }) {
+  const cx = 35, rx = 18, ry = 3.5, y0 = 8, pitch = 13.5, turns = 4
+  const L = cx - rx, R = cx + rx
+  let front = '', back = ''
+  for (let i = 0; i < turns; i++) {
+    const y = y0 + pitch * i
+    front += `M${L} ${y} A${rx} ${ry} 0 0 0 ${R} ${y + pitch / 2} `
+    back  += `M${R} ${y + pitch / 2} A${rx} ${ry} 0 0 0 ${L} ${y + pitch} `
+  }
   return (
     <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>
-      <GroundShadow color={color}/>
-      {/* coil axis — same dashed-diagonal convention as Sweep/Loft's own
-          path, climbing bottom-left to top-right */}
-      <line x1="10" y1="60" x2="56" y2="12" stroke={color} strokeWidth="1.25" strokeDasharray="2 2" opacity="0.4"/>
-      {/* 4 open coil loops climbing the axis — deliberately UNFILLED, unlike
-          IsoCube's tri-tone faces: a filled ellipse this size overlapping
-          its neighbors reads as a solid blob/chain of linked rings (tried
-          live, rejected), while a plain ring stroke keeps each turn visible
-          as a distinct loop of wire, reading as a coiled spring even at the
-          sidebar's small render size. */}
-      <ellipse cx="14" cy="56" rx="15" ry="7" transform="rotate(-46 14 56)" fill="none" stroke={color} strokeWidth="2.5"/>
-      <ellipse cx="27" cy="42" rx="15" ry="7" transform="rotate(-46 27 42)" fill="none" stroke={color} strokeWidth="2.5"/>
-      <ellipse cx="40" cy="28" rx="15" ry="7" transform="rotate(-46 40 28)" fill="none" stroke={color} strokeWidth="2.5"/>
-      <ellipse cx="53" cy="14" rx="15" ry="7" transform="rotate(-46 53 14)" fill="none" stroke={color} strokeWidth="2.5"/>
+      <path d={front + back} stroke={color} strokeWidth="5.5" strokeOpacity="0.18" strokeLinecap="round"/>
+      <path d={back} stroke={color} strokeWidth="1.25" strokeOpacity="0.4" strokeLinecap="round"/>
+      <path d={front} stroke={color} strokeWidth="2.5" strokeLinecap="round"/>
     </svg>
   )
 }

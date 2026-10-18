@@ -758,7 +758,8 @@ self.onmessage = async function(e) {
         )
         shape = isChamferOp ? base.chamfer(params.radius, edgeFilter) : base.fillet(params.radius, edgeFilter)
       } catch(e) {
-        throw new Error(`${opLabel} failed: ${e.message}`)
+        // OCC often throws a bare number here (no .message) when the radius won't fit.
+        throw new Error(`${opLabel} failed: ${e?.message || 'radius too large for the selected edge(s) — try a smaller radius'}`)
       }
       // BRepFilletAPI_MakeFillet/MakeChamfer can report success while the
       // blend actually self-intersects (radius too large for the local edge
@@ -789,7 +790,7 @@ self.onmessage = async function(e) {
       try {
         shape = applyShell(base, params)
       } catch(e) {
-        throw new Error(`Shell failed: ${e.message}`)
+        throw new Error(`Shell failed: ${e?.message || 'wall thickness too large for this geometry — try a smaller thickness'}`)
       }
       // Same self-intersection guard fillet3d uses — a wall thickness too
       // large for the local geometry can report success while the offset
@@ -1034,8 +1035,54 @@ self.onmessage = async function(e) {
     const edges = stripSeamEdges(shape, shape.meshEdges({ keepMesh:true }))
     self.postMessage({ type:'result', id, faces, edges })
   } catch(err) {
-    self.postMessage({ type:'error', id, message:err.message||String(err) })
+    // Full detail stays in the console for debugging; the message that goes to
+    // the app (and the red banner students see) is plain English.
+    console.error('[CAD worker]', type, err)
+    self.postMessage({ type:'error', id, message: friendlyCadMessage(type, err) })
   }
+}
+
+// Turns whatever an operation threw into a sentence a student can act on.
+// OpenCascade often throws a bare number (a native pointer) or an internal
+// debug string like "Step3-BOOL: ..."; both read as noise in the UI. Messages
+// that are already written for humans (they were authored in this file, e.g.
+// "Cut failed — ...", "radius too large ...") pass through untouched.
+const GENERIC_FAILURE_BY_OP = {
+  extrude:  "the shape couldn't be built — check the sketch for lines that cross or overlap, and that it's one closed loop.",
+  cutout:   "the cut couldn't be made — check the sketch for crossing lines, and that it actually overlaps the solid.",
+  subtract: "the cut couldn't be applied — make sure the sketch overlaps the solid and has no crossing lines.",
+  revolve:  "the profile couldn't be spun — keep the whole profile on one side of the axis line and don't let it cross it.",
+  loft:     "the profiles couldn't be blended — keep them similar in shape and not too far apart or twisted.",
+  sweep:    "the path bends too sharply for this profile — try a smoother path or a smaller profile.",
+  spring:   "the coil couldn't be built — try a smaller wire or a larger pitch.",
+  fillet3d: "the radius is too big for those edges — try a smaller radius.",
+  shell3d:  "the wall is too thick for this shape — try a thinner wall or different faces.",
+  joinShapes:  "the bodies couldn't be combined — make sure they overlap or share a face.",
+  mirrorShape: "the mirror couldn't be built — try again, or undo the last step first.",
+  transformShape: "the body couldn't be moved — undo the last step and try again.",
+  importStep: "that file couldn't be read as a STEP model — check it's a valid .step/.stp file.",
+  exportFaceDXF: "that face couldn't be exported — try a flat face on a valid solid.",
+  exportSTL:  "the model couldn't be turned into an STL — check that every body is a valid solid.",
+  exportSTEP: "the model couldn't be turned into a STEP file — check that every body is a valid solid.",
+}
+function friendlyCadMessage(type, err) {
+  const raw = err && typeof err === 'object' && 'message' in err ? String(err.message) : String(err)
+  const generic = GENERIC_FAILURE_BY_OP[type] || "the CAD engine couldn't finish that — undo the last step and try again."
+  // A bare number (or empty text) is an OpenCascade native exception with no message.
+  if (/^\s*\d*\s*$/.test(raw)) return generic
+  if (/^Step1-BASE/.test(raw)) return "the original shape couldn't be rebuilt for this cut — try undo and redo the earlier step."
+  if (/^Step2-CUT/.test(raw)) return "the cut shape couldn't be built from that sketch — check it for open or crossing lines."
+  if (/^Step3-BOOL/.test(raw)) return "the cut couldn't be applied — make sure the sketch overlaps the solid."
+  if (/-MISS\b/.test(raw)) return "that body isn't ready yet — undo the last step and try again."
+  if (/has been deleted/i.test(raw)) return "something changed underneath that operation — undo the last step and try again."
+  if (/^Need ≥3 pts/.test(raw)) return "the sketch needs at least 3 points — draw a closed shape first."
+  if (/OCC not ready/.test(raw)) return "the CAD engine is still starting up — wait a few seconds and try again."
+  if (/^Null shape/.test(raw)) return generic
+  if (/^Unknown:/.test(raw)) return "that operation isn't supported."
+  if (/memory access out of bounds|RuntimeError|unreachable|abort/i.test(raw)) {
+    return generic
+  }
+  return raw
 }
 
 function toRep(pts) {

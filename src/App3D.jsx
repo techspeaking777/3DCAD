@@ -713,13 +713,21 @@ function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEP
       bottom: 0,
       left: 0,
       right: 0,
-      height: 52,
+      // minHeight + wrap (not a fixed 52px single row): in a narrow window
+      // (laptop split-screen, ~800px) the step pills plus a hint and several
+      // action buttons can't fit on one line, and used to clip off the right
+      // edge. Now the right-hand cluster (hint, buttons, Esc) drops to a
+      // second row instead, and the bar grows upward from the bottom.
+      minHeight: 52,
+      boxSizing: 'border-box',
       background: 'rgba(12,12,26,0.97)',
       backdropFilter: 'blur(6px)',
       borderTop: `2px solid ${color}55`,
       display: 'flex',
+      flexWrap: 'wrap',
       alignItems: 'center',
-      padding: '0 20px',
+      rowGap: 6,
+      padding: '6px 20px',
       zIndex: 200,
       pointerEvents: 'all',
       gap: 0,
@@ -842,14 +850,18 @@ function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEP
         </div>
       )}
 
-      <div style={{ flex: 1 }}/>
+      {/* Right-hand cluster: hint, action buttons, Esc hint. marginLeft:auto
+          pushes it to the right on a wide bar; on a narrow one the whole
+          cluster wraps onto its own row (still right-aligned). */}
+      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', flexWrap: 'wrap',
+        justifyContent: 'flex-end', rowGap: 6, minWidth: 0 }}>
 
       {/* Optional trailing hint — e.g. live selection count + accept keys.
           Absent for the existing Extrude/Cutout and Mirror3D usages. */}
       {hint && (
         <span style={{
           fontFamily: 'monospace', fontSize: 10,
-          color, flexShrink: 0, letterSpacing: '0.05em', marginRight: 16,
+          color, flexShrink: 1, minWidth: 0, letterSpacing: '0.05em', marginRight: 16,
         }}>
           {hint}
         </span>
@@ -912,6 +924,7 @@ function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEP
       }}>
         Esc · cancel
       </span>
+      </div>
     </div>
   )
 }
@@ -11893,11 +11906,13 @@ const App3D = forwardRef(function App3D(props, ref) {
       )}
 
       {cadError && (
-        <div style={{position:'fixed',top:16,left:'50%',transform:'translateX(-50%)',
+        <div onClick={() => setCadError(null)} title="Click to dismiss"
+          style={{position:'fixed',top:16,left:'50%',transform:'translateX(-50%)',
           background:'#c0392b',color:'#fff',padding:'10px 20px',borderRadius:8,
-          zIndex:9999,fontFamily:'monospace',fontSize:13,maxWidth:'80vw',
-          boxShadow:'0 4px 12px rgba(0,0,0,0.5)'}}>
-          {cadError}
+          zIndex:9999,fontFamily:'monospace',fontSize:13,maxWidth:'80vw',lineHeight:1.45,
+          cursor:'pointer',boxShadow:'0 4px 12px rgba(0,0,0,0.5)'}}>
+          {cadError.charAt(0).toUpperCase() + cadError.slice(1)}
+          <span style={{opacity:0.6,fontSize:11,marginLeft:10}}>✕</span>
         </div>
       )}
 
@@ -12213,25 +12228,9 @@ const App3D = forwardRef(function App3D(props, ref) {
           ) : (
             /* ── 3D top toolbar ── */
             <>
-              {/* View presets */}
-              <span style={{color:'#555',fontFamily:'monospace',fontSize:9,
-                textTransform:'uppercase',letterSpacing:'0.1em',marginRight:2}}>View</span>
-              {[
-                {id:'top',   label:'TOP',  title:'Top view (XY)',  fn:()=>viewport3dRef.current?.snapToPlane('XY', {resetZoom:false})},
-                {id:'front', label:'FRONT',title:'Front view (XZ)', fn:()=>viewport3dRef.current?.snapToPlane('XZ', {resetZoom:false})},
-                {id:'side',  label:'SIDE', title:'Side view (YZ)',  fn:()=>viewport3dRef.current?.snapToPlane('YZ', {resetZoom:false})},
-                {id:'iso',   label:'ISO',  title:'Isometric view',  fn:()=>viewport3dRef.current?.snapToIsometric()},
-              ].map(({id,label,title,fn})=>(
-                <button key={label} title={title} onClick={fn}
-                  style={{...btnBase,background:'transparent',
-                    outline:'1px solid #2a2a4a',outlineOffset:'-2px',
-                    flexDirection:'column',gap:2,width:'auto',padding:'0 8px',height:52}}>
-                  <div style={viewOpIconStyle(id)}/>
-                  <span style={{fontSize:9,fontFamily:'monospace',color:'#6688aa',
-                    letterSpacing:'0.06em'}}>{label}</span>
-                </button>
-              ))}
-              <div style={{width:1,height:34,background:'#2a2a4a',margin:'0 6px'}}/>
+              {/* The TOP/FRONT/SIDE/ISO preset buttons that used to sit here were
+                  removed: the ViewCube (with its Home button and edge arrows)
+                  covers every one of those views. */}
               <button key="fit" title="Zoom to fit (F)" onClick={zoomToFit}
                 style={{...btnBase,background:'transparent',
                   outline:'1px solid #2a2a4a',outlineOffset:'-2px',
@@ -12908,7 +12907,11 @@ const App3D = forwardRef(function App3D(props, ref) {
             onStepBack={step => { if (step===1) resetMeasure() }}
           />
         </div>
-        <div style={{height:52,background:'#16162a',display:'flex',alignItems:'center',padding:'0 8px',gap:4,flexShrink:0,borderTop:'2px solid #2a2a4a'}}>
+        {/* Single row that scrolls sideways when the window is too narrow for
+            every button (was overflowing the page, which then scrolled
+            sideways as a whole). Wrapping was tried first but stacked to 4
+            rows at ~800px and stole too much viewport height. */}
+        <div style={{height:52,boxSizing:'border-box',background:'#16162a',display:'flex',alignItems:'center',padding:'0 8px',gap:4,flexShrink:0,borderTop:'2px solid #2a2a4a',overflowX:'auto',overflowY:'hidden',scrollbarWidth:'thin'}}>
           {/* Undo/Redo/Save/Load/PDF/DXF only mean anything for the 2D sketch
               buffer (snapshot()/saveJSON() below only capture lines/circles/
               arcs/splines/dims, not the solid feature tree) — showing them

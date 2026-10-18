@@ -401,7 +401,8 @@ function workPlaneToFacePlaneBasisPx(planeId) {
 // basis.normal for older basis objects that predate this split.
 function buildLoftFacePlane(basis, offsetMm) {
   const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(offsetMm))
-  return new FacePlane(origin, basis.viewNormal || basis.normal, basis.uAxis, basis.vAxis)
+  return new FacePlane(origin, basis.viewNormal || basis.normal, basis.uAxis, basis.vAxis,
+    basis.viewCenter ? basis.viewCenter.clone().addScaledVector(basis.normal, mmToPx(offsetMm)) : undefined)
 }
 
 // Sweep's profile plane has no user pick at all — it's derived purely from
@@ -6709,7 +6710,7 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   async function startSweepPath(pick) {
     const basis = pick.kind === 'face'
-      ? new FacePlane(pick.facePlane.origin, pick.facePlane.normal, pick.facePlane.uAxis, pick.facePlane.vAxis)
+      ? new FacePlane(pick.facePlane.origin, pick.facePlane.normal, pick.facePlane.uAxis, pick.facePlane.vAxis, pick.facePlane.viewCenter)
       : (() => {
           const b = workPlaneToFacePlaneBasisPx(pick.planeId)
           return new FacePlane(b.origin, b.normal, b.uAxis, b.vAxis)
@@ -6763,7 +6764,7 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   async function startSpringPlanePick(pick) {
     const basis = pick.kind === 'face'
-      ? new FacePlane(pick.facePlane.origin, pick.facePlane.normal, pick.facePlane.uAxis, pick.facePlane.vAxis)
+      ? new FacePlane(pick.facePlane.origin, pick.facePlane.normal, pick.facePlane.uAxis, pick.facePlane.vAxis, pick.facePlane.viewCenter)
       : (() => {
           const b = workPlaneToFacePlaneBasisPx(pick.planeId)
           return new FacePlane(b.origin, b.normal, b.uAxis, b.vAxis)
@@ -6792,7 +6793,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     const distMm = parseFloat(springOffsetDistInput) || 0
     const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(distMm))
     const vAxis = new THREE.Vector3().crossVectors(basis.normal, basis.uAxis).normalize()
-    return new FacePlane(origin, basis.normal, basis.uAxis, vAxis)
+    // viewCenter follows the offset too, so the camera stays on the face centre
+    return new FacePlane(origin, basis.normal, basis.uAxis, vAxis,
+      basis.viewCenter ? basis.viewCenter.clone().addScaledVector(basis.normal, mmToPx(distMm)) : undefined)
   }
 
   function handleSpringOffsetPlanePick(pick) {
@@ -6961,6 +6964,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     const basis = pick.kind === 'face'
       ? {
           origin: pick.facePlane.origin.clone(),
+          viewCenter: pick.facePlane.viewCenter?.clone(),
           // Loft Cutout: a picked face's normal points OUTWARD (away from
           // the solid) — negate it so stepping through Next Profile builds
           // INTO the material, not away from it into empty space (which
@@ -7513,7 +7517,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     const distMm = parseFloat(mirror3dOffsetDistInput) || 0
     const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(distMm))
     const vAxis = new THREE.Vector3().crossVectors(basis.normal, basis.uAxis).normalize()
-    return new FacePlane(origin, basis.normal, basis.uAxis, vAxis)
+    // viewCenter follows the offset too, so the camera stays on the face centre
+    return new FacePlane(origin, basis.normal, basis.uAxis, vAxis,
+      basis.viewCenter ? basis.viewCenter.clone().addScaledVector(basis.normal, mmToPx(distMm)) : undefined)
   }
 
   // Commits through the exact same {kind:'face', facePlane} path a directly-
@@ -7570,7 +7576,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     const distMm = parseFloat(extrudeOffsetDistInput) || 0
     const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(distMm))
     const vAxis = new THREE.Vector3().crossVectors(basis.normal, basis.uAxis).normalize()
-    return new FacePlane(origin, basis.normal, basis.uAxis, vAxis)
+    // viewCenter follows the offset too, so the camera stays on the face centre
+    return new FacePlane(origin, basis.normal, basis.uAxis, vAxis,
+      basis.viewCenter ? basis.viewCenter.clone().addScaledVector(basis.normal, mmToPx(distMm)) : undefined)
   }
 
   function handleExtrudeOffsetPlanePick(pick) {
@@ -7626,7 +7634,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     const distMm = parseFloat(sweepOffsetDistInput) || 0
     const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(distMm))
     const vAxis = new THREE.Vector3().crossVectors(basis.normal, basis.uAxis).normalize()
-    return new FacePlane(origin, basis.normal, basis.uAxis, vAxis)
+    // viewCenter follows the offset too, so the camera stays on the face centre
+    return new FacePlane(origin, basis.normal, basis.uAxis, vAxis,
+      basis.viewCenter ? basis.viewCenter.clone().addScaledVector(basis.normal, mmToPx(distMm)) : undefined)
   }
 
   function handleSweepOffsetPlanePick(pick) {

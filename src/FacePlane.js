@@ -19,9 +19,14 @@
 import * as THREE from 'three'
 
 export class FacePlane {
-  constructor(origin, normal, uAxis, vAxis) {
+  constructor(origin, normal, uAxis, vAxis, viewCenter = null) {
     this.id     = 'face'          // distinguishes from 'XY'|'XZ'|'YZ'
     this.origin = origin.clone()
+    // Where the camera looks when snapping to this plane. Normally the same
+    // as `origin`, but a picked face's sketch origin is its bottom-left CORNER
+    // (so the grid and coordinates measure from the corner — see
+    // faceHitToPlane), while the view should still be centred on the face.
+    this.viewCenter = (viewCenter || origin).clone()
     this.normal = normal.clone().normalize()
     this.uAxis  = uAxis.clone().normalize()
     this.vAxis  = vAxis.clone().normalize()
@@ -48,9 +53,10 @@ export class FacePlane {
 
   /** Camera position for looking straight at this face */
   getCameraView(distance=600) {
-    // Camera sits along the normal, looking at the face origin
+    // Camera sits along the normal, looking at the face's view centre (the
+    // face centre for a picked face; just the origin for work planes)
     const pos = new THREE.Vector3()
-      .copy(this.origin)
+      .copy(this.viewCenter)
       .addScaledVector(this.normal, distance)
 
     // Camera "up" = vAxis — MUST match the sketch's own vertical axis, or the
@@ -67,7 +73,7 @@ export class FacePlane {
 
     return {
       position: pos,
-      target:   this.origin.clone(),
+      target:   this.viewCenter.clone(),
       up,
     }
   }
@@ -225,29 +231,37 @@ export function faceHitToPlane(hit, overrideEdge = null, { frameOnly = false } =
     vAxis = new THREE.Vector3().crossVectors(normal, uAxis).normalize()
   }
 
-  const plane = new FacePlane(origin, normal, uAxis, vAxis)
-
-  // Hover preview only (Viewport3D's sketch-orientation frame): attach the
-  // face's bounding rectangle in THIS plane's own (u,v) basis — the exact
-  // orientation the sketch will open in if clicked — then stop before the
-  // expensive reference-geometry classification below. bl is the sketch's
-  // bottom-left corner (u grows toward br, v toward tl), which is where the
-  // preview draws the yellow dot.
-  if (frameOnly) {
-    const pts = boundaryLoops.flat()
-    if (pts.length) {
-      let uMin=Infinity, uMax=-Infinity, vMin=Infinity, vMax=-Infinity
-      for (const p of pts) {
-        const rel = p.clone().sub(origin)
-        const u = rel.dot(uAxis), v = rel.dot(vAxis)
-        if (u<uMin) uMin=u; if (u>uMax) uMax=u
-        if (v<vMin) vMin=v; if (v>vMax) vMax=v
-      }
-      const corner = (u,v) => origin.clone().addScaledVector(uAxis,u).addScaledVector(vAxis,v)
-      plane.frameCorners = { bl: corner(uMin,vMin), br: corner(uMax,vMin), tr: corner(uMax,vMax), tl: corner(uMin,vMax) }
+  // The face's bounding rectangle in THIS orientation's (u,v) basis — what
+  // the hover preview draws, and where the sketch origin goes. bl is the
+  // sketch's bottom-left corner (u grows toward br, v toward tl): the yellow
+  // dot in the preview. Measured from the centroid `origin` computed above.
+  let frameCorners = null
+  const framePts = boundaryLoops.flat()
+  if (framePts.length) {
+    let uMin=Infinity, uMax=-Infinity, vMin=Infinity, vMax=-Infinity
+    for (const p of framePts) {
+      const rel = p.clone().sub(origin)
+      const u = rel.dot(uAxis), v = rel.dot(vAxis)
+      if (u<uMin) uMin=u; if (u>uMax) uMax=u
+      if (v<vMin) vMin=v; if (v>vMax) vMax=v
     }
-    return plane
+    const corner = (u,v) => origin.clone().addScaledVector(uAxis,u).addScaledVector(vAxis,v)
+    frameCorners = { bl: corner(uMin,vMin), br: corner(uMax,vMin), tr: corner(uMax,vMax), tl: corner(uMin,vMax) }
   }
+
+  // Sketch origin = the bottom-left CORNER of that frame (the yellow dot), so
+  // the sketch grid and coordinates measure from the corner the student
+  // picked — "10mm in from the edge" lands exactly on a 10mm grid point.
+  // Round faces (a cylinder's end cap) keep the centre instead: a bounding
+  // square's corner is meaningless there, and centre is what you'd want.
+  // The camera still looks at the face centre (viewCenter = centroid).
+  const sketchOrigin = (frameCorners && !allLoopsRound) ? frameCorners.bl : origin
+  const plane = new FacePlane(sketchOrigin, normal, uAxis, vAxis, origin)
+  if (frameCorners) plane.frameCorners = frameCorners
+
+  // Hover preview only: stop before the expensive reference-geometry
+  // classification below.
+  if (frameOnly) return plane
 
   // Reference geometry is a best-effort bonus (snap targets + the dashed
   // outline + Include From Face) — never let a failure here break face

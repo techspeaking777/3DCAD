@@ -89,8 +89,6 @@ import { EDGE_LINE_RESOLUTION } from './cadMesh.js'
 
 // ── coordinate helpers ────────────────────────────────────────────────────────
 
-function w2t(x, y) { return new THREE.Vector3(x, -y, 0) }
-function t2w(v)    { return { x: v.x, y: -v.y } }
 
 // ── easing ────────────────────────────────────────────────────────────────────
 
@@ -232,20 +230,6 @@ function pt2three(sx, sy, plane, facePlane) {
     case 'YZ': return new THREE.Vector3(0,  sx, -sy)
     default:   return new THREE.Vector3(sx, -sy,  0)
   }
-}
-
-/** Small sphere at each line endpoint */
-function buildEndpoint(x, y, plane, facePlane) {
-  const pos = pt2three(x, y, plane, facePlane)
-  const geo = new THREE.SphereGeometry(3, 8, 8)
-  const mat = new THREE.MeshBasicMaterial({
-    color:0x111111, depthTest:false,
-    transparent:true, opacity:1.0,
-  })
-  const mesh = new THREE.Mesh(geo, mat)
-  mesh.position.copy(pos)
-  mesh.renderOrder = 6
-  return mesh
 }
 
 function buildFill(pts, plane, facePlane, color=0xaaccff) {
@@ -410,7 +394,6 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     sketchMode     = false,
     gridVisible    = false,  // 3D-mode reference grid toggle — see the GRID toolbar button in App3D.jsx
     gridSizeMm     = 5,      // minor grid line spacing — mirrors the grid-size dropdown in App3D.jsx
-    extrudeTool    = null,   // 'extrude'|'cutout' — bypasses work plane click
     filletActive   = false,  // true while the fillet edge-pick tool is active
     measureActive  = false,  // true while the measure tool is active (reuses fillet's edge-highlight machinery, see measureActiveRef)
     // Mirror tool step 2 (Pick Plane): true while hovering a work plane or
@@ -585,52 +568,6 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     const raycaster = new THREE.Raycaster()
     const workPlanes = createWorkPlanes(scene)
 
-    // Generic square plane indicator shown while hovering a face armed for
-    // sketching — same visual language as the XY/YZ/XZ work planes above, but
-    // fixed-size and oriented to the hovered face's normal instead of a scene
-    // axis. Deliberately NOT shaped to the actual face boundary (a cylinder's
-    // circular top, a slot's rounded rectangle, etc.) — a neutral square reads
-    // as "this defines your sketch plane" the same way regardless of the
-    // underlying face's real shape, matching how the axis work planes already
-    // communicate that idea.
-    const FACE_INDICATOR_SIZE = 60   // half-size, world units
-    const facePlaneIndicator = new THREE.Group()
-    facePlaneIndicator.visible = false
-    facePlaneIndicator.renderOrder = 4
-    {
-      const S = FACE_INDICATOR_SIZE
-      const fillGeo = new THREE.PlaneGeometry(S*2, S*2)
-      // Opacity bumped well above the axis work planes' hover-state 0.14 —
-      // this sits directly on a solid whose own material is a similar blue
-      // hue, so the same opacity that reads clearly against the plain
-      // white/gray background behind the work planes was nearly invisible
-      // here (verified: correct position/orientation/visible=true in the
-      // scene graph, but not perceptible in a screenshot at 0.16).
-      const fillMat = new THREE.MeshBasicMaterial({
-        color: 0x64aaff, transparent: true, opacity: 0.4,
-        side: THREE.DoubleSide, depthWrite: false, depthTest: false,
-      })
-      facePlaneIndicator.add(new THREE.Mesh(fillGeo, fillMat))
-      // Plain THREE.Line/LineBasicMaterial ignores linewidth on most
-      // GPUs/browsers (same WebGL limitation cadMesh.js's solid-edge
-      // rendering already works around) — use the Line2/LineMaterial fat-line
-      // module instead for a border that's actually visible at 1x zoom.
-      const corners = [
-        -S,-S,0,  S,-S,0,  S,S,0,  -S,S,0,  -S,-S,0,
-      ]
-      const borderGeo = new LineGeometry()
-      borderGeo.setPositions(corners)
-      const borderMat = new LineMaterial({
-        color: 0x64aaff, linewidth: 2, worldUnits: false,
-        transparent: true, opacity: 0.95, depthTest: false,
-        resolution: LINE_RESOLUTION,
-      })
-      const border = new Line2(borderGeo, borderMat)
-      border.computeLineDistances()
-      facePlaneIndicator.add(border)
-    }
-    scene.add(facePlaneIndicator)
-
     // Tween state — stored on stateRef so the RAF loop can access it
     const tween = {
       active:   false,
@@ -647,7 +584,6 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     stateRef.current = {
       renderer, scene, camera, controls,
       geomGroup, solidsGroup, raycaster, plane, workPlanes,
-      facePlaneIndicator,
       grid,   // for hide/show in sketch mode
       tween,
       savedPos: null, savedUp: null, savedTgt: null,
@@ -677,10 +613,6 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       const hf = hoveredFaceRef.current
       const oc = overlayRef.current
       const inSketchMode = !!activePlaneInternalRef.current
-      // Default to hidden every frame; only the sketch-armed-and-hovering path
-      // below turns it back on — guarantees it never lingers from a stale
-      // frame no matter which branch below runs (or doesn't).
-      facePlaneIndicator.visible = false
       if (oc && sketchArmedRef.current && !inSketchMode) {
         const ctx2 = oc.getContext('2d')
         ctx2.setTransform(1,0,0,1,0,0)
@@ -783,17 +715,6 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
           if (face && geo.attributes.position) {
             const faceNormal = getHoveredFaceNormal(hf)
 
-            // Position/orient the generic square indicator on the hovered
-            // face — a cheap local basis from the normal alone (not the real
-            // sketch uAxis/vAxis FacePlane.js derives from the nearest
-            // boundary edge, which needs an expensive full boundary-loop
-            // extraction; a preview square doesn't care which edge ends up
-            // "bottom", so it doesn't need that cost paid every frame).
-            const refAxis = Math.abs(faceNormal.x) < 0.9
-              ? new THREE.Vector3(1,0,0) : new THREE.Vector3(0,0,1)
-            const uAxis = refAxis.clone().addScaledVector(faceNormal, -refAxis.dot(faceNormal)).normalize()
-            const vAxis = new THREE.Vector3().crossVectors(faceNormal, uAxis).normalize()
-
             // If Tab-cycling (cycleFaceBottomEdge) picked an edge, that overrides
             // the cursor-nearest one — but only while still on the same face; a
             // normal that's drifted means the mouse moved to a genuinely
@@ -808,9 +729,8 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
               // what clicking adds" — instead of the generic square.
               strokeLoops(facePickBoundaryLoops({ object: hf.mesh, point: hf.hit.point }, faceNormal), '#4FC3F7', 3)
             } else {
-              // The sketch frame replaces the old generic square: it draws the
-              // exact orientation a click would give (see drawSketchFrame).
-              facePlaneIndicator.visible = false
+              // The sketch frame: draws the exact orientation a click would
+              // give (see drawSketchFrame).
               drawSketchFrame(hf, faceNormal)
             }
 
@@ -1412,23 +1332,6 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
         default:   return { x: sx, y: -sy, z: 0 }
       }
     },
-      // Force-raycast onto a specific plane regardless of active sketch plane.
-    screenToSketchForPlane(clientX, clientY, planeId) {
-      const ndc=new THREE.Vector2(
-        ((clientX-rect.left)/rect.width)*2-1,
-        ((clientY-rect.top)/rect.height)*-2+1,
-      )
-      raycaster.setFromCamera(ndc,camera)
-      const hit=new THREE.Vector3()
-      const targetPlane = SKETCH_PLANES[planeId] || SKETCH_PLANES.XY
-      raycaster.ray.intersectPlane(targetPlane, hit)
-      switch(planeId) {
-        case 'XZ': return { x: hit.x,  y: -hit.z }
-        case 'YZ': return { x: hit.y,  y: -hit.z }
-        default:   return { x: hit.x,  y: -hit.y }
-      }
-    },
-
     zoomToFit() {
       const s=stateRef.current; if (!s) return
       const {camera,controls,geomGroup,solidsGroup}=s
@@ -1460,7 +1363,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     getOverlayCtx(planeId) {
       const s=stateRef.current; if (!s) return null
       const oc=overlayRef.current; if (!oc) return null
-      const {camera, controls}=s
+      const {camera}=s
 
       // Use mount div rect for W/H — same source as screenToWorld's NDC calc
       const mount = mountRef.current

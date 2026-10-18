@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react'
 import * as THREE from 'three'
-import viewOpIconSheet from './assets/view-op-icons.png'
 import Viewport3D from './Viewport3D.jsx'
 import { planeColor, planeAxisLabels, sketchToWorld, worldToSketch } from './SketchPlane.js'
 import { FacePlane, fitCircleLeastSquares, fitArcToRun, distToLine } from './FacePlane.js'
@@ -11,7 +10,7 @@ import { computeTrimPreview, performTrim, computeDeletePreview, distToSeg } from
 import { nearestOffsetEntity, computeOffsetPreview, distToEntity } from './tools/offsetMath.js'
 import { nearestMirrorEntity, buildMirror } from './tools/mirrorMath.js'
 import { nearestMoveCopyEntity, buildCopies, removeSelected } from './tools/moveCopyMath.js'
-import { nearestRotateCopyEntity, rotatePoint, buildRotatedCopies } from './tools/rotateCopyMath.js'
+import { nearestRotateCopyEntity, buildRotatedCopies } from './tools/rotateCopyMath.js'
 import { buildRectangularOffsets, buildCircularAngles, circularStepAngleDeg } from './tools/patternMath.js'
 import { nearestScaleEntity, buildScaled } from './tools/scaleMath.js'
 import { nearestFilletLine, computeFillet } from './tools/filletMath.js'
@@ -20,9 +19,9 @@ import { sampleSpline, nearestSpline, computeSplineTrimPreview, performSplineTri
 import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform } from './tools/selectMath.js'
 import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine, perpLabelOffset } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
-import { saveJSON, loadJSON, exportDXF, parseDXF, saveProjectAs, canPickSaveLocation, exportFaceDXF as writeFaceDXF, saveBlobAs, saveProjectFileAs, loadProjectFile, serializeProject, parseProjectData } from './tools/saveLoad.js'
+import { loadJSON, exportDXF, parseDXF, saveProjectAs, canPickSaveLocation, exportFaceDXF as writeFaceDXF, saveBlobAs, saveProjectFileAs, loadProjectFile, serializeProject, parseProjectData } from './tools/saveLoad.js'
 import { getAuthState, fetchMyClasses, saveNewCloudProject, updateCloudProject, loadCloudProject } from './tools/cloudSave.js'
-import { detectProfiles, detectPath, buildSolid, pickProfile } from './tools/extrudeMath.js'
+import { detectProfiles, detectPath, buildSolid } from './tools/extrudeMath.js'
 import { cadEngine } from './cadEngine.js'
 import { replicadMeshToThree } from './cadMesh.js'
 import TracerPanel from './tools/TracerPanel.jsx'
@@ -110,36 +109,6 @@ const CUT_COLOR = '#53D3E4'
 // constant until a real need for a different step size shows up.
 const MOVE_COPY_ROTATE_SNAP_DEG = 10
 
-// Pixel-art view-preset icons (src/assets/view-op-icons.png) — same
-// background-position cropping trick as SOLID_OP_CELLS, but each icon's own
-// glyph (not the surrounding card/border/label — those aren't used here,
-// since the view buttons already render their own text label) has a
-// different aspect ratio (SIDE is a tall thin rectangle, ISO is wider), so
-// each cell stores its own w/h rather than sharing one. There's also a fifth
-// "VIEW" glyph in the sheet (dashed border, crosshair) not wired to any
-// button yet.
-const VIEW_OP_SHEET_W = 1774, VIEW_OP_SHEET_H = 887
-const VIEW_OP_CELLS = {
-  top:   { x: 443,  y: 389, w: 205, h: 203 },
-  front: { x: 790,  y: 393, w: 198, h: 197 },
-  side:  { x: 1176, y: 389, w: 107, h: 201 },
-  iso:   { x: 1453, y: 383, w: 204, h: 225 },
-}
-const VIEW_OP_ICON_H = 36   // Down from 52 — the whole View row (icon+label+padding) was eating a disproportionate amount of the top toolbar for a secondary, occasional-use control
-
-function viewOpIconStyle(id) {
-  const cell = VIEW_OP_CELLS[id]
-  if (!cell) return null
-  const scale = VIEW_OP_ICON_H / cell.h
-  return {
-    width: cell.w * scale, height: VIEW_OP_ICON_H,
-    backgroundImage: `url(${viewOpIconSheet})`,
-    backgroundRepeat: 'no-repeat',
-    backgroundSize: `${VIEW_OP_SHEET_W * scale}px ${VIEW_OP_SHEET_H * scale}px`,
-    backgroundPosition: `-${cell.x * scale}px -${cell.y * scale}px`,
-    imageRendering: 'pixelated',
-  }
-}
 
 // Helpers for activePlane which can be 'XY'|'XZ'|'YZ' or a FacePlane object
 function getPlaneColor(ap) {
@@ -1041,13 +1010,6 @@ function CutoutGlyph({ color='#7fa8cc' }) {
 
 function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, onEditShellThickness, onEditLoft, hiddenSolidIds, onToggleBodyVisible, onConvertSketch, onPatternCutout, hasSolids }) {
   const [editingName, setEditingName] = useState(null)
-  const [editDepthId, setEditDepthId] = useState(null)
-  const [depthVal, setDepthVal]       = useState('')
-
-  function startRename(id, currentName) {
-    setEditingName(id)
-    // handled inline
-  }
 
   // A grouped (multi-body) cutout is several features under the hood (one per
   // solid it spans) but should read as ONE row — collapse to the first member
@@ -1135,7 +1097,6 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           const isBodyOwner = isExtrude && !isLocked &&
             ['extrude','revolve','loft','sweep','spring','mirror','join','import'].includes(feat.operation || 'extrude')
           const isBodyHidden = isBodyOwner && hiddenSolidIds?.includes(feat.solidId)
-          const editingDepth = editDepthId === feat.id
 
           const rowKind = isSketch ? 'sketch' : isShell ? 'shell' : isFillet ? 'fillet' : isMirror ? 'mirror'
             : isJoin ? 'join' : isLoft ? 'loft' : isSweep ? 'sweep' : isSpring ? 'spring' : feat.operation === 'cutout' ? 'cutout'
@@ -1571,11 +1532,10 @@ const App3D = forwardRef(function App3D(props, ref) {
   const includeEdgePanelDrag = useDraggablePanel()
 
   const hiddenEditSolidRef=useRef(null)   // solid parked here while its sketch is being edited
-  const [extrudeColor,setExtrudeColor]=useState('#3a7bd5')
+  const [extrudeColor]=useState('#3a7bd5')
   const [colorSel, setColorSel] = useState([])   // [solidId, ...] accumulated picks, "color" tool
   const colorPanelDrag = useDraggablePanel()
   const [cachedProfiles,setCachedProfiles]=useState([])
-  const sketchBeforePlaneRef=useRef(null)
   const lastClickClientRef=useRef({x:0,y:0})
 
   // "What do you want to do with this?" prompt shown after Finish on a bare
@@ -1667,7 +1627,6 @@ const App3D = forwardRef(function App3D(props, ref) {
   }, [features])
   const [activeSketchId,setActiveSketchId]=useState(null)  // which sketch is being edited
   const featureCountRef=useRef({sketch:0,extrude:0,cutout:0,fillet:0,chamfer:0,mirror:0,join:0,loft:0,sweep:0,spring:0,shell:0})       // for auto-naming
-  const [treeCollapsed,setTreeCollapsed]=useState(false)
 
   const viewport3dRef=useRef(null)
   const getViewCubeAxes=useCallback(()=>viewport3dRef.current?.getCameraAxes?.()??null,[])
@@ -1910,8 +1869,6 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [dimToolStep,setDimToolStep]=useState(0)    // 0=idle, 1=got p1, 2=got p2
   const [dimToolPts,setDimToolPts]=useState([])     // clicked points so far
   const [dimToolPreview,setDimToolPreview]=useState(null)  // live preview
-  const [dimEditIdx,setDimEditIdx]=useState(null)   // index of dim being edited
-  const [dimEditText,setDimEditText]=useState('')   // override text
 
   // Join tool state
   const [joinFirstPt,setJoinFirstPt]=useState(null)   // {lineIdx, end:'x1y1'|'x2y2', x, y} or spline equiv
@@ -2609,7 +2566,6 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
   function resetDim(){
     setDimToolStep(0);setDimToolPts([]);setDimToolPreview(null)
-    setDimEditIdx(null);setDimEditText('')
   }
   function resetJoin(){
     setJoinFirstPt(null);setJoinHover(null)
@@ -3148,24 +3104,6 @@ const App3D = forwardRef(function App3D(props, ref) {
     ctx.restore()
   }
 
-  // Apply entity style to canvas context
-  function applyEntityStyle(ctx, entity, sc, baseColor, baseLineWidth) {
-    const s = entity?.style
-    if (s==='construction') {
-      ctx.strokeStyle = baseColor==='#222' ? '#aaa' : baseColor
-      ctx.lineWidth = Math.min(baseLineWidth, 0.8/sc)
-      ctx.setLineDash([])
-    } else if (s==='dashed') {
-      ctx.strokeStyle = baseColor
-      ctx.lineWidth = baseLineWidth
-      ctx.setLineDash([8/sc, 4/sc])
-    } else {
-      ctx.strokeStyle = baseColor
-      ctx.lineWidth = baseLineWidth
-      ctx.setLineDash([])
-    }
-  }
-
   // ── OVERLAY DRAW ──
   // Geometry lives in Three.js (Viewport3D). Tool overlays (snap indicators,
   // rubber-band lines, selection boxes, labels, previews) are drawn onto a
@@ -3301,7 +3239,6 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     // In sketch mode: use dark colours on white background
     const sketchLineColor = sketchMode ? '#111111' : '#2196F3'
-    const sketchHighlight = sketchMode ? '#0066cc' : '#64B5F6'
 
     // ── Sweep profile-plane markers (always visible, not hover-gated) ──────
     // Two clearly DIFFERENT markers, so the plane's local origin (0,0) — the
@@ -8749,10 +8686,6 @@ const App3D = forwardRef(function App3D(props, ref) {
     return true
   }
 
-  // No-op — kept for compat
-  function handleExtrudeHandleMouseDown(e) {}
-  function handleExtrudeDragEnd(e) {}
-
   // Use a ref so handleExtrudeDepthKey always sees current extrudeState
   const extrudeStateRef = useRef(null)
   useEffect(() => { extrudeStateRef.current = extrudeState }, [extrudeState])
@@ -9053,20 +8986,6 @@ const App3D = forwardRef(function App3D(props, ref) {
     const sketchGeom = { sketchLines: savedLines, sketchCircles: savedCircles, sketchArcs: savedArcs, sketchSplines: savedSplines }
 
     try {
-      const workerParams = {
-        pts,
-        depthMm,
-        planeId,
-        direction,   // captured above — not read from extrudeState after null
-        circle: pts.circleMeta || null,  // true circle → real curve, not a polygon prism
-        ...(facePlane ? {
-          normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z],
-          origin: [pxToMm(facePlane.origin.x), pxToMm(facePlane.origin.y), pxToMm(facePlane.origin.z)],
-          uAxis:  [facePlane.uAxis.x,  facePlane.uAxis.y,  facePlane.uAxis.z],
-          vAxis:  [facePlane.vAxis.x,  facePlane.vAxis.y,  facePlane.vAxis.z],
-        } : {}),
-      }
-
       const lastSketch = [...features].reverse().find(f=>f.type==='sketch')
 
       if (isCutout) {
@@ -9675,7 +9594,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       setSolids(prev => prev.map(s =>
         s.id===feat.solidId ? {...s, depth:mmToPx(newDepthMm), depthMm:newDepthMm, group} : s
       ))
-    } catch(err) {
+    } catch {
       const group = buildSolid(feat.profilePts, mmToPx(newDepthMm), feat.planeId, color, feat.facePlane)
       setSolids(prev => prev.map(s =>
         s.id===feat.solidId ? {...s, depth:mmToPx(newDepthMm), depthMm:newDepthMm, group} : s

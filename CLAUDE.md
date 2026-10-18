@@ -8,18 +8,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 npm run dev       # Start Vite dev server (hot reload)
 npm run build     # Production build
 npm run preview   # Preview production build locally
+npm run lint      # ESLint over src/ — must stay at 0 errors (warnings are mostly intentional hook-dependency notes)
 ```
 
-No test suite is configured. ESLint is available via `eslint.config.js`.
+No test suite is configured. `eslint.config.js` documents every rule override (the React Compiler readiness rules are off on purpose).
 
 ## Architecture Overview
 
-This is a browser-based parametric 3D CAD application built with React + Vite. The entry point is `src/main.jsx` → `src/App3D.jsx`.
+This is a browser-based parametric 3D CAD application built with React + Vite. The entry point is `src/main.jsx` → `src/AppShell.jsx`, which hosts two apps behind a top-bar tab switch.
 
-### Two app variants
+### Two apps, both live
 
-- **`src/App3D.jsx`** — Active entry point. 3D mode: Three.js viewport, work planes, feature tree, extrude tool, all 2D sketch tools.
-- **`src/App.jsx`** — Legacy 2D-only mode (flat canvas, no 3D). Shares the same tool math but is not mounted in `main.jsx`.
+- **`src/App3D.jsx`** — The "3D MODEL" tab. Three.js viewport, work planes, feature tree, all solid tools, and the 2D sketch tools used inside a sketch.
+- **`src/App.jsx`** — The "DRAWING" tab: a standalone flat 2D drawing app (DXF/PDF output). It is **not** legacy — it is mounted by `AppShell.jsx` — but it carries its own copy of the 2D sketch engine: all 44 of its functions (`handleMouseMove`, `computeEnd`, `resetDrawState`, …) also exist in `App3D.jsx`. **A fix to a sketch tool usually has to be made in both files** (the VERT/HORIZ tracking fix was).
 
 ### Rendering layers (App3D)
 
@@ -72,6 +73,10 @@ All tool mathematics is in pure JS (no React), importable anywhere:
 | `src/tools/scaleMath.js` | Scale/resize geometry |
 | `src/tools/splineMath.js` | Catmull-Rom spline sampling, trim, distance |
 | `src/tools/selectMath.js` | Bounding box, handle hit testing, transform application |
+| `src/tools/patternMath.js` | Rectangular offsets / circular angles for the Pattern tool |
+| `src/tools/sweepProject.js` | Projecting a Sweep path onto a body: resampling, smoothing, profile plane (shared by `App3D.jsx` and `cadWorker.js`) |
+| `src/tools/orthoViewsMath.js` | Converts worker ortho-view output into 2D drawing entities |
+| `src/tools/cloudSave.js` | Classroom cloud save/load via the website's `/api` (same-origin; unavailable in standalone dev) |
 | `src/tools/extendMath.js` | Extend line/arc to nearest intersection |
 | `src/geometry/snap.js` | Geometric snap (endpoint, midpoint, tangent, perpendicular, tracking) |
 | `src/geometry/intersections.js` | All-pairs intersection computation |
@@ -80,8 +85,18 @@ All tool mathematics is in pure JS (no React), importable anywhere:
 
 ### Panel components
 
-`TracerPanel`, `TextPanel`, `PageSetupPanel`, `GuidePanel` are standalone React components in `src/tools/` for their respective overlay dialogs.
+`TracerPanel`, `TextPanel`, `PageSetupPanel`, `GuidePanel`, `PatternPanel`, `SpringPanel` and the other `*Panel.jsx` files are standalone React components in `src/tools/` for their respective overlay dialogs. `ViewCube.jsx` is the clickable orientation cube (with Home button and edge arrows) drawn over the 3D viewport.
 
 ### Work planes
 
 `src/WorkPlanes.js` creates Three.js meshes for XY/XZ/YZ click targets. Clicking a plane sets `activePlane` in `App3D`, triggers a camera tween in `Viewport3D` to snap to that plane's orthographic view, and enters sketch mode. `src/SketchPlane.js` exports `SKETCH_PLANES` (plane definitions) and `sketchToWorld()` for coordinate projection.
+
+### Things that aren't obvious from the file list
+
+- **Sidebar Add/Cut flyouts** — Extrude, Revolve, Loft, Sweep and Spring each have ONE sidebar button; clicking opens a fixed-position `+ add / − cut` flyout (`SHAPE_OPS` and `opFlyout` in `App3D.jsx`). The underlying tool ids (`extrude`/`cutout`, `revolve`/`revolvecut`, `loft3d`/`loftcutout`, `sweep3d`/`sweepcut`, `spring3d`/`springcut`) and their `activate*()` functions are unchanged; `activateSolidTool(id)` maps id → activator. Simple mode hides each advanced *button* (`ADVANCED_SOLID_TOOL_IDS`).
+- **Face sketch frame** — hovering a face draws its bounding frame with a green base line and a yellow dot (`drawSketchFrame` in `Viewport3D.jsx`), computed by `faceHitToPlane(hit, overrideEdge, {frameOnly:true})` so the preview matches the click exactly. The sketch **origin is that frame's bottom-left corner** (round faces keep the centre). `FacePlane.viewCenter` is where the camera looks — keep it when copying/offsetting a `FacePlane` (see the offset-plane helpers and loft/sweep/spring basis code).
+- **Projected Sweep** — a Sweep path projected onto a body is stored as `pathPts3d` (+ `projDir`) instead of `pathPts`; `buildSweepProjected` in `cadWorker.js` fits a cubic B-spline. Anything keyed on `pathPts` (rebuild params, cutout params, tree flags) must also handle `pathPts3d`. Ray-cast points are smoothed first (`smoothPoints3d`) — raw mesh-facet points make OpenCascade's pipe-shell sweep fail.
+- **Pattern** — body copies come from `createTransformedCopy` and inherit the source feature's `groupId`, so the Feature Tree shows one "× N" row. A *cutout* pattern stores `patternXform` (translate/rotate ops) on each copy feature; `cadWorker.js`'s `applyCutXform` applies it to the built cut shape. Copies get their own `patterngroup-` id and hide the edit buttons.
+- **Errors** — the worker turns raw OpenCascade failures (often a bare number) into plain-English reasons in `friendlyCadMessage`; callers prefix them ("Cutout failed: …"). Full details still go to the console.
+- **Step-bar hints** — each tool's `SmartStepBar` `hint` is a short verb-first sentence per step; keep that voice when adding tools.
+- **Dev gotcha** — editing `cadWorker.js` reloads the whole page (the worker restarts), losing in-memory work.

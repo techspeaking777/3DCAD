@@ -759,7 +759,7 @@ self.onmessage = async function(e) {
         shape = isChamferOp ? base.chamfer(params.radius, edgeFilter) : base.fillet(params.radius, edgeFilter)
       } catch(e) {
         // OCC often throws a bare number here (no .message) when the radius won't fit.
-        throw new Error(`${opLabel} failed: ${e?.message || 'radius too large for the selected edge(s) — try a smaller radius'}`)
+        throw new Error(`${opLabel} failed: ${e?.message || 'radius too large for the selected edge(s) — try a smaller radius'}`, { cause: e })
       }
       // BRepFilletAPI_MakeFillet/MakeChamfer can report success while the
       // blend actually self-intersects (radius too large for the local edge
@@ -790,7 +790,7 @@ self.onmessage = async function(e) {
       try {
         shape = applyShell(base, params)
       } catch(e) {
-        throw new Error(`Shell failed: ${e?.message || 'wall thickness too large for this geometry — try a smaller thickness'}`)
+        throw new Error(`Shell failed: ${e?.message || 'wall thickness too large for this geometry — try a smaller thickness'}`, { cause: e })
       }
       // Same self-intersection guard fillet3d uses — a wall thickness too
       // large for the local geometry can report success while the offset
@@ -810,7 +810,7 @@ self.onmessage = async function(e) {
         if (!params.base) throw new Error(`Step1-MISS: base not in store and no fallback params`)
         console.warn('[cadWorker] shapeStore miss — rebuilding base from params')
         try { base = await buildBase(params.base) }
-        catch(e) { throw new Error(`Step1-BASE: ${e.message} | planeId=${params.base.planeId} dir=${params.base.direction}`) }
+        catch(e) { throw new Error(`Step1-BASE: ${e.message} | planeId=${params.base.planeId} dir=${params.base.direction}`, { cause: e }) }
       }
       let cutShape
       try {
@@ -822,12 +822,12 @@ self.onmessage = async function(e) {
         // side to avoid coincident-face OCC failures (see buildCutShape).
         cutShape = buildCutShape(clampCutDepth(params.cut, params.base))
       } catch(e) {
-        throw new Error(`Step2-CUT: ${e.message} | planeId=${params.cut.planeId} facePlane=${!!params.cut.normal} store=${fromStore}`)
+        throw new Error(`Step2-CUT: ${e.message} | planeId=${params.cut.planeId} facePlane=${!!params.cut.normal} store=${fromStore}`, { cause: e })
       }
       try {
         shape = cutTolerant(base, cutShape)
       } catch(e) {
-        throw new Error(`Step3-BOOL: ${e.message} | store=${fromStore}`)
+        throw new Error(`Step3-BOOL: ${e.message} | store=${fromStore}`, { cause: e })
       }
       shapeStore.set(params.baseSolidId, shape)
     } else if (type==='mirrorShape') {
@@ -1451,7 +1451,7 @@ function buildSweepProjected({ pathPts3d, projDir, profilePts, profileCircle }) 
   let shape
   try {
     shape = genericSweep(profile.wire, spine, { forceProfileSpineOthogonality: true })
-  } catch (err) {
+  } catch {
     // OCC throws a bare numeric pointer here (nothing readable) when the pipe
     // shell self-intersects — i.e. the path bends tighter than the profile is wide.
     throw new Error('Sweep failed: the projected path bends too sharply for this profile — use a smoother path or a smaller profile')
@@ -1604,7 +1604,7 @@ function buildExtrude({ pts, depthMm, planeId, direction='both',
       // (confirmed live: an 85°-on-5mm draft threw something with no
       // .message at all) — fall back to a message that's still actionable
       // instead of surfacing "Draft failed: undefined".
-      throw new Error(`Draft failed: ${e?.message || 'angle too steep for this depth — try a smaller angle'}`)
+      throw new Error(`Draft failed: ${e?.message || 'angle too steep for this depth — try a smaller angle'}`, { cause: e })
     }
     // Shape.draft() has no built-in validity check (unlike fillet/chamfer, which
     // throw on an empty edge selection) — it silently returns whatever OCC built

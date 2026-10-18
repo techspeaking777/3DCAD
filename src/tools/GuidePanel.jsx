@@ -1,5 +1,4 @@
 // GuidePanel.jsx — Step-by-step guided mode panel
-import React from 'react'
 
 // ── SVG Diagrams ──────────────────────────────────────────────────────────────
 // Small inline SVG sketches shown alongside each step

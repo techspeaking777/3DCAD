@@ -5,7 +5,7 @@
 // to move from "still picking entities" into the placement phase — selection
 // count is open-ended here (unlike Fillet's fixed 2), so some explicit
 // confirm step is unavoidable; this just makes it visible and clickable.
-import React, { useEffect, useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import { useDraggablePanel, DragHandle } from './useDraggablePanel.jsx'
 
 const stepBtnStyle={

@@ -14,7 +14,7 @@ import { sampleSpline, nearestSpline, computeSplineTrimPreview, performSplineTri
 import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform } from './tools/selectMath.js'
 import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine, perpLabelOffset } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
-import { saveJSON, loadJSON, exportDXF, parseDXF, saveProjectAs, canPickSaveLocation } from './tools/saveLoad.js'
+import { loadJSON, exportDXF, parseDXF, saveProjectAs, canPickSaveLocation } from './tools/saveLoad.js'
 import TracerPanel from './tools/TracerPanel.jsx'
 import TextPanel from './tools/TextPanel.jsx'
 import PageSetupPanel from './tools/PageSetupPanel.jsx'
@@ -148,8 +148,6 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   const [dimToolStep,setDimToolStep]=useState(0)    // 0=idle, 1=got p1, 2=got p2
   const [dimToolPts,setDimToolPts]=useState([])     // clicked points so far
   const [dimToolPreview,setDimToolPreview]=useState(null)  // live preview
-  const [dimEditIdx,setDimEditIdx]=useState(null)   // index of dim being edited
-  const [dimEditText,setDimEditText]=useState('')   // override text
 
   // Join tool state
   const [joinFirstPt,setJoinFirstPt]=useState(null)   // {lineIdx, end:'x1y1'|'x2y2', x, y} or spline equiv
@@ -430,7 +428,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           // Anchor point stays fixed — shift centre
           // The anchor handle is on the circle's bbox edge
           // New centre = anchor + offset scaled to new radius
-          const ocx=c.cx,ocy=c.cy,or=c.r
+          const ocx=c.cx,ocy=c.cy
           const fromAnchorX=ocx-anchorPt.x,fromAnchorY=ocy-anchorPt.y
           const dist=Math.hypot(fromAnchorX,fromAnchorY)||1
           const newCx=anchorPt.x+(fromAnchorX/dist)*newR
@@ -530,7 +528,6 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   }
   function resetDim(){
     setDimToolStep(0);setDimToolPts([]);setDimToolPreview(null)
-    setDimEditIdx(null);setDimEditText('')
   }
   function resetJoin(){
     setJoinFirstPt(null);setJoinHover(null)
@@ -1548,7 +1545,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     // Draw dim tool preview
     if (tool==='dim'&&dimToolPreview&&mousePos){
       ctx.save();ctx.strokeStyle='#E91E63';ctx.fillStyle='#E91E63';ctx.lineWidth=0.8/sc;ctx.setLineDash([4/sc,2/sc])
-      const LW=0.8/sc,ARR=6/sc,FS=11/sc
+      const ARR=6/sc,FS=11/sc
       const p=dimToolPreview
       if (p.kind==='linear'){
         const dx=p.x2-p.x1,dy=p.y2-p.y1,len=Math.hypot(dx,dy)
@@ -1649,7 +1646,6 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           ctx.setLineDash([])
           // Handles
           const handles=getBBoxHandles(bbox)
-          const handleR=6/sc
           const hovHandle=mousePos?hitTestHandles(mousePos,handles,12/sc):null
           Object.values(handles).forEach(h=>{
             ctx.save();ctx.translate(h.x,h.y);ctx.scale(1/sc,1/sc)

@@ -15,7 +15,6 @@
  */
 
 import * as THREE from 'three'
-import { sketchToWorld } from '../SketchPlane.js'
 import { sampleSpline } from './splineMath.js'
 
 const CLOSE_TOL = 4   // world units — endpoints within this distance are "connected"

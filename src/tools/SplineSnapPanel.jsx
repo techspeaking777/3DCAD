@@ -1,7 +1,6 @@
 // SplineSnapPanel.jsx — kid-friendly popover shown next to the Spline toolbar button.
 // Lets a child see and click the Open/Closed (C) toggle, while staying in sync
 // with the same keyboard shortcut.
-import React from 'react'
 import { useDraggablePanel, DragHandle } from './useDraggablePanel.jsx'
 
 export default function SplineSnapPanel({toolColor, splineClosed, onToggleC, splinePoints}){

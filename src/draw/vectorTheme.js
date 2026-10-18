@@ -4,24 +4,6 @@
 // (App3D.jsx's drawExtrudePreview). Deliberately NOT used by the sketch
 // environment, which keeps its own pixel-art theme.
 
-// Per-tool accent colors — matches the existing sidebar label colors so the
-// icon, the button outline, and the label all agree.
-export const VECTOR_GLOW = {
-  extrude:  '#FBDA2D',
-  cutout:   '#FF4D6D',
-  fillet3d: '#A470F2',
-  mirror3d: '#8E65F3',
-  loft3d:   '#FBDA2D',
-  join3d:   '#FFEE88',
-}
-
-// CSS drop-shadow glow for SVG icons — cheap, composited, no per-element
-// <filter> needed. Two layered shadows: a tight bright core + a wider soft
-// halo, mimicking a CRT vector monitor's phosphor bleed.
-export function svgGlow(color, blur = 5) {
-  return { filter: `drop-shadow(0 0 ${blur}px ${color}) drop-shadow(0 0 ${blur * 2.5}px ${color}66)` }
-}
-
 // Strokes pathFn(ctx) twice on a 2D canvas context: once wide/blurred/faint
 // for the glow halo, once thin/crisp for the bright core line. pathFn must
 // only build the path (beginPath + moveTo/lineTo/etc, no stroke/fill) since

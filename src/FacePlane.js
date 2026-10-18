@@ -868,22 +868,3 @@ export function fitArcToRun(runPts) {
   return { cx, cy, r, startAngle: a1raw, endAngle: e0 }
 }
 
-/** Converts raw 3D boundary loops (from extractFaceBoundaryLoops3D) to sketch-space {x1,y1,x2,y2} segments. */
-function loopsToSketchSegments(loops, facePlane) {
-  const keyOf = keyOf3D
-  const segments = []
-  loops.forEach(loop => {
-    for (let i=0; i<loop.length-1; i++) {
-      const p1 = facePlane.worldToSketch(loop[i])
-      const p2 = facePlane.worldToSketch(loop[i+1])
-      segments.push({ x1:p1.x, y1:p1.y, x2:p2.x, y2:p2.y })
-    }
-    const first=loop[0], last=loop[loop.length-1]
-    if (keyOf(first)!==keyOf(last)) {
-      const p1 = facePlane.worldToSketch(last)
-      const p2 = facePlane.worldToSketch(first)
-      segments.push({ x1:p1.x, y1:p1.y, x2:p2.x, y2:p2.y })
-    }
-  })
-  return segments
-}

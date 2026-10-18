@@ -123,7 +123,7 @@ export function performTrim(preview,lines,circles,arcs) {
     if ((1-preview.tEnd)*len > minLen) nl.push({...l,x1:l.x1+preview.tEnd*dx,y1:l.y1+preview.tEnd*dy,x2:l.x2,y2:l.y2})
   }
   if (preview.kind==='circle') {
-    const {cx,cy,r,arcStart,arcEnd,allAngles}=preview
+    const {arcStart,arcEnd,allAngles}=preview
     const orig=circles[preview.idx]  // spread to preserve plane, style, etc.
     nc=circles.filter((_,i)=>i!==preview.idx)
     const n=allAngles.length

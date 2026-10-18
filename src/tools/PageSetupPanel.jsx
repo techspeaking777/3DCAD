@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState } from 'react'
 
 // Paper sizes in mm [width, height] portrait
 const PAPER_SIZES = {
@@ -12,7 +12,7 @@ const PAPER_SIZES = {
 
 const SCALES = ['Fit to page', '1:1', '1:2', '1:5', '1:10', '1:20', '1:50', '1:100', '1:200', '1:500']
 
-export default function PageSetupPanel({ lines, circles, arcs, splines, dims=[], pxToMm, mmToPx, pageConfig, setPageConfig, onClose }) {
+export default function PageSetupPanel({ lines, circles, arcs, splines, dims=[], pxToMm, pageConfig, setPageConfig, onClose }) {
   // size/orientation/margin are read/written straight through pageConfig
   // (the same state App.jsx's on-canvas page-border preview already uses)
   // instead of a separate local copy — previously these were two

@@ -1,6 +1,5 @@
 import { TRIM_DIST, norm2pi, zoomRef } from '../constants.js'
 import { angleOnArc } from '../geometry/intersections.js'
-import { distToSeg } from './trimDelete.js'
 import { splineToPolyline } from './splineMath.js'
 
 function extendedIntersections(lineIdx, lines, circles, arcs, splines = []) {

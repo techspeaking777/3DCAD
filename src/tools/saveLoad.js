@@ -488,7 +488,7 @@ export function parseDXF(dxfText, scale=2) {
   }
 
   // Find ENTITIES section
-  let inEntities = false, inModel = true
+  let inEntities = false
   let i = 0
   while (i < pairs.length) {
     const [code, val] = pairs[i]
@@ -502,7 +502,6 @@ export function parseDXF(dxfText, scale=2) {
       i++
       // Read all properties of this entity
       const props = {}
-      const vertices = []  // for POLYLINE/LWPOLYLINE
       while (i < pairs.length && pairs[i][0] !== 0) {
         const [c,v] = pairs[i]
         if (c===8)  props.layer=v
@@ -552,7 +551,6 @@ export function parseDXF(dxfText, scale=2) {
         // Actually LWPOLYLINE stores coords differently - handle inline
         // Re-parse from raw pairs for this entity
         const pts = []
-        let ex=null,ey=null
         // pairs[i] is now at next entity — look back
         // We'll collect from props which only captured last x,y
         // Better: re-collect all 10/20 pairs for this entity
@@ -610,8 +608,8 @@ function parseDXFMultiVertex(dxfText, scale) {
 
     if (code===0 && (val==='LWPOLYLINE'||val==='POLYLINE'||val==='SPLINE')) {
       const type=val
-      const pts=[], knotX=[], layer_arr=[], linetype_arr=[]
-      let flags=0, closed=false, layer='', linetype=''
+      const pts=[]
+      let flags=0, closed=false, layer=''
       let vx=null,vy=null
 
       while (i < raw.length) {
@@ -628,7 +626,6 @@ function parseDXFMultiVertex(dxfText, scale) {
           continue
         }
         if (c2===8)  layer=v2
-        if (c2===6)  linetype=v2
         if (c2===70) flags=parseInt(v2)
         if (c2===10) { if(vx!==null&&vy!==null)pts.push({x:mm(vx),y:-mm(vy)}); vx=parseFloat(v2);vy=null }
         if (c2===20) { vy=parseFloat(v2); if(vx!==null&&vy!==null&&type==='LWPOLYLINE'){pts.push({x:mm(vx),y:-mm(vy)});vx=null;vy=null} }
@@ -646,12 +643,12 @@ function parseDXFMultiVertex(dxfText, scale) {
         splines_out.push({points:pts,closed,polyline:true,...s})
     }
     else if (code===0 && val==='LINE') {
-      let x1=0,y1=0,x2=0,y2=0,layer='',linetype=''
+      let x1=0,y1=0,x2=0,y2=0,layer=''
       while (i<raw.length) {
         const c2=parseInt(raw[i]?.trim()),v2=raw[i+1]?.trim();i+=2
         if(isNaN(c2))continue
         if(c2===0){i-=2;break}
-        if(c2===8)layer=v2;if(c2===6)linetype=v2
+        if(c2===8)layer=v2
         if(c2===10)x1=parseFloat(v2);if(c2===20)y1=parseFloat(v2)
         if(c2===11)x2=parseFloat(v2);if(c2===21)y2=parseFloat(v2)
       }

@@ -2529,6 +2529,10 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           const nearOrigin=chainOriginRef.current&&segsSoFar>=2&&
             Math.hypot(end.x-chainOriginRef.current.x,end.y-chainOriginRef.current.y)<SNAP_DIST/zoomRef.scale
           const finalEnd=nearOrigin?chainOriginRef.current:end
+          // Clicking the point the segment started from would add a zero-length
+          // line — invisible, but it leaves repeated points in the profile and
+          // used to make OpenCascade fail the extrude. Ignore the click.
+          if (Math.hypot(finalEnd.x-startPoint.x,finalEnd.y-startPoint.y)<1e-6) return
           commit(snapshot())
           setLines(p=>[...p,{x1:startPoint.x,y1:startPoint.y,x2:finalEnd.x,y2:finalEnd.y,...(drawStyle?{style:drawStyle}:{})}])
           if (nearOrigin){

@@ -688,10 +688,26 @@ function segmentLoopIntoPrimitives(loop, facePlane, opts = {}) {
   // Drop a duplicated closing point (loop already returns to its start) so
   // every entry below is a distinct vertex; the loop still closes
   // implicitly from the last point back to the first.
-  const pts = raw.length > 1 && Math.hypot(raw[raw.length-1].x-raw[0].x, raw[raw.length-1].y-raw[0].y) < 1e-6
+  const deduped = raw.length > 1 && Math.hypot(raw[raw.length-1].x-raw[0].x, raw[raw.length-1].y-raw[0].y) < 1e-6
     ? raw.slice(0, -1) : raw
-  const n = pts.length
+  const n = deduped.length
   if (n < 3) return { lines: [], arcs: [] }
+  // Begin the walk at the loop's sharpest genuine corner (turn > 25°), when it
+  // has one. The mesh's own first vertex is arbitrary — it can sit mid-curve,
+  // right beside a tangent join — and classifying a run that starts there is
+  // the fragile case. Starting at a real corner means every curve is entered
+  // and left from a known boundary. A loop with no sharp corner (a circle, a
+  // slot) keeps its original start; the uneven-step guard below covers those.
+  let startIdx = 0, sharpest = 25 * Math.PI / 180
+  for (let i = 0; i < n; i++) {
+    const p0 = deduped[(i + n - 1) % n], p1 = deduped[i], p2 = deduped[(i + 1) % n]
+    const ax = p1.x - p0.x, ay = p1.y - p0.y, bx = p2.x - p1.x, by = p2.y - p1.y
+    const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by)
+    if (la < 1e-9 || lb < 1e-9) continue
+    const turn = Math.acos(Math.max(-1, Math.min(1, (ax*bx + ay*by) / (la*lb))))
+    if (turn > sharpest) { sharpest = turn; startIdx = i }
+  }
+  const pts = startIdx ? [...deduped.slice(startIdx), ...deduped.slice(0, startIdx)] : deduped
 
   // Angular sweep needed to visit ptsIn IN ORDER around fit's centre — NOT
   // just Math.min(max-min, 2pi-(max-min)) on the raw angle set, which was
@@ -751,7 +767,18 @@ function segmentLoopIntoPrimitives(loop, facePlane, opts = {}) {
       // can be long-established and unrelated to whether a curve is
       // starting right now (same "stay local" principle as stepLen above).
       const sane = fit && fit.r > 1e-6 && fit.r < 15 * stepLen
-      if (sane && angleSpan(fit, [a, b, p]) / 2 < maxStepAngle) { run.mode = 'arc'; return true }
+      // A tessellated arc is made of chords of roughly equal length. Two steps
+      // of wildly different length (a short curve chord followed by a long
+      // straight edge — exactly what you get at a TANGENT join, e.g. a slot's
+      // or D-shape's rounded end meeting its straight side) are an arc
+      // meeting a line, not the start of one gentle arc. Without this, a walk
+      // that happened to begin just before such a join fitted one huge fake
+      // arc through the short chord and the long edge, swallowing the edge
+      // (its snap points vanished) — whether it happened depended entirely on
+      // which mesh vertex the loop walk started at.
+      const lenAB = Math.hypot(b.x-a.x, b.y-a.y), lenBP = Math.hypot(p.x-b.x, p.y-b.y)
+      const evenSteps = Math.max(lenAB, lenBP) <= 3 * Math.max(1e-9, Math.min(lenAB, lenBP))
+      if (sane && evenSteps && angleSpan(fit, [a, b, p]) / 2 < maxStepAngle) { run.mode = 'arc'; return true }
       // Neither colinear nor a sane arc start — p doesn't belong with [a,b] at
       // all (e.g. p is actually the first point of a new curve on the far
       // side of a tangent seam). Reject rather than defaulting to 'line': the
@@ -795,6 +822,25 @@ function segmentLoopIntoPrimitives(loop, facePlane, opts = {}) {
   }
   delete cur._next
   runs.push(cur)
+
+  // A walk that begins right at a tangent join leaves a 2-point leading
+  // fragment [p0, p1] that was never classified — it is just one more chord of
+  // the trailing run (whose last point IS p0). Hand p1 to that run when it
+  // lies on it, instead of emitting a stray short line.
+  if (runs.length > 1) {
+    const f0 = runs[0], l0 = runs[runs.length-1]
+    if (f0.mode === null && f0.pts.length === 2 && l0.mode) {
+      const q = f0.pts[1], lastP = l0.pts[l0.pts.length-1]
+      const fits = l0.mode === 'line'
+        ? distToLine(q, l0.pts[0], lastP) < lineTol * Math.max(1, Math.hypot(q.x-lastP.x, q.y-lastP.y))
+        : (() => {
+            const fit = fitCircleLeastSquares(l0.pts)
+            if (!fit || !(fit.r > 1e-6)) return false
+            return Math.abs(Math.hypot(q.x-fit.cx, q.y-fit.cy) - fit.r) / fit.r < radiusTol
+          })()
+      if (fits) { l0.pts.push(q); runs.shift() }
+    }
+  }
 
   // Merge wraparound: the walk's first and last run may really be one run
   // split by the arbitrary starting vertex — only when they ended up the

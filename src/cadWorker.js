@@ -1240,23 +1240,35 @@ function buildMixedProfile(sketcher, pts, curveSegments, close=true) {
   const n = pts.length
   const anchor = toMm(pts[0])
   sketcher.movePointerTo(anchor)
+  // Where the pen currently sits (mm). A line to the SAME point would be a
+  // zero-length edge, which OpenCascade can't build a face from — it fails the
+  // whole extrude. They do occur in real sketches (a double-click while
+  // drawing leaves a zero-length line, which detectProfiles turns into
+  // repeated points), so such lines are skipped rather than emitted.
+  let cur = anchor
   let i = 0, segPtr = 0
   while (i < n) {
     const seg = (segPtr < segs.length && segs[segPtr].startIdx === i) ? segs[segPtr] : null
     if (seg) {
-      if (seg.type === 'spline') emitBezierChain(sketcher, seg.controlPoints)
-      else if (seg.type === 'arc') {
+      if (seg.type === 'spline') {
+        emitBezierChain(sketcher, seg.controlPoints)
+        cur = toMm(seg.controlPoints[seg.controlPoints.length - 1])
+      } else if (seg.type === 'arc') {
         // Last segment overall, and its jump reaches (or passes) the end of
         // pts — nothing but close() follows, so this arc's end IS the wire's
         // closing point back onto anchor. Never true when close=false.
         const isLastBeforeClose = close && segPtr === segs.length - 1 && (seg.startIdx + seg.count) >= n
         emitArc(sketcher, seg, isLastBeforeClose ? anchor : null)
+        cur = toMm({ x: seg.cx + Math.cos(seg.endAngle)*seg.r, y: seg.cy + Math.sin(seg.endAngle)*seg.r })
       }
       i = seg.startIdx + seg.count
       segPtr++
     } else {
       i++
-      if (i < n) sketcher.lineTo(toMm(pts[i]))
+      if (i < n) {
+        const next = toMm(pts[i])
+        if (Math.hypot(next[0]-cur[0], next[1]-cur[1]) > 0.005) { sketcher.lineTo(next); cur = next }
+      }
     }
   }
   return close ? sketcher.close() : sketcher.done()

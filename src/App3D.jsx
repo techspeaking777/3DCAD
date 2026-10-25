@@ -8034,11 +8034,54 @@ const App3D = forwardRef(function App3D(props, ref) {
   // the mouse — a through-all cut now respects direction (only removes
   // material on the chosen side, see cutDirection in commitExtrude), so
   // there has to be a way to flip it. Revolve's angle stays popup-only.
+  // Marker for the depth snap: the world point (mm) the cursor is snapped to,
+  // drawn as an orange dot by the extrude preview loop (drawExtrudeSnapDot).
+  // A ref, not state — it changes on every mouse move and the loop that draws
+  // it clears the shared canvas every frame, so it has to be read there.
+  const extrudeSnapRef = useRef(null)
+
+  // The corner / edge-midpoint / circle-centre under the cursor, expressed as a
+  // signed distance `s` (mm) from the sketch plane along the same normal the
+  // depth drag uses (so s >= 0 reads as 'front', s < 0 as 'back', exactly like
+  // moving the mouse to either side of the plane). null when nothing snappable
+  // is under the cursor. Reuses raycastSolidEdges / getEdgeSnapCandidates, which
+  // pick edges by screen proximity (and ignore occlusion, so an edge on the far
+  // side of a solid can be snapped to — which is the point of "extrude to the
+  // far edge").
+  function extrudeDepthSnap(e, vp, p) {
+    const edgeHit = vp.raycastSolidEdges?.(e.clientX, e.clientY)
+    if (edgeHit?.edgeId == null) return null
+    const nearest = nearestSnapCandidate(getEdgeSnapCandidates(vp, edgeHit.solidId, edgeHit.edgeId), edgeHit.point)
+    if (!nearest) return null
+    const fp = p.facePlane
+    // Normals match Viewport3D.planeExtrudeDirection (XZ's is -Y, see its comment).
+    const n = fp?.normal ? [fp.normal.x, fp.normal.y, fp.normal.z]
+      : ({ XY:[0,0,1], XZ:[0,-1,0], YZ:[1,0,0] }[p.planeId] || [0,0,1])
+    const o = fp?.origin ? [pxToMm(fp.origin.x), pxToMm(fp.origin.y), pxToMm(fp.origin.z)] : [0,0,0]
+    const [x, y, z] = nearest.point
+    return { s: (x-o[0])*n[0] + (y-o[1])*n[1] + (z-o[2])*n[2], point: nearest.point }
+  }
+
+  // Orange dot at the snapped point, drawn on top of the extrude preview.
+  function drawExtrudeSnapDot(vp, point) {
+    const oc = vp.getExtrudePreviewCanvas(); if (!oc) return
+    const ctx = oc.getContext('2d')
+    const SCALE = 2
+    const sp = vp.worldToScreen(point[0]*SCALE, point[1]*SCALE, point[2]*SCALE)
+    if (!sp) return
+    ctx.save()
+    ctx.setTransform(1,0,0,1,0,0)
+    ctx.fillStyle = '#FF9800'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5
+    ctx.beginPath(); ctx.arc(sp.x, sp.y, 6, 0, Math.PI*2); ctx.fill(); ctx.stroke()
+    ctx.restore()
+  }
+
   function handleExtrudeDragMove(e) {
     if (!extrudeState?.armed) return
     extrudeMouseRef.current = { x: e.clientX, y: e.clientY }
     setSolids(prev => prev.filter(s => s.id !== '__preview__'))
     previewSolidRef.current = null
+    extrudeSnapRef.current = null   // re-set below only when the cursor is on a snap point
 
     if (extrudeState.revolveAxis) return
     const p = extrudeAnimParamsRef.current
@@ -8066,14 +8109,27 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     const screenPxPerMm = getScreenPxPerMm(vp, p.planeId, p.facePlane)
     if (!screenPxPerMm) return
-    let mm = Math.abs(proj) / screenPxPerMm
-    if (gridSnap) mm = Math.round(mm / gridSizeMm) * gridSizeMm
-    mm = Math.max(gridSnap ? gridSizeMm : 0.1, mm)
+    // Hovering a corner / edge midpoint / circle centre on any solid snaps the
+    // depth so the extrusion's end face passes exactly through that point
+    // (same point-finder the Offset Plane step uses). It wins over grid
+    // rounding, and is skipped when the user has typed an exact depth.
+    const snap = extrudeState.depthLocked ? null : extrudeDepthSnap(e, vp, p)
+    let mm, signed = proj
+    if (snap) {
+      // 'both' extends the same distance each way, so total depth is double.
+      mm = Math.max(0.1, Math.abs(snap.s) * (extrudeState.direction === 'both' ? 2 : 1))
+      signed = snap.s
+      extrudeSnapRef.current = { point: snap.point }
+    } else {
+      mm = Math.abs(proj) / screenPxPerMm
+      if (gridSnap) mm = Math.round(mm / gridSizeMm) * gridSizeMm
+      mm = Math.max(gridSnap ? gridSizeMm : 0.1, mm)
+    }
     const mmStr = String(Math.round(mm * 100) / 100)
 
     setExtrudeState(prev => {
       if (!prev?.armed) return prev
-      const nextDir = prev.direction === 'both' ? 'both' : (proj >= 0 ? 'front' : 'back')
+      const nextDir = prev.direction === 'both' ? 'both' : (signed >= 0 ? 'front' : 'back')
       // depthLocked (set when the user types into the depth box directly —
       // see its onChange) means they typed an exact value on purpose; the
       // mouse should still flip which side it's on (that's the whole point
@@ -8264,6 +8320,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   function cancelExtrudeAnim() {
     if (extrudeAnimRef.current) { cancelAnimationFrame(extrudeAnimRef.current); extrudeAnimRef.current = null }
     extrudeAnimParamsRef.current = null
+    extrudeSnapRef.current = null
   }
   function startExtrudeAnimLoop() {
     cancelExtrudeAnim()
@@ -8294,6 +8351,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           }
           drawExtrudePreview(p.vp, p.profilePts, p.planeId, dir, centScreen,
             p.depthMm, p.direction, p.opType, p.color, p.facePlane, eased)
+          if (extrudeSnapRef.current) drawExtrudeSnapDot(p.vp, extrudeSnapRef.current.point)
         }
       }
       extrudeAnimRef.current = requestAnimationFrame(frame)
@@ -12437,8 +12495,8 @@ const App3D = forwardRef(function App3D(props, ref) {
               const isCut = extrudeTool === 'cutout' || extrudeTool === 'revolvecut'
               if (extrudeState) {
                 if (isRev) return 'Choose how far to spin it. 360° makes a full solid.'
-                return isCut ? 'Type a depth, or choose Through All, then press Enter.'
-                             : 'Drag or type how far to extrude, then press Enter.'
+                return isCut ? 'Type a depth, or choose Through All, then press Enter. Hover a corner, midpoint or centre to snap to it.'
+                             : 'Drag or type how far to extrude, then press Enter. Hover a corner, midpoint or centre to snap to it.'
               }
               if (sketchMode) {
                 if (isRev) return 'Draw half of the shape, plus an axis line to spin it around, then press Finish.'

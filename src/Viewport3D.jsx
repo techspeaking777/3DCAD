@@ -365,6 +365,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     width, height,
     lines=[], circles=[], arcs=[], splines=[],
     solids=[],
+    xray=false,           // true: faces go near-transparent and every edge shows through
     features=[],          // committed sketch features for rendering
     activeSketchId=null,  // id of sketch being edited (others rendered greyed)
     style: cssProp,
@@ -994,6 +995,23 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       }
     })
   }, [solids])
+
+  // ── X-ray: see every edge through the solids ──────────────────────────────
+  // Faces fade to a faint tint and stop writing depth, and the black edge
+  // lines stop depth-testing, so back edges show through. A pure view setting
+  // — nothing about the model changes. Runs on `solids` too so a freshly
+  // rebuilt body (new materials from cadMesh.js) picks the mode up straight
+  // away. Hidden solids are included so un-hiding one mid-X-ray looks right.
+  useEffect(() => {
+    solids.forEach(solid => {
+      if (!solid.group?.userData?.isReplicadSolid) return
+      solid.group.traverse(obj => {
+        if (!obj.material) return
+        if (obj.userData?.isSolidEdge) obj.material.depthTest = !xray
+        else if (obj.isMesh) { obj.material.opacity = xray ? 0.12 : 0.9; obj.material.depthWrite = !xray }
+      })
+    })
+  }, [xray, solids])
 
   // ── sketch mode: white background, grid follows the GRID toolbar toggle ───
 

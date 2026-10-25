@@ -384,6 +384,30 @@ export function IconMeasure3D({ color = '#4FC3F7', size = 70 }) {
   )
 }
 
+// X-ray toggle — a skull over crossed bones. Dim when off, glowing cyan when on.
+export function IconXray3D({ color = '#7DF9FF', size = 70, active = false }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={active ? glow(color) : undefined}>
+      {/* crossed bones behind the skull, knobbed at each end */}
+      <line x1="12" y1="52" x2="58" y2="66" stroke={color} strokeWidth="3.5" strokeLinecap="round" opacity="0.7"/>
+      <line x1="58" y1="52" x2="12" y2="66" stroke={color} strokeWidth="3.5" strokeLinecap="round" opacity="0.7"/>
+      {[[12,52],[58,52],[12,66],[58,66]].map(([x,y]) => <circle key={x+'-'+y} cx={x} cy={y} r="3" fill={color} opacity="0.7"/>)}
+      {/* cranium + jaw */}
+      <path d="M35 5 C20 5 12 15 12 27 C12 34 15 38 20 41 L20 48 L50 48 L50 41 C55 38 58 34 58 27 C58 15 50 5 35 5 Z"
+        fill="#0d0d1a" stroke={color} strokeWidth="2.5" strokeLinejoin="round"/>
+      {/* eye sockets */}
+      <ellipse cx="26" cy="28" rx="6" ry="7" fill={color}/>
+      <ellipse cx="44" cy="28" rx="6" ry="7" fill={color}/>
+      {/* nose */}
+      <path d="M35 34 L31.5 41 L38.5 41 Z" fill={color}/>
+      {/* teeth */}
+      <line x1="27.5" y1="43" x2="27.5" y2="48" stroke={color} strokeWidth="2"/>
+      <line x1="35" y1="43" x2="35" y2="48" stroke={color} strokeWidth="2"/>
+      <line x1="42.5" y1="43" x2="42.5" y2="48" stroke={color} strokeWidth="2"/>
+    </svg>
+  )
+}
+
 export function IconSweep3D({ color = '#7ED957', size = 70 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>

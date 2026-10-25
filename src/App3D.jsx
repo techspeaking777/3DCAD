@@ -52,7 +52,7 @@ import {
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
   IconUndo, IconRedo, IconFitView, IconReframe, IconNew, IconSave, IconLoad, IconCloudSave, IconCloudLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
   IconIncludeEdge,
-  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D, IconRevolve3D, IconSpring3D, IconShell3D, IconPattern3D,
+  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D, IconRevolve3D, IconSpring3D, IconShell3D, IconPattern3D, IconXray3D,
 } from './draw/ToolIcons.jsx'
 import { glowStroke, glowFill } from './draw/vectorTheme.js'
 import { resamplePolyline, projectedProfilePlane, dedupePoints3d, smoothPoints3d } from './tools/sweepProject.js'
@@ -1657,6 +1657,9 @@ const App3D = forwardRef(function App3D(props, ref) {
   // one is on, left-drag navigates the camera and plain clicks are ignored by
   // the viewport. Picking any other tool, switching to sketch mode, or
   // pressing Esc turns it back off (effects below, once tool state exists).
+  // X-ray view: faces fade out and every edge shows through the solids. View
+  // only — never saved, never touches the model. Toolbar button or the X key.
+  const [xray,setXray]=useState(false)
   const [navMode,setNavMode]=useState(null)
   useEffect(()=>{ viewport3dRef.current?.setNavMode(navMode) },[navMode])
   useEffect(()=>{
@@ -11043,6 +11046,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==='s'){e.preventDefault();if(!sketchMode)handleSaveProjectAs();return}
     if (e.ctrlKey&&e.key==='s'){e.preventDefault();sketchMode?handleSave():handleSaveProject();return}
     if ((e.key==='f'||e.key==='F')&&!e.ctrlKey){zoomToFit();return}
+    if ((e.key==='x'||e.key==='X')&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&!/^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName||'')&&!e.target?.isContentEditable){setXray(v=>!v);return}
     // Escape in sketch mode: cancel whatever 2D tool is mid-interaction only
     // (an in-progress line/circle/offset/etc.) — it no longer exits the sketch
     // or cancels the feature. That's now the dedicated Cancel button next to
@@ -12321,6 +12325,17 @@ const App3D = forwardRef(function App3D(props, ref) {
               Finish/Guide always stay in the same top-right spot no matter
               how many rows the tool groups wrap into. */}
           <div style={{display:'flex',alignItems:'center',gap:4,flexShrink:0,height:70}}>
+            {/* X-RAY — in this always-visible slot (not a per-mode toolbar) so it
+                is available in the 3D view AND while drawing a sketch profile. */}
+            <button title="X-ray — see through solids (X)" onClick={()=>setXray(v=>!v)}
+              style={{...btnBase,background: xray ? '#7DF9FF22' : 'transparent',
+                outline: xray ? '2px solid #7DF9FF' : '1px solid #2a2a4a',
+                outlineOffset:'-2px',flexDirection:'column',gap:2,
+                width:'auto',padding:'0 8px',height:52}}>
+              <IconXray3D color={xray ? '#7DF9FF' : '#6688aa'} size={28} active={xray}/>
+              <span style={{fontSize:9,fontFamily:'monospace',color: xray ? '#7DF9FF' : '#6688aa',
+                letterSpacing:'0.06em'}}>X-RAY</span>
+            </button>
             {/* CANCEL FEATURE — only for Cut/Extrude/Loft/Sweep/Spring, which
                 have a whole in-progress feature to abandon (a plain
                 standalone sketch doesn't). Placed left of Finish so the two
@@ -12419,6 +12434,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             height={canvasSize.h}
             lines={lines} circles={circles} arcs={arcs} splines={splines}
             solids={solids}
+            xray={xray}
             features={features}
             activeSketchId={activeSketchId}
             cursor={

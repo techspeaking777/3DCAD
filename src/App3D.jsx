@@ -2130,7 +2130,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (canPickSaveLocation()) {
       try {
         const { status, handle } = await saveProjectFileAs(features, solids, projectName || 'drawing.trc', projectFileHandleRef.current, props.getSheetData?.())
-        if (handle) { projectFileHandleRef.current = handle; updateProjectName(handle.name) }
+        if (handle) { projectFileHandleRef.current = handle; updateProjectName(handle.name); markSaved('local') }
         if (status==='saved'||status==='downloaded') flashSaved()
       } catch (err) {
         setCadError('Save failed: ' + (err.message || String(err)))
@@ -2151,7 +2151,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (canPickSaveLocation()) {
       try {
         const { status, handle } = await saveProjectFileAs(features, solids, projectName || 'drawing.trc', null, props.getSheetData?.())
-        if (handle) { projectFileHandleRef.current = handle; updateProjectName(handle.name) }
+        if (handle) { projectFileHandleRef.current = handle; updateProjectName(handle.name); markSaved('local') }
         if (status==='saved'||status==='downloaded') flashSaved()
       } catch (err) {
         setCadError('Save failed: ' + (err.message || String(err)))
@@ -2241,6 +2241,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     // fresh instead of silently overwriting the previous project.
     projectFileHandleRef.current = null
     cloudProjectIdRef.current = null
+    autosaveBaseRef.current = { local: null, cloud: null }
+    setAutosaveMsg(null)
     if (projectData) {
       await applyLoadedProject(projectData)
     } else {
@@ -2264,6 +2266,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       try {
         const dataObj = JSON.parse(serializeProject(features, solids, props.getSheetData?.()))
         await updateCloudProject(cloudProjectIdRef.current, undefined, dataObj)
+        markSaved('cloud')
         flashSaved('Saved to your account')
       } catch (err) {
         setCadError('Cloud save failed: ' + err.message)
@@ -2282,6 +2285,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       const dataObj = JSON.parse(serializeProject(features, solids, props.getSheetData?.()))
       const saved = await saveNewCloudProject(name, classId, dataObj)
       cloudProjectIdRef.current = saved.id
+      markSaved('cloud')
       updateProjectName(name)
       flashSaved('Saved to your account')
     } catch (err) {
@@ -2307,6 +2311,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       const projectData = parseProjectData(data)
       resetAllToolState()
       projectFileHandleRef.current = null
+      autosaveBaseRef.current = { local: null, cloud: null }
       await applyLoadedProject(projectData)
       cloudProjectIdRef.current = id
       updateProjectName(name)
@@ -2315,6 +2320,63 @@ const App3D = forwardRef(function App3D(props, ref) {
       setTimeout(() => setLoadError(null), 3000)
     }
   }
+
+  // ── Autosave ──────────────────────────────────────────────────────────────
+  // Only for a project that has ALREADY been saved once (a file handle from the
+  // native Save picker, and/or a cloud project id) — before that there is
+  // nowhere to write, and we never open a dialog on the user's behalf. A few
+  // seconds after the feature tree or solids stop changing, the project is
+  // re-written to the same place a manual Save would use (cloud waits longer,
+  // it is a network call). It overwrites in place — Save As is how you keep a
+  // copy. autosaveBaseRef holds the text last written per destination so an
+  // unchanged project is never rewritten (the effect also fires on preview
+  // churn); null means "unknown", which just writes once.
+  const [autosaveOn,setAutosaveOn]=useState(()=>{ try { return localStorage.getItem('retrocad.autosave')!=='off' } catch { return true } })
+  useEffect(()=>{ try { localStorage.setItem('retrocad.autosave', autosaveOn?'on':'off') } catch { /* storage blocked */ } },[autosaveOn])
+  const autosaveBaseRef=useRef({local:null,cloud:null})
+  const autosaveChainRef=useRef(Promise.resolve())
+  const [autosaveMsg,setAutosaveMsg]=useState(null)
+  useEffect(()=>{ props.onAutosaveStatus?.(autosaveOn ? autosaveMsg : null) },[autosaveOn,autosaveMsg])
+  // Remember what a manual save just wrote, so autosave doesn't immediately
+  // rewrite the identical file.
+  function markSaved(kind){
+    try { autosaveBaseRef.current[kind] = serializeProject(features, solids, props.getSheetData?.()) } catch { /* not worth failing a save over */ }
+  }
+  useEffect(()=>{
+    if (!autosaveOn || showSplash) return
+    const hasFile = !!projectFileHandleRef.current, hasCloud = !!cloudProjectIdRef.current
+    if (!hasFile && !hasCloud) return
+    const clock = () => new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' })
+    // Each timer serializes at fire time (not on every change — solids churn
+    // on every mouse move during a depth drag) and queues behind any write
+    // still in flight.
+    const run = (kind, write) => {
+      autosaveChainRef.current = autosaveChainRef.current.then(async () => {
+        let data
+        try { data = serializeProject(features, solids, props.getSheetData?.()) } catch { return }
+        if (data === autosaveBaseRef.current[kind]) return
+        try {
+          await write(data)
+          autosaveBaseRef.current[kind] = data
+          setAutosaveMsg({ text: 'Autosaved ' + clock(), error: false })
+        } catch {
+          setAutosaveMsg({ text: 'Autosave paused — press Save', error: true })
+        }
+      })
+    }
+    const timers = []
+    if (hasFile) {
+      const handle = projectFileHandleRef.current
+      timers.push(setTimeout(() => run('local', async data => {
+        const w = await handle.createWritable(); await w.write(data); await w.close()
+      }), 3000))
+    }
+    if (hasCloud) {
+      const id = cloudProjectIdRef.current
+      timers.push(setTimeout(() => run('cloud', data => updateCloudProject(id, undefined, JSON.parse(data))), 10000))
+    }
+    return () => timers.forEach(clearTimeout)
+  },[features,solids,autosaveOn,showSplash])
 
   // Imports a STEP file as a brand-new top-level solid body — same "push a
   // new solid+feature" shape as commitExtrude's plain (non-cutout) success
@@ -13120,6 +13182,18 @@ const App3D = forwardRef(function App3D(props, ref) {
                 style={{...btnBase,flexDirection:'column',gap:2,background:'transparent',border:'none',opacity:cloudLoggedIn?1:0.45}}>
                 <IconCloudLoad/>
                 <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>CLOUD OPEN</span>
+              </button>
+              <button onClick={()=>setAutosaveOn(v=>!v)}
+                title={autosaveOn
+                  ? 'Autosave is ON — after your first Save, changes are re-saved to the same file a few seconds later. Click to turn off.'
+                  : 'Autosave is OFF — click to turn on (works after your first Save)'}
+                style={{...btnBase,flexDirection:'column',gap:2,background:'transparent',border:'none'}}>
+                <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                  <path d="M17.5 8A7 7 0 0 0 5 6.5M4.5 14A7 7 0 0 0 17 15.5" stroke={autosaveOn?'#69F0AE':'#666'} strokeWidth="1.8" strokeLinecap="round"/>
+                  <path d="M5 2.8v4h4M17 19.2v-4h-4" stroke={autosaveOn?'#69F0AE':'#666'} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                  {autosaveOn && <circle cx="11" cy="11" r="2" fill="#69F0AE"/>}
+                </svg>
+                <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:autosaveOn?'#69F0AE':'#888'}}>{autosaveOn?'AUTO ON':'AUTO OFF'}</span>
               </button>
               <div style={{width:1,height:28,background:'#2a2a4a',margin:'0 4px'}}/>
             </>

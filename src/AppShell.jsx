@@ -13,6 +13,8 @@ export default function AppShell() {
   // save/open/cloud-load — lives here, not in App3D, since this bar is
   // shared by both tabs and sits outside either app's own component.
   const [projectName, setProjectName] = useState(null)
+  // {text, error} from App3D's autosave, or null (off / nothing saved yet).
+  const [autosave, setAutosave] = useState(null)
   const app3dRef = useRef(null)
   const drawingRef = useRef(null)
   const app3dWrapRef = useRef(null)
@@ -103,6 +105,14 @@ export default function AppShell() {
             }} title={projectName}>
               {projectName}
             </span>
+            {autosave && (
+              <span style={{
+                fontFamily: 'monospace', fontSize: 11, marginLeft: 10, whiteSpace: 'nowrap',
+                color: autosave.error ? '#ff8a65' : '#69F0AE',
+              }}>
+                {autosave.error ? '⚠ ' : '● '}{autosave.text}
+              </span>
+            )}
           </div>
         )}
 
@@ -142,6 +152,7 @@ export default function AppShell() {
             getSheetData={() => drawingRef.current?.getSheetData()}
             onSheetLoaded={sheet => drawingRef.current?.restoreSheetData(sheet)}
             onProjectNameChange={setProjectName}
+            onAutosaveStatus={setAutosave}
           />
         </div>
         <div ref={drawingWrapRef} style={{ display: activeTab === 'drawing' ? 'block' : 'none', height: '100%' }}>

@@ -1428,6 +1428,35 @@ function buildLoft({ profiles, normal, origin, uAxis, ruled=false }) {
  */
 function buildSweep(params) {
   if (params.pathPts3d) return buildSweepProjected(params)
+  try {
+    return sweepAlongPath(params)
+  } catch (err) {
+    // Projects saved before the save-file fix lost a spline path's curve data,
+    // leaving ~100 sampled points that rebuild as a zig-zag no sweep can
+    // follow. A long point chain with no curve segments is almost certainly
+    // that, so retry once as the smooth spline it started as.
+    const p = params.pathPts
+    if (p && p.length >= 12 && !(p.curveSegments && p.curveSegments.length)) {
+      try { return sweepAlongPath({ ...params, pathPts: pathPointsAsSpline(p) }) } catch { /* report the original error */ }
+    }
+    throw err
+  }
+}
+
+// Re-fits a dense sampled point chain as one Catmull-Rom spline through
+// roughly a dozen of its points (always including both ends). Fewer control
+// points means fewer seams on the swept surface — each Bezier segment becomes
+// its own face, drawn as a ring of edge lines — and a hand-placed spline
+// rarely has more than that anyway.
+function pathPointsAsSpline(pts) {
+  const step = Math.max(1, Math.round(pts.length / 12))
+  const controlPoints = pts.filter((_, i) => i % step === 0 || i === pts.length - 1).map(p => ({ x: p.x, y: p.y }))
+  const out = pts.map(p => ({ x: p.x, y: p.y }))
+  out.curveSegments = [{ type: 'spline', startIdx: 0, count: pts.length - 1, controlPoints }]
+  return out
+}
+
+function sweepAlongPath(params) {
   const { pathPts, planeId, normal, origin, uAxis, profilePts, profileCircle } = params
   const pathSketch = makePath(pathPts, planeId, normal, origin, uAxis)
   const shape = pathSketch.sweepSketch((plane) => makeProfileOnPlane(profilePts, plane, true, profileCircle))

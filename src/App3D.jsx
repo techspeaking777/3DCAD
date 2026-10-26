@@ -8927,18 +8927,33 @@ const App3D = forwardRef(function App3D(props, ref) {
   // mirror/join feature can find the solid it depends on — this relies on
   // `loadedFeatures` being in creation order, same as every other place in
   // this file that assumes dependencies appear earlier in the array.
+  //
+  // One feature that can't be rebuilt no longer discards the whole project:
+  // it is skipped (anything that depends on it fails and is skipped too), the
+  // rest still loads, and the failures are reported together so the user can
+  // fix or delete just those features instead of seeing an empty scene.
   async function rebuildProjectFromFeatures(loadedFeatures) {
     const newSolids = []
+    const failed = []
     for (const feat of loadedFeatures) {
       if (feat.type === 'sketch' || feat.type === 'fillet' || feat.type === 'shell' || feat.operation === 'cutout') continue
       if (feat.joinedInto) continue
-      const meshData = await rebuildFeatureSolid(feat, loadedFeatures, newSolids)
-      const group = replicadMeshToThree(meshData, feat.color, feat.solidId)
-      newSolids.push({
-        ...featureToTempSolid(feat),
-        group, color: feat.color, hidden: !!feat.hidden,
-        sourceSolidId: feat.sourceSolidId, mirrorPlane: feat.mirrorPlane,
-      })
+      try {
+        const meshData = await rebuildFeatureSolid(feat, loadedFeatures, newSolids)
+        const group = replicadMeshToThree(meshData, feat.color, feat.solidId)
+        newSolids.push({
+          ...featureToTempSolid(feat),
+          group, color: feat.color, hidden: !!feat.hidden,
+          sourceSolidId: feat.sourceSolidId, mirrorPlane: feat.mirrorPlane,
+        })
+      } catch (err) {
+        console.error('Rebuild failed for', feat.name, err)
+        failed.push(`${feat.name || feat.id}: ${err.message || String(err)}`)
+      }
+    }
+    if (failed.length) {
+      setCadError(`${failed.length} feature${failed.length > 1 ? 's' : ''} could not be rebuilt and ${failed.length > 1 ? 'are' : 'is'} missing. ${failed[0]}`)
+      setTimeout(() => setCadError(null), 12000)
     }
     return newSolids
   }

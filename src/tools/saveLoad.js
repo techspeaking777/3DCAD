@@ -185,6 +185,12 @@ export function serializeFeature(feat, hidden = false) {
   const out = { ...feat, hidden }
   if (feat.facePlane) out.facePlane = serializeFacePlane(feat.facePlane)
   if (feat.profilePts) out.profilePts = serializePts(feat.profilePts)
+  // A Sweep path is a bare point array whose `.curveSegments` (the real spline/
+  // arc data) is an expression-property JSON.stringify silently drops — saved
+  // as plain points, a smooth spline path reloaded as a 100-segment zig-zag
+  // that the sweep could no longer build. Files written before this fix still
+  // hold plain arrays; deserializeFeature accepts both.
+  if (feat.pathPts) out.pathPts = serializePts(feat.pathPts)
   if (feat.profiles) out.profiles = feat.profiles.map(p => ({ ...p, pts: serializePts(p.pts) }))
   for (const key of SKETCH_ENTITY_FIELDS) {
     if (feat[key]) out[key] = serializeSketchEntities(feat[key])
@@ -195,6 +201,7 @@ export function deserializeFeature(obj) {
   const out = { ...obj }
   if (obj.facePlane) out.facePlane = deserializeFacePlane(obj.facePlane)
   if (obj.profilePts) out.profilePts = deserializePts(obj.profilePts)
+  if (obj.pathPts && !Array.isArray(obj.pathPts)) out.pathPts = deserializePts(obj.pathPts)
   if (obj.profiles) out.profiles = obj.profiles.map(p => ({ ...p, pts: deserializePts(p.pts) }))
   for (const key of SKETCH_ENTITY_FIELDS) {
     if (obj[key]) out[key] = deserializeSketchEntities(obj[key])

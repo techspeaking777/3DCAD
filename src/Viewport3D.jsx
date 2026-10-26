@@ -560,8 +560,12 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     // Lighting for solid meshes. Higher ambient + softer directional keeps shadowed
     // faces from going too dark (which was eating the blue/red hue and the contrast
     // against the black edge outlines) while still showing enough shading to read as 3D.
-    const ambient = new THREE.AmbientLight(0xffffff, 0.85)
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.55)
+    // Intensities are multiplied by Math.PI because three.js (r155+) dropped its
+    // old hidden ×π light scaling: without it a swatch colour rendered at only
+    // ~40% brightness, so bodies looked much darker/muddier than the colour
+    // the user picked. Net effect: unlit faces ≈ 0.75× the swatch, lit ≈ 1.1×.
+    const ambient = new THREE.AmbientLight(0xffffff, 0.75 * Math.PI)
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.4 * Math.PI)
     dirLight.position.set(400, 600, 800)
     scene.add(ambient, dirLight)
 

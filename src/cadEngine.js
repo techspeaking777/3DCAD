@@ -30,7 +30,7 @@ class CadEngine {
       )
 
       this._worker.onmessage = (e) => {
-        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, planeData, soften, message } = e.data
+        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, planeData, soften, softenEdges, message } = e.data
 
         if (type === 'ready') {
           this._ready = true
@@ -61,6 +61,7 @@ class CadEngine {
             dxfData ? { dxfData } :
             orthoViews ? { orthoViews } :
             planeData ? { planeData } :
+            softenEdges ? { softenEdges } :
             { faces, edges, ...(soften ? { soften } : {}) }
           )
         } else if (type === 'error') {
@@ -103,9 +104,14 @@ class CadEngine {
     return this._send('fillet3d', params)
   }
 
-  /** Round every edge of a solid as much as each will take — params: {solidId, radius (mm, the target), minRadius?, keepFacePoints?:[[x,y,z],...] (faces whose outline edges stay sharp), base?}. Resolves {faces, edges, soften:{rounds:[{radius, edgePoints}], total, skipped}}. */
+  /** Round edges of a solid as much as each will take — params: {solidId, radius (mm, the target), minRadius?, edges?:[{edgeId, point:[x,y,z]},...] (just these; default every edge), keepFacePoints?:[[x,y,z],...] (faces whose outline edges stay sharp), base?}. Resolves {faces, edges, soften:{rounds:[{radius, edgePoints}], total, skipped, leftover:[{edgeId, point}], timedOut}}. */
   async softenAll(params) {
     return this._send('softenAll', params)
+  }
+
+  /** The edges Soften could round on a solid — params: {solidId, keepFacePoints?:[[x,y,z],...] (leave out these faces' outlines), base?}. Resolves {softenEdges:[{edgeId, point:[x,y,z]}]}. */
+  async softenEdges(params) {
+    return this._send('softenEdges', params)
   }
 
   /** Hollow an existing solid — params: {solidId, facePoints:[[x,y,z],...] (mm) of faces to remove, thickness, direction:'inward'|'outward' (defaults to 'inward'), base?}. */

@@ -5068,13 +5068,16 @@ const App3D = forwardRef(function App3D(props, ref) {
   // ── Soften (3D) state machine ──────────────────────────────────────────────
   // Rounds every edge of a body as much as each will take (the worker steps the
   // radius down per edge until it fits — see softenShape in cadWorker.js).
-  // Shares Shell's face-pick pipeline: the FIRST face clicked picks the body
-  // and marks that face to stay flat (its outline edges stay sharp — the base
-  // a part sits on); more clicks add/remove flat faces. The radius panel is
-  // up as soon as a body is picked. Each radius round the worker reports is
-  // saved as an ordinary fillet feature, so rebuild/edit need nothing new.
+  // Edges are picked one by one (click toggles, same hover raycast as Fillet).
+  // A click on a FACE instead is the shortcut for the usual case: with nothing
+  // picked yet it selects every edge except that face's outline (the base a part
+  // sits on); with edges already picked it drops that face's outline from them.
+  // The radius panel is up as soon as a body is picked. Each radius round the
+  // worker reports is saved as an ordinary fillet feature, so rebuild/edit need
+  // nothing new; edges it couldn't round stay selected for another go.
   const [soften3dSolidId, setSoften3dSolidId] = useState(null)
-  const [soften3dFaces, setSoften3dFaces] = useState([])           // [{solidId, point, normal, key}] faces that stay flat
+  const [soften3dSel, setSoften3dSel] = useState([])               // [{solidId, edgeId, point}] edges to round (point in mm)
+  const [soften3dHover, setSoften3dHover] = useState(null)         // {solidId, edgeId, point} edge under the cursor
   const [soften3dRadiusInput, setSoften3dRadiusInput] = useState('3')
   const [soften3dHandlePos, setSoften3dHandlePos] = useState(null)
   const [soften3dBusy, setSoften3dBusy] = useState(false)
@@ -5098,7 +5101,8 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
   function resetSoften3D() {
     setSoften3dSolidId(null)
-    setSoften3dFaces([])
+    setSoften3dSel([])
+    setSoften3dHover(null)
     setSoften3dHandlePos(null)
     setSoften3dBusy(false)
   }
@@ -5578,25 +5582,88 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }
 
-  // Click while Soften is armed. The first face picks the body (and stays
-  // flat); later clicks on the same body toggle more flat faces.
-  function handleSoftenFaceClick(facePlane) {
+  // Mouse move while Soften is active: glow the edge under the cursor (only on
+  // the picked body once there is one). While an edge glows the face-hover
+  // indicator is switched off (see sketchArmed), so a click means one or the other.
+  function handleSoftenHover(e) {
+    if (tool !== 'soften3d' || soften3dBusy) return
+    const vp = viewport3dRef.current; if (!vp) return
+    const hit = vp.raycastSolidEdges(e.clientX, e.clientY)
+    const usable = hit && hit.edgeId != null && (soften3dSolidId == null || hit.solidId === soften3dSolidId)
+    if (hit && !usable) {
+      // raycastSolidEdges glowed an edge we can't use — clearing drops the orange picks too, so put them back.
+      vp.clearEdgeHighlight()
+      vp.setSelectedEdges(soften3dSel.map(({ solidId, edgeId }) => ({ solidId, edgeId })))
+    }
+    const next = usable ? hit : null
+    setSoften3dHover(prev => (prev?.edgeId === next?.edgeId && prev?.solidId === next?.solidId) ? prev : next)
+  }
+
+  // Click on the glowing edge: add it to the picks, or take it out again.
+  function handleSoftenEdgeClick(e) {
+    if (tool !== 'soften3d' || soften3dBusy || !soften3dHover) return
+    const hit = soften3dHover
+    if (soften3dSolidId == null) {
+      setSoften3dSolidId(hit.solidId)
+      setSoften3dHandlePos({ x: e.clientX + 20, y: e.clientY - 20 })
+    }
+    setSoften3dSel(prev => {
+      const at = prev.findIndex(s => s.solidId === hit.solidId && s.edgeId === hit.edgeId)
+      return at >= 0 ? prev.filter((_, i) => i !== at) : [...prev, { solidId: hit.solidId, edgeId: hit.edgeId, point: hit.point }]
+    })
+  }
+
+  // Asks the worker which edges Soften could round on a solid (optionally leaving
+  // out one face's outline) and returns them as selection entries.
+  async function listSoftenEdges(solidId, keepFacePoint) {
+    const SCALE = 2
+    const targetSolid = solids.find(s => s.id === solidId)
+    if (!targetSolid) return []
+    const { softenEdges } = await cadEngine.softenEdges({
+      solidId,
+      ...(keepFacePoint ? { keepFacePoints: [[keepFacePoint.x/SCALE, keepFacePoint.y/SCALE, keepFacePoint.z/SCALE]] } : {}),
+      base: buildBaseWorkerParams(targetSolid),
+    })
+    return softenEdges.map(e => ({ solidId, edgeId: e.edgeId, point: e.point }))
+  }
+
+  // Click on a face (no edge glowing). Nothing picked yet: select every edge but
+  // that face's outline. Edges already picked: drop that face's outline from them.
+  async function handleSoftenFaceClick(facePlane) {
     if (soften3dBusy || facePlane.solidId == null) return
     if (soften3dSolidId != null && facePlane.solidId !== soften3dSolidId) return
+    const solidId = facePlane.solidId
     const point = { x: facePlane.point.x, y: facePlane.point.y, z: facePlane.point.z }
-    const normal = { x: facePlane.normal.x, y: facePlane.normal.y, z: facePlane.normal.z }
-    const key = `${facePlane.solidId}_${[point.x,point.y,point.z].map(v=>v.toFixed(1)).join('_')}`
-    if (soften3dSolidId == null) setSoften3dSolidId(facePlane.solidId)
-    setSoften3dFaces(prev => prev.some(f => f.key === key) ? prev.filter(f => f.key !== key) : [...prev, { solidId: facePlane.solidId, point, normal, key }])
-    if (soften3dSolidId == null) {
-      const screenPt = viewport3dRef.current?.worldToScreen(point.x, point.y, point.z)
-      setSoften3dHandlePos(screenPt ? { x: screenPt.x + 20, y: screenPt.y - 20 } : { x: window.innerWidth/2, y: window.innerHeight/2 })
+    const first = soften3dSolidId == null
+    try {
+      const rest = await listSoftenEdges(solidId, point)
+      const keep = new Set(rest.map(r => r.edgeId))
+      setSoften3dSolidId(solidId)
+      setSoften3dSel(prev => prev.length === 0 ? rest : prev.filter(p => keep.has(p.edgeId)))
+      if (first) {
+        const screenPt = viewport3dRef.current?.worldToScreen(point.x, point.y, point.z)
+        setSoften3dHandlePos(screenPt ? { x: screenPt.x + 20, y: screenPt.y - 20 } : { x: window.innerWidth/2, y: window.innerHeight/2 })
+      }
+    } catch (err) {
+      console.error('Soften edge list failed:', err)
+      setCadError(err.message || String(err))
+      setTimeout(() => setCadError(null), 6000)
+    }
+  }
+
+  async function softenSelectAll() {
+    if (soften3dSolidId == null || soften3dBusy) return
+    try {
+      setSoften3dSel(await listSoftenEdges(soften3dSolidId, null))
+    } catch (err) {
+      console.error('Soften edge list failed:', err)
+      setCadError(err.message || String(err))
+      setTimeout(() => setCadError(null), 6000)
     }
   }
 
   async function commitSoften3D() {
     if (soften3dSolidId == null || soften3dBusy) return
-    const SCALE = 2
     const solidId = soften3dSolidId
     const radius = parseFloat(soften3dRadiusInput)
     if (!(radius > 0)) {
@@ -5604,13 +5671,18 @@ const App3D = forwardRef(function App3D(props, ref) {
       setTimeout(() => setCadError(null), 4000)
       return
     }
-    const keepFacePoints = soften3dFaces.map(f => [f.point.x/SCALE, f.point.y/SCALE, f.point.z/SCALE])
+    if (soften3dSel.length === 0) {
+      setCadError('Pick some edges first — click them, click the base face to round everything else, or press All edges.')
+      setTimeout(() => setCadError(null), 5000)
+      return
+    }
+    const edges = soften3dSel.map(({ edgeId, point }) => ({ edgeId, point }))
     const targetSolid = solids.find(s => s.id === solidId)
     if (!targetSolid) { resetSoften3D(); return }
     setSoften3dBusy(true)
     try {
-      const meshData = await cadEngine.softenAll({ solidId, radius, keepFacePoints, base: buildBaseWorkerParams(targetSolid) })
-      const { rounds, total, skipped, timedOut } = meshData.soften
+      const meshData = await cadEngine.softenAll({ solidId, radius, edges, base: buildBaseWorkerParams(targetSolid) })
+      const { rounds, total, skipped, leftover, timedOut } = meshData.soften
       feat3d.commit(features)
       const group = replicadMeshToThree(meshData, targetSolid.color, solidId)
       const updatedSolid = { ...targetSolid, group }
@@ -5627,8 +5699,16 @@ const App3D = forwardRef(function App3D(props, ref) {
       const fmt = v => String(Math.round(v * 100) / 100)
       const done = total - skipped
       const parts = rounds.map(r => `${r.edgePoints.length} at ${fmt(r.radius)} mm`).join(', ')
-      flashSaved(`Softened ${done} of ${total} edges (${parts})${timedOut ? ` — stopped early, run Soften again to finish` : skipped ? ` — ${skipped} too tight to round` : ''}`, 7000)
-      resetSoften3D()
+      const note = timedOut ? ' — stopped early, the rest are still selected: press Enter to carry on'
+        : skipped ? ` — ${skipped} wouldn't round, still selected: try a smaller radius, or Fillet them one by one` : ''
+      flashSaved(`Softened ${done} of ${total} edges (${parts})${note}`, 7000)
+      if (leftover?.length) {
+        // The edges left sharp stay picked (their ids belong to the new body), ready for another go.
+        setSoften3dSel(leftover.map(l => ({ solidId, edgeId: l.edgeId, point: l.point })))
+        setSoften3dBusy(false)
+      } else {
+        resetSoften3D()
+      }
     } catch (err) {
       console.error('Soften failed:', err)
       setSoften3dBusy(false)
@@ -8148,6 +8228,16 @@ const App3D = forwardRef(function App3D(props, ref) {
   useEffect(() => {
     if (tool !== 'soften3d') resetSoften3D()
   }, [tool])
+  // Orange highlight on the picked edges (re-done when the body is rebuilt, since
+  // its edges are then new); cleared on leaving the tool.
+  useEffect(() => {
+    if (tool !== 'soften3d') return
+    viewport3dRef.current?.setSelectedEdges(soften3dSel.map(({ solidId, edgeId }) => ({ solidId, edgeId })))
+  }, [tool, soften3dSel, solids])
+  useEffect(() => {
+    if (tool !== 'soften3d') return
+    return () => viewport3dRef.current?.clearEdgeHighlight()
+  }, [tool])
 
   // Keeps Measure's point-mode markers (P1 dot, live hover dot + connector)
   // in sync — mirrors fillet3d's marker-sync effect above. Edge-mode's
@@ -10486,6 +10576,13 @@ const App3D = forwardRef(function App3D(props, ref) {
       return
     }
 
+    // Soften: a click on a glowing edge picks it; a click on a face goes through
+    // onFaceClick instead (see handleSoftenFaceClick), so there's nothing to do here without one.
+    if (tool==='soften3d') {
+      handleSoftenEdgeClick(e)
+      return
+    }
+
     if (tool==='measure') {
       handleMeasureClick(e)
       return
@@ -11235,6 +11332,7 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     // Fillet: raycasts solid edges directly (no sketch-plane projection involved)
     if (tool==='fillet3d') { handleFillet3DHover(e); return }
+    if (tool==='soften3d') { handleSoftenHover(e); return }
     if (tool==='measure') { handleMeasureHover(e); return }
     if (tool==='includeedge') { handleIncludeEdgeHover(e); return }
     // exportfacedxf's face hover is handled entirely inside Viewport3D via
@@ -12791,11 +12889,11 @@ const App3D = forwardRef(function App3D(props, ref) {
             // distance — confusing visual noise with nothing to click.
             // Once a base IS picked, face-hovering is no longer a pending
             // pick, so sketchArmed should go false for that offset flow.
-            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode && !extrudeOffsetBase) || (tool==='mirror3d' && mirror3dSelectionDone && !mirror3dOffsetBase) || (tool==='loft3d' && !loftState) || (tool==='sweep3d' && !sweepState && !sweepOffsetBase) || (tool==='spring3d' && !springState && !springOffsetBase) || tool==='exportfacedxf' || (tool==='shell3d' && !shell3dAccepted) || (tool==='soften3d' && !soften3dBusy)}
+            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode && !extrudeOffsetBase) || (tool==='mirror3d' && mirror3dSelectionDone && !mirror3dOffsetBase) || (tool==='loft3d' && !loftState) || (tool==='sweep3d' && !sweepState && !sweepOffsetBase) || (tool==='spring3d' && !springState && !springOffsetBase) || tool==='exportfacedxf' || (tool==='shell3d' && !shell3dAccepted) || (tool==='soften3d' && !soften3dBusy && !soften3dHover)}
             mirrorPlanePickArmed={tool==='mirror3d' && mirror3dSelectionDone && !mirror3dOffsetBase}
             dxfPickMode={tool==='exportfacedxf' || tool==='shell3d' || tool==='soften3d'}
-            dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : tool==='shell3d' ? shell3dSel : tool==='soften3d' ? soften3dFaces : []}
-            facePickLabel={tool==='shell3d' ? 'click to remove' : tool==='soften3d' ? (soften3dSolidId==null ? 'click to pick' : 'click to keep flat') : null}
+            dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : tool==='shell3d' ? shell3dSel : []}
+            facePickLabel={tool==='shell3d' ? 'click to remove' : tool==='soften3d' ? (soften3dSel.length===0 ? 'click to round all but this face' : 'click to keep this face sharp') : null}
             extrudeArmed={!!extrudeState || (!!loftState && !sketchMode)}
             showWorkPlanes={!sketchMode && !cutoutTargetPicker && tool!=='fillet3d' && tool!=='shell3d' && tool!=='soften3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && tool!=='movecopy3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hideWorkPlanesManual && (tool==='extrude' || tool==='cutout' || tool==='revolve' || tool==='revolvecut' || tool==='sweep3d'))}
             activePlane={activePlane}
@@ -13257,13 +13355,13 @@ const App3D = forwardRef(function App3D(props, ref) {
           {/* ── SmartStep bar: overlays bottom of viewport during Soften ── */}
           <SmartStepBar
             op={tool==='soften3d' ? 'SOFTEN' : null}
-            steps={[{ id:1, label:'Pick Body' }, { id:2, label:'Set Radius' }]}
+            steps={[{ id:1, label:'Pick Edges' }, { id:2, label:'Set Radius' }]}
             currentStep={soften3dSolidId!=null ? 2 : 1}
             color="#A470F2"
             hint={
               soften3dSolidId!=null
-                ? 'Type the biggest rounding you want, then press Enter.'
-                : 'Click the face that stays flat (usually the bottom).'
+                ? 'Click edges to add or remove them, type the biggest rounding you want, then press Enter.'
+                : 'Click the edges to round — or click the base face to round everything else.'
             }
             action={soften3dSolidId!=null ? [{label: soften3dBusy ? 'Softening…' : '✓ Soften', enabled: !soften3dBusy, onClick:commitSoften3D}] : []}
             onStepBack={step => { if (step===1 && !soften3dBusy) resetSoften3D() }}
@@ -14428,7 +14526,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         </div>
       )}
 
-      {/* ── Soften panel (radius + which faces stay flat) ─────────────────── */}
+      {/* ── Soften panel (radius + which edges are picked) ─────────────────── */}
       {tool==='soften3d' && soften3dSolidId!=null && soften3dHandlePos && (
         <div style={{
           position: 'fixed',
@@ -14479,16 +14577,24 @@ const App3D = forwardRef(function App3D(props, ref) {
             >{soften3dBusy ? '…' : '↵'}</button>
           </div>
           <div style={{color:'#9fb4d8', fontSize:11, marginTop:8, display:'flex', alignItems:'center', justifyContent:'space-between', gap:8}}>
-            <span>{soften3dFaces.length===0 ? 'Every edge gets rounded' : `${soften3dFaces.length} flat face${soften3dFaces.length!==1?'s':''} kept sharp`}</span>
-            {soften3dFaces.length>0 && !soften3dBusy && (
-              <button onClick={()=>setSoften3dFaces([])} style={{
-                background:'#0a0e1a', color:'#aaa', border:'1px solid #2a3a5a', borderRadius:4,
-                padding:'2px 6px', cursor:'pointer', fontFamily:'monospace', fontSize:10,
-              }}>Round all</button>
+            <span>{soften3dSel.length===0 ? 'No edges picked' : `${soften3dSel.length} edge${soften3dSel.length!==1?'s':''} picked`}</span>
+            {!soften3dBusy && (
+              <span style={{display:'flex', gap:4}}>
+                <button onClick={softenSelectAll} style={{
+                  background:'#0a0e1a', color:'#aaa', border:'1px solid #2a3a5a', borderRadius:4,
+                  padding:'2px 6px', cursor:'pointer', fontFamily:'monospace', fontSize:10,
+                }}>All edges</button>
+                {soften3dSel.length>0 && (
+                  <button onClick={()=>setSoften3dSel([])} style={{
+                    background:'#0a0e1a', color:'#aaa', border:'1px solid #2a3a5a', borderRadius:4,
+                    padding:'2px 6px', cursor:'pointer', fontFamily:'monospace', fontSize:10,
+                  }}>Clear</button>
+                )}
+              </span>
             )}
           </div>
           <div style={{color:'#445566', fontSize:10, marginTop:6, textAlign:'center'}}>
-            {soften3dBusy ? 'Working out how big each edge can go… big parts can take a while' : 'Each edge takes the biggest rounding that fits · click a face to keep it flat · Esc to cancel'}
+            {soften3dBusy ? 'Working out how big each edge can go… big parts can take a while' : 'Each edge takes the biggest rounding that fits · click a face to leave its outline sharp · Esc to cancel'}
           </div>
         </div>
       )}

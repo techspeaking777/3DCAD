@@ -1,6 +1,6 @@
 import opencascade from 'replicad-opencascadejs/src/replicad_single.js'
 import opencascadeWasm from 'replicad-opencascadejs/src/replicad_single.wasm?url'
-import { setOC, Sketcher, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, EdgeFinder, Vector, importSTEP, makeBSplineApproximation, assembleWire, genericSweep } from 'replicad'
+import { setOC, Sketcher, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, Vector, importSTEP, makeBSplineApproximation, assembleWire, genericSweep } from 'replicad'
 import { projectedProfilePlane, dedupePoints3d } from './tools/sweepProject.js'
 
 const SCALE = 2
@@ -320,11 +320,13 @@ function getSeamEdgeHashes(shape) {
 // radius on all of them at once, then edge by edge for whatever fails, then
 // retries the leftovers at half the radius, and so on down to a minimum. Each
 // radius round comes back as an ordinary fillet op ({radius, edgePoints}) so the
-// rebuild/replay code needs nothing new. Faces named in keepFacePoints keep
-// their outline edges sharp (the flat base of a part).
+// rebuild/replay code needs nothing new. Works on every edge, or only on the
+// edges in `picks`; faces named in keepFacePoints keep their outline edges sharp
+// (the flat base of a part). Each rounding is checked afterwards (softenLooksRight).
 const SOFTEN_MIN_RADIUS = 0.4        // mm — below this a rounding isn't worth it
 const SOFTEN_TIME_BUDGET_MS = 60000  // stop trying new edges after this long
 const SOFTEN_SMOOTH_COS = 0.9995     // faces meeting closer than ~2° are already smooth
+const SOFTEN_PICK_TOL = 1.5          // mm — how far off an edge a pick may sit and still mean it
 
 function shapeIsValid(shape) {
   const oc = getOC()
@@ -338,46 +340,152 @@ function edgeFilterForPoints(pts) {
   return e => e.either(pts.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt)))
 }
 
-function trySoftenFillet(shape, pts, radius) {
+// Volume and bounding box of a shape — what a rounding is judged against.
+function softenMeasure(shape) {
+  const bb = shape.boundingBox
+  const bounds = bb.bounds
+  bb.delete?.()
+  return { volume: ocVolume(shape.wrapped), bounds }
+}
+
+// OpenCascade sometimes hands back a rounding that passes its own validity check
+// yet is plainly wrong — spikes, folded patches — usually when a big radius runs
+// into neighbouring geometry. Two checks catch it. The result must not grow past
+// the original's bounding box. And the volume it removes (or, on an inside corner,
+// adds) must be believable: a plain rounding takes a thin sliver whose size follows
+// from the edge's length and the bend between its faces; more than that is fine
+// only if it scales like a real rounding does (OpenCascade also rounds on along
+// any smooth chain an edge runs into, so the sliver can be longer than the edge),
+// i.e. with the square of the radius — so the same job at half the radius must
+// have taken about a quarter as much. A broken result doesn't scale that way.
+function softenLooksRight(before, after, group, radius, atHalfRadius) {
+  const grow = 1.5 * radius + 0.05
+  for (let i = 0; i < 3; i++) {
+    if (after.bounds[0][i] < before.bounds[0][i] - grow) return false
+    if (after.bounds[1][i] > before.bounds[1][i] + grow) return false
+  }
+  let expected = 0
+  for (const c of group) expected += c.len * radius * radius * c.k
+  const dv = Math.abs(before.volume - after.volume)
+  if (dv <= 1.6 * expected + 1) return true
+  const half = atHalfRadius()
+  if (!half) return false
+  const scale = dv / Math.max(Math.abs(before.volume - half.volume), 1e-6)
+  return scale > 2.8 && scale < 5.5
+}
+
+function trySoftenFillet(shape, before, group, radius) {
+  const filter = edgeFilterForPoints(group.map(c => c.pt))
+  const atHalfRadius = () => {
+    try {
+      const out = shape.fillet(radius / 2, filter)
+      const m = shapeIsValid(out) ? softenMeasure(out) : null
+      out.delete?.()
+      return m
+    } catch (_) {
+      return null
+    }
+  }
   try {
-    const out = shape.fillet(radius, edgeFilterForPoints(pts))
-    return shapeIsValid(out) ? out : null
+    const out = shape.fillet(radius, filter)
+    if (shapeIsValid(out) && softenLooksRight(before, softenMeasure(out), group, radius, atHalfRadius)) return out
+    out.delete?.()
+    return null
   } catch (_) {
     return null
   }
 }
 
-// One entry per edge that two clearly-different faces share (not a seam, not an
-// edge between two faces that already flow into each other, not on a kept face).
-function softenCandidates(shape, keepFacePoints) {
-  const oc = getOC()
-  const protectedHashes = new Set()
-  if (keepFacePoints?.length) {
-    const kept = new FaceFinder().either(
-      keepFacePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
-    ).find(shape)
-    for (const face of kept) for (const edge of face.edges) protectedHashes.add(edge.hashCode)
-  }
-  const byEdge = new Map()   // edge hash -> { edge, faces: [] }
+// Every edge of the shape with the faces that use it, keyed by edge hash — the
+// same hash the render mesh carries as each edge's id.
+function softenEdgeTable(shape) {
+  const byEdge = new Map()
   for (const face of shape.faces) {
     for (const edge of face.edges) {
       let rec = byEdge.get(edge.hashCode)
-      if (!rec) byEdge.set(edge.hashCode, rec = { edge, faces: [] })
+      if (!rec) byEdge.set(edge.hashCode, rec = { id: edge.hashCode, edge, faces: [] })
       rec.faces.push(face)
     }
   }
-  const out = []
-  for (const [hash, { edge, faces }] of byEdge) {
-    if (protectedHashes.has(hash)) continue
-    if (faces.length !== 2 || faces[0] === faces[1]) continue
-    if (oc.BRepTools.IsReallyClosed(edge.wrapped, faces[0].wrapped)) continue
-    const mid = edge.pointAt(0.5)
-    const n1 = faces[0].normalAt(mid), n2 = faces[1].normalAt(mid)
-    if (n1.dot(n2) > SOFTEN_SMOOTH_COS) continue
-    out.push({ pt: [mid.x, mid.y, mid.z], len: edge.length })
+  return byEdge
+}
+
+// Distance from a point to an edge, measured along 16 straight pieces of it.
+function softenDistToEdge(edge, pt) {
+  let a = edge.pointAt(0), best = Infinity
+  for (let i = 1; i <= 16; i++) {
+    const b = edge.pointAt(i / 16)
+    const abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z
+    const len2 = abx * abx + aby * aby + abz * abz
+    let t = len2 > 1e-12 ? ((pt[0] - a.x) * abx + (pt[1] - a.y) * aby + (pt[2] - a.z) * abz) / len2 : 0
+    t = Math.max(0, Math.min(1, t))
+    best = Math.min(best, Math.hypot(pt[0] - (a.x + abx * t), pt[1] - (a.y + aby * t), pt[2] - (a.z + abz * t)))
+    a = b
   }
-  out.sort((a, b) => b.len - a.len)
-  return out
+  return best
+}
+
+// The table entry a pick means: the edge with that hash if it still sits where
+// the pick was made, otherwise whichever edge passes closest to the picked point.
+function softenFindEdge(table, { edgeId, point }, tol = SOFTEN_PICK_TOL) {
+  if (edgeId != null && table.has(edgeId)) {
+    const rec = table.get(edgeId)
+    if (!point || softenDistToEdge(rec.edge, point) <= tol) return rec
+  }
+  if (!point) return null
+  let best = null, bestD = tol
+  for (const rec of table.values()) {
+    const d = softenDistToEdge(rec.edge, point)
+    if (d < bestD) { bestD = d; best = rec }
+  }
+  return best
+}
+
+// One candidate for an edge that two clearly-different faces share (not a seam,
+// not an edge between two faces that already flow into each other); null otherwise.
+function softenCandidate(rec) {
+  const oc = getOC()
+  const { edge, faces } = rec
+  if (faces.length !== 2 || faces[0] === faces[1]) return null
+  if (oc.BRepTools.IsReallyClosed(edge.wrapped, faces[0].wrapped)) return null
+  const mid = edge.pointAt(0.5)
+  const dot = faces[0].normalAt(mid).dot(faces[1].normalAt(mid))
+  if (dot > SOFTEN_SMOOTH_COS) return null
+  const phi = Math.min(Math.acos(Math.max(-1, Math.min(1, dot))), 3.0)   // bend between the faces
+  return { id: rec.id, pt: [mid.x, mid.y, mid.z], len: edge.length, k: Math.tan(phi / 2) - phi / 2 }
+}
+
+// The edges to work on, longest first. With `picks` ([{edgeId, point}]) just
+// those; otherwise every edge except the outline of the faces in keepFacePoints.
+// `dropped` counts picks that can't be rounded at all.
+function softenCandidates(shape, table, { keepFacePoints, picks }) {
+  let recs, dropped = 0
+  if (picks?.length) {
+    const seen = new Set()
+    recs = []
+    for (const p of picks) {
+      const rec = softenFindEdge(table, p)
+      if (!rec) dropped++
+      else if (!seen.has(rec.id)) { seen.add(rec.id); recs.push(rec) }
+    }
+  } else {
+    const protectedHashes = new Set()
+    if (keepFacePoints?.length) {
+      const kept = new FaceFinder().either(
+        keepFacePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
+      ).find(shape)
+      for (const face of kept) for (const edge of face.edges) protectedHashes.add(edge.hashCode)
+    }
+    recs = [...table.values()].filter(r => !protectedHashes.has(r.id))
+  }
+  const list = []
+  for (const rec of recs) {
+    const c = softenCandidate(rec)
+    if (c) list.push(c)
+    else if (picks?.length) dropped++
+  }
+  list.sort((a, b) => b.len - a.len)
+  return { list, dropped }
 }
 
 // One radius round: rounds as many of `cands` as will go together at `radius`.
@@ -386,11 +494,12 @@ function softenCandidates(shape, keepFacePoints) {
 // fillets instead of one per edge.
 function softenRound(cur, cands, radius, deadline) {
   const accepted = [], rejected = []
+  const before = softenMeasure(cur)
   let shape = null
   const visit = group => {
     if (!group.length) return
     if (Date.now() > deadline) { rejected.push(...group); return }
-    const trial = trySoftenFillet(cur, [...accepted, ...group].map(c => c.pt), radius)
+    const trial = trySoftenFillet(cur, before, [...accepted, ...group], radius)
     if (trial) { accepted.push(...group); shape = trial; return }
     if (group.length === 1) { rejected.push(group[0]); return }
     const mid = group.length >> 1
@@ -407,22 +516,39 @@ function softenLadder(radius, floor) {
   return out
 }
 
-function softenShape(base, { radius, minRadius, keepFacePoints }) {
+// Where the edges that didn't get rounded sit on the finished shape, as
+// [{edgeId, point}] — so the app can show them and offer another go.
+function softenLeftover(shape, left) {
+  const table = softenEdgeTable(shape)
+  const out = [], seen = new Set()
+  for (const c of left) {
+    const rec = softenFindEdge(table, { point: c.pt }, 0.3)
+    if (!rec || seen.has(rec.id)) continue
+    seen.add(rec.id)
+    const mid = rec.edge.pointAt(0.5)
+    out.push({ edgeId: rec.id, point: [mid.x, mid.y, mid.z] })
+  }
+  return out
+}
+
+function softenShape(base, { radius, minRadius, keepFacePoints, picks }) {
   const t0 = Date.now()
   const floor = Math.min(minRadius ?? SOFTEN_MIN_RADIUS, radius)
   const ladder = softenLadder(radius, floor)
-  const candidates = softenCandidates(base, keepFacePoints)
-  const total = candidates.length
+  const { list: candidates, dropped } = softenCandidates(base, softenEdgeTable(base), { keepFacePoints, picks })
+  const total = candidates.length + dropped
+  const baseMeasure = softenMeasure(base)
   // Cheap first pass: the biggest rung each edge takes on its own. Grouping edges
   // by this keeps the big all-at-once attempts from failing over and over.
   let remaining = []
-  let unfit = 0
+  const unfit = []
   for (const c of candidates) {
     for (const rung of ladder) {
       if (Date.now() - t0 > SOFTEN_TIME_BUDGET_MS) break
-      if (trySoftenFillet(base, [c.pt], rung)) { c.rmax = rung; break }
+      const out = trySoftenFillet(base, baseMeasure, [c], rung)
+      if (out) { out.delete?.(); c.rmax = rung; break }
     }
-    if (c.rmax) remaining.push(c); else unfit++
+    if (c.rmax) remaining.push(c); else unfit.push(c)
   }
   const rounds = []
   let cur = base
@@ -431,8 +557,16 @@ function softenShape(base, { radius, minRadius, keepFacePoints }) {
     const due = remaining.filter(c => c.rmax + 1e-9 >= r)
     if (!due.length) continue
     const waiting = remaining.filter(c => c.rmax + 1e-9 < r)
-    // An edge swallowed by a neighbour's rounding no longer exists — drop it quietly.
-    const live = due.filter(c => edgeFilterForPoints([c.pt])(new EdgeFinder()).find(cur).length > 0)
+    // Measure each edge again on the shape as it is now (earlier roundings change an
+    // edge's length and position). One swallowed by a neighbour's rounding no longer
+    // exists — drop it quietly.
+    const table = softenEdgeTable(cur)
+    const live = []
+    for (const c of due) {
+      const rec = softenFindEdge(table, { point: c.pt }, 0.3)
+      const fresh = rec && softenCandidate(rec)
+      if (fresh) live.push({ ...fresh, rmax: c.rmax })
+    }
     const { accepted, rejected, shape: next } = softenRound(cur, live, r, t0 + SOFTEN_TIME_BUDGET_MS)
     remaining = [...rejected, ...waiting]
     if (accepted.length) {
@@ -440,7 +574,12 @@ function softenShape(base, { radius, minRadius, keepFacePoints }) {
       cur = next
     }
   }
-  return { shape: cur, rounds, total, skipped: unfit + remaining.length, timedOut: Date.now() - t0 >= SOFTEN_TIME_BUDGET_MS }
+  const left = [...unfit, ...remaining]
+  return {
+    shape: cur, rounds, total, skipped: left.length + dropped,
+    leftover: softenLeftover(cur, left),
+    timedOut: Date.now() - t0 >= SOFTEN_TIME_BUDGET_MS,
+  }
 }
 
 // For a cylindrical face viewed non-end-on, meshEdges/projectEdge alone
@@ -898,6 +1037,19 @@ self.onmessage = async function(e) {
       return
     }
 
+    if (type==='softenEdges') {
+      // Lists the edges Soften could round on a body — every one, or all but the
+      // outline of the faces in keepFacePoints — so the app can select them.
+      let base = shapeStore.get(params.solidId)
+      if (!base) {
+        if (!params.base) throw new Error('Soften-MISS: base not in store and no fallback params')
+        base = await buildBase(params.base)
+      }
+      const { list } = softenCandidates(base, softenEdgeTable(base), { keepFacePoints: params.keepFacePoints })
+      self.postMessage({ type:'result', id, softenEdges: list.map(c => ({ edgeId: c.id, point: c.pt })) })
+      return
+    }
+
     if (type==='springProfilePlane') {
       self.postMessage({ type:'result', id, planeData: computeSpringPathPlane(params) })
       return
@@ -970,10 +1122,10 @@ self.onmessage = async function(e) {
         console.warn('[cadWorker] shapeStore miss — rebuilding base from params')
         base = await buildBase(params.base)
       }
-      const res = softenShape(base, params)
+      const res = softenShape(base, { ...params, picks: params.edges })
       if (!res.rounds.length) throw new Error('Soften failed: none of the edges could be rounded — try a smaller radius')
       shape = res.shape
-      softenInfo = { rounds: res.rounds, total: res.total, skipped: res.skipped, timedOut: res.timedOut }
+      softenInfo = { rounds: res.rounds, total: res.total, skipped: res.skipped, leftover: res.leftover, timedOut: res.timedOut }
       shapeStore.set(params.solidId, shape)
     } else if (type==='shell3d') {
       // Face-pick shell: applies to whatever this solid currently looks like,

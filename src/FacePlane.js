@@ -548,12 +548,19 @@ function extractFaceBoundaryLoops3D(hit, normal, epsilon=0.05) {
   }
 
   const boundary = [...edges.values()].filter(e => e.count===1)
-  // Sanity cap — a real face's boundary is a handful of edges. If something
-  // unexpected produced way more, bail rather than risk a slow O(n^2) chain-up.
-  if (!boundary.length || boundary.length > 500) return []
+  // Sanity cap, only there to stop a runaway mesh. It was once 500 — but a
+  // face with smooth spline edges plus a few holes (a controller plate, say)
+  // legitimately has 700+ boundary edges, and bailing out here meant no
+  // sketch frame, orientation or snap points on its top face at all.
+  if (!boundary.length || boundary.length > 50000) return []
 
-  // Chain boundary edges into ordered loop(s) by shared endpoints
+  // Chain boundary edges into ordered loop(s) by shared endpoints. Edges are
+  // indexed by endpoint key so each step is a lookup, not a scan of every edge
+  // (the scan was O(n²), which only stayed fast while the cap was tiny).
   const used = new Array(boundary.length).fill(false)
+  const byEnd = new Map()   // endpoint key → indices of boundary edges touching it, in order
+  const addEnd = (k, j) => { const l = byEnd.get(k); if (l) l.push(j); else byEnd.set(k, [j]) }
+  boundary.forEach((e, j) => { addEnd(keyOf(e.a), j); addEnd(keyOf(e.b), j) })
   const loops = []
   for (let i=0; i<boundary.length; i++) {
     if (used[i]) continue
@@ -563,7 +570,7 @@ function extractFaceBoundaryLoops3D(hit, normal, epsilon=0.05) {
     while (extended) {
       extended = false
       const tailKey = keyOf(loop[loop.length-1])
-      for (let j=0; j<boundary.length; j++) {
+      for (const j of byEnd.get(tailKey) || []) {
         if (used[j]) continue
         const {a,b} = boundary[j]
         if (keyOf(a)===tailKey) { loop.push(b); used[j]=true; extended=true; break }

@@ -15,6 +15,7 @@ import { buildRectangularOffsets, buildCircularAngles, circularStepAngleDeg } fr
 import { nearestScaleEntity, buildScaled } from './tools/scaleMath.js'
 import { nearestFilletLine, computeFillet } from './tools/filletMath.js'
 import { computeExtendPreview } from './tools/extendMath.js'
+import { fitSplineToPoints } from './tools/splineFit.js'
 import { sampleSpline, nearestSpline, computeSplineTrimPreview, performSplineTrim, distToSpline } from './tools/splineMath.js'
 import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform } from './tools/selectMath.js'
 import { isEditableSpline, hitSplineNode, moveSplineNode, insertSplineNode, deleteSplineNode } from './tools/splineEdit.js'
@@ -4186,10 +4187,11 @@ const App3D = forwardRef(function App3D(props, ref) {
   // Include Edge deals with exactly ONE OCC edge at a time — inherently a
   // single primitive already, so there's nothing to segment, just "which
   // one primitive is this." Reuses the same fit helpers FacePlane.js's face-
-  // boundary classification already relies on. Returns {lines,circles,arcs}
+  // boundary classification already relies on. Returns {lines,circles,arcs,splines}
   // (exactly one populated with one entry, unless the edge is some other
   // curve type — ellipse, spline, etc. — that fits neither cleanly, in
-  // which case `lines` holds the same faceted-polyline fallback
+  // which case `splines` holds one fitted spline (or, if that cannot be fitted
+  // within tolerance, `lines` holds the same faceted-polyline fallback
   // edgeToSketchSegments would produce). Returns null if the edge can no
   // longer be found.
   function edgeToSketchGeometry(solidId, edgeId) {
@@ -4215,7 +4217,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       pts.push(toSketch(p))
     }
     if (pts.length < 2) return null
-    const empty = { lines: [], circles: [], arcs: [] }
+    const empty = { lines: [], circles: [], arcs: [], splines: [] }
     const fallback = () => {
       const segs = []
       for (let i = 0; i < pts.length - 1; i++) segs.push({ x1:pts[i].x, y1:pts[i].y, x2:pts[i+1].x, y2:pts[i+1].y })
@@ -4267,20 +4269,25 @@ const App3D = forwardRef(function App3D(props, ref) {
       }
     }
 
-    // Circular? (closed = full circle, open = arc) — same 3% radius
-    // tolerance FacePlane.js's fitCircleIfRound already uses for this exact
-    // kind of tessellated-edge data.
+    // Circular? (closed = full circle, open = arc). The edge's own vertices
+    // lie exactly on a true circle, so the tolerance can be tight — the old
+    // loose 3%-of-radius test turned gentle spline/ellipse edges into visibly
+    // wrong arcs (several px off at the middle on a ~250px radius).
     const fit = fitCircleLeastSquares(pts)
-    if (fit && fit.r > 1e-6 && pts.every(p => Math.abs(Math.hypot(p.x-fit.cx,p.y-fit.cy)-fit.r)/fit.r < 0.03)) {
+    const circTol = fit ? Math.max(0.3, fit.r * 0.002) : 0
+    if (fit && fit.r > 1e-6 && pts.every(p => Math.abs(Math.hypot(p.x-fit.cx,p.y-fit.cy)-fit.r) < circTol)) {
       if (closed) return { ...empty, circles: [{ cx:fit.cx, cy:fit.cy, r:fit.r }] }
       const arc = fitArcToRun(pts)
       if (arc) return { ...empty, arcs: [{ cx:arc.cx, cy:arc.cy, r:arc.r, startAngle:arc.startAngle, endAngle:arc.endAngle }] }
     }
 
-    // Neither — an ellipse, spline, or other curve type: fall back to the
-    // original faceted-polyline behavior rather than distorting it into a
-    // wrong circle/line.
-    return fallback()
+    // Neither — an ellipse, spline, or other curve type: one smooth spline
+    // through a few well-chosen points (tools/splineFit.js), so it is a single
+    // selectable, editable object that extrudes as a true curve. If it can't
+    // be fitted within tolerance (a sharp corner), keep the faceted lines
+    // rather than distorting it.
+    const spl = fitSplineToPoints(pts, closed)
+    return spl ? { ...empty, splines: [spl] } : fallback()
   }
 
   function resetIncludeEdge() {
@@ -4300,7 +4307,7 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   // Click while hovering an edge — commit it as construction geometry (a
   // true circle/arc when the edge fits one, a single line when straight,
-  // otherwise a faceted polyline — see edgeToSketchGeometry) and stay armed
+  // otherwise one fitted spline — see edgeToSketchGeometry) and stay armed
   // for the next pick. Re-clicking an already-included edge is a no-op
   // (each edge only needs to be included once).
   function handleIncludeEdgeClick(e) {
@@ -4309,7 +4316,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     const already = includeEdgeSel.some(s => s.solidId===hit.solidId && s.edgeId===hit.edgeId)
     if (already) return true
     const geo = edgeToSketchGeometry(hit.solidId, hit.edgeId)
-    if (!geo || (!geo.lines.length && !geo.circles.length && !geo.arcs.length)) return true
+    if (!geo || (!geo.lines.length && !geo.circles.length && !geo.arcs.length && !geo.splines.length)) return true
     const tag = planeTag()
     commit(snapshot())
     // Firm (the default): style is left unset so it looks like hand-drawn
@@ -4324,6 +4331,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (geo.lines.length)   setLines  (prev => [...prev, ...geo.lines  .map(s => ({ ...s, ...mark, ...tag }))])
     if (geo.circles.length) setCircles(prev => [...prev, ...geo.circles.map(s => ({ ...s, ...mark, ...tag }))])
     if (geo.arcs.length)    setArcs   (prev => [...prev, ...geo.arcs   .map(s => ({ ...s, ...mark, ...tag }))])
+    if (geo.splines.length) setSplines(prev => [...prev, ...geo.splines.map(s => ({ ...s, ...mark, ...tag }))])
     setIncludeEdgeSel(prev => [...prev, { solidId: hit.solidId, edgeId: hit.edgeId }])
     return true
   }

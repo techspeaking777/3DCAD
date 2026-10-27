@@ -159,9 +159,18 @@ export function getGeoSnap(pos,lines,circles,arcs,excludePt,allowTan=false,splin
     const sampled=sp.polyline?sp.points:sampleSplineInline(sp.points,sp.closed,16)
     for (let i=0;i<sampled.length-1;i++){
       const nb=nearestOnSegment(pos.x,pos.y,sampled[i].x,sampled[i].y,sampled[i+1].x,sampled[i+1].y)
-      if (nb.dist<ld&&nb.dist<bestDist&&nb.t>0&&nb.t<1){
-        // Don't show 'online' if we're near an endpoint or nodepoint
-        const nearSpecial=[...endPts,...(sp.polyline?[]:sp.points)].some(p=>Math.hypot(nb.x-p.x,nb.y-p.y)<sd*1.5)
+      // Only the curve's own two ends are excluded (t clamped past the first/
+      // last segment — the endpoint snap owns those). Interior joints between
+      // sampled segments must count: on the outside of a bend the nearest
+      // point is exactly a joint, where BOTH neighbours report t=0/1, and
+      // rejecting it made the ON indicator flicker out along every bend.
+      const pastStart=i===0&&nb.t<=0, pastEnd=i===sampled.length-2&&nb.t>=1
+      if (nb.dist<ld&&nb.dist<bestDist&&!pastStart&&!pastEnd){
+        // Don't show 'online' where the endpoint/nodepoint snap takes over.
+        // The radius must match that snap's own (sd): it used to be sd*1.5, so
+        // between sd and 1.5·sd NEITHER snap was active and the indicator
+        // simply vanished as the cursor approached a spline point.
+        const nearSpecial=[...endPts,...(sp.polyline?[]:sp.points)].some(p=>Math.hypot(nb.x-p.x,nb.y-p.y)<sd)
         if (!nearSpecial){bestDist=nb.dist;best={x:nb.x,y:nb.y,type:'online'}}
       }
     }

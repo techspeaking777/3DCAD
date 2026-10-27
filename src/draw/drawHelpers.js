@@ -36,11 +36,15 @@ export function drawLineIndicator(ctx, x, y, type, viewScale=1) {
     ctx.strokeStyle='#CDDC39';ctx.lineWidth=2.5
     ctx.beginPath();ctx.moveTo(-7,-7);ctx.lineTo(7,7);ctx.moveTo(7,-7);ctx.lineTo(-7,7);ctx.stroke()
     ctx.fillStyle='#CDDC39';ctx.font='10px sans-serif';ctx.fillText('INT',11,-5)
-    // Spline node/control point — filled orange square
-    ctx.fillStyle='#FF9800'
-    ctx.fillRect(-5,-5,10,10)
-    ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.strokeRect(-5,-5,10,10)
-    ctx.fillStyle='#FF9800';ctx.font='10px sans-serif';ctx.fillText('NP',13,-5)
+  } else if (type==='nodepoint'){
+    // A point the spline was drawn through — green ring with a solid dot. Same
+    // green family as the ON cross (it IS on the curve) but clearly a point,
+    // not just "somewhere along it".
+    ctx.strokeStyle='#4CAF50';ctx.lineWidth=2
+    ctx.beginPath();ctx.arc(0,0,8,0,Math.PI*2);ctx.stroke()
+    ctx.fillStyle='#4CAF50'
+    ctx.beginPath();ctx.arc(0,0,3,0,Math.PI*2);ctx.fill()
+    ctx.font='10px sans-serif';ctx.fillText('PT',13,-5)
   } else if (type==='tan'){
     ctx.strokeStyle='#E91E63';ctx.lineWidth=2
     ctx.beginPath();ctx.arc(0,0,8,0,Math.PI*2);ctx.stroke()

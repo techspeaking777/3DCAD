@@ -106,12 +106,68 @@ async function gatherAndFuseExportSolids(solidsParams) {
 // result to a total no-op, purely from this one call). No case was found
 // where keeping it helped; dropping it just leaves a few more
 // coplanar/redundant faces in the mesh, which costs nothing functionally.
+// Volume (mm³) of a raw OpenCascade shape.
+function ocVolume(wrapped) {
+  const oc = getOC()
+  const gp = new oc.GProp_GProps_1()
+  try {
+    oc.BRepGProp.VolumeProperties_1(wrapped, gp, false, false, false)
+    return gp.Mass()
+  } finally { gp.delete() }
+}
+
+// How much of `a` the tool `b` overlaps (mm³), judged at a given fuzzy value.
+function overlapVolume(a, b, fuzzy) {
+  const [r, gc] = localGC()
+  const oc = getOC()
+  const progress = r(new oc.Message_ProgressRange_1())
+  const op = r(new oc.BRepAlgoAPI_Common_3(a.wrapped, b.wrapped, progress))
+  op.SetFuzzyValue(fuzzy)
+  op.Build(progress)
+  const v = op.IsDone() && !op.HasErrors() ? ocVolume(op.Shape()) : 0
+  gc()
+  return v
+}
+
+// A cut tool that just touches the target along a line or face — e.g. a
+// circle sketched tangent to the end wall of a solid — can make OpenCascade
+// report a perfectly "valid", error-free result that removed almost nothing
+// (and an overlap of 0 at the normal fuzzy value), so the cut silently looked
+// like it hadn't worked. When a cut removes suspiciously little we re-measure
+// the overlap at a looser fuzzy value; only if that finds far more material
+// than was removed AND redoing the cut there removes about that much do we
+// use the retried result. Everything else keeps the precise, normal-tolerance
+// result — the looser value can swallow deliberately thin walls, so it is
+// never the default.
+const CUT_RETRY_FUZZY_TOL = 0.5
 function cutTolerant(a, b) {
+  const result = cutWithFuzzy(a, b, FUSE_FUZZY_TOL)
+  try {
+    const vA = ocVolume(a.wrapped)
+    const removed = vA - ocVolume(result.wrapped)
+    if (vA > 0 && removed < 0.02 * vA) {
+      const expected = overlapVolume(a, b, CUT_RETRY_FUZZY_TOL)
+      if (removed < 0.25 * expected && expected - removed > Math.max(0.001 * vA, 1)) {
+        const retry = cutWithFuzzy(a, b, CUT_RETRY_FUZZY_TOL)
+        const removed2 = vA - ocVolume(retry.wrapped)
+        if (Math.abs(removed2 - expected) <= 0.05 * expected) {
+          console.warn('[cadWorker] cut removed almost nothing at the normal tolerance — used the looser retry', { removed, expected })
+          return retry
+        }
+      }
+    }
+  } catch (e) {
+    // Verification is best-effort: never break a cut that already succeeded.
+  }
+  return result
+}
+
+function cutWithFuzzy(a, b, fuzzy) {
   const [r, gc] = localGC()
   const oc = getOC()
   const progress = r(new oc.Message_ProgressRange_1())
   const op = r(new oc.BRepAlgoAPI_Cut_3(a.wrapped, b.wrapped, progress))
-  op.SetFuzzyValue(FUSE_FUZZY_TOL)
+  op.SetFuzzyValue(fuzzy)
   op.Build(progress)
   // Was silently absent — a failed boolean (e.g. a cut tool exactly
   // coincident with the target's own face) previously fell through to

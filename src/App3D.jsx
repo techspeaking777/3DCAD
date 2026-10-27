@@ -1798,6 +1798,11 @@ const App3D = forwardRef(function App3D(props, ref) {
   // references it.
   const [includeEdgeHover, setIncludeEdgeHover] = useState(null)   // {solidId, edgeId, point} | null
   const [includeEdgeSel, setIncludeEdgeSel] = useState([])         // [{solidId, edgeId}] picked so far this session
+  // How the next included edge is drawn: false = firm (part of the new profile),
+  // true = construction (reference/snapping only, ignored when the profile is
+  // built). Kept across picks and tool re-entries, so a run of reference edges
+  // is just a switch flipped once.
+  const [includeEdgeConstruction, setIncludeEdgeConstruction] = useState(false)
   const [dimInput,setDimInput]=useState('')
   const [dimLocked,setDimLocked]=useState(false)
   const [angleInput,setAngleInput]=useState('')
@@ -4127,10 +4132,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     // sketch, before it's actually committed as a construction line ──
     if (tool==='includeedge'&&includeEdgeHover){
       const segs=edgeToSketchSegments(includeEdgeHover.solidId,includeEdgeHover.edgeId)
-      if (segs) for (const s of segs) drawPreviewLine(ctx,s.x1,s.y1,s.x2,s.y2,'#FFEB3B',1,sc)
+      if (segs) for (const s of segs) drawPreviewLine(ctx,s.x1,s.y1,s.x2,s.y2,includeEdgeConstruction?'#90A4AE':'#FFEB3B',1,sc)
     }
 
-  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover])
+  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction])
 
 
   // ── Phase 2 Step 3: plane tagging ────────────────────────────────────────
@@ -4307,15 +4312,18 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (!geo || (!geo.lines.length && !geo.circles.length && !geo.arcs.length)) return true
     const tag = planeTag()
     commit(snapshot())
-    // includedEdge:true lets detectProfiles still treat this as a real
-    // boundary segment (see its own comment) and lets its junction
-    // disambiguation deprioritize it as a loop-start candidate. Style is
-    // left firm (not construction) — an included edge is usually meant to
-    // BE part of the new profile's actual boundary, not reference-only
-    // geometry, so it should look the same as geometry drawn by hand.
-    if (geo.lines.length)   setLines  (prev => [...prev, ...geo.lines  .map(s => ({ ...s, includedEdge:true, ...tag }))])
-    if (geo.circles.length) setCircles(prev => [...prev, ...geo.circles.map(s => ({ ...s, includedEdge:true, ...tag }))])
-    if (geo.arcs.length)    setArcs   (prev => [...prev, ...geo.arcs   .map(s => ({ ...s, includedEdge:true, ...tag }))])
+    // Firm (the default): style is left unset so it looks like hand-drawn
+    // geometry, and includedEdge:true lets detectProfiles treat it as a real
+    // boundary segment (see its own comment) and deprioritize it as a
+    // loop-start candidate — an included edge is usually meant to BE part of
+    // the new profile. Construction: style 'construction' and NO includedEdge
+    // flag, because that flag is exactly what makes detectProfiles count a
+    // construction line as a boundary anyway; without it the edge is pure
+    // reference (dashed, snappable, ignored when the solid is built).
+    const mark = includeEdgeConstruction ? { style:'construction' } : { includedEdge:true }
+    if (geo.lines.length)   setLines  (prev => [...prev, ...geo.lines  .map(s => ({ ...s, ...mark, ...tag }))])
+    if (geo.circles.length) setCircles(prev => [...prev, ...geo.circles.map(s => ({ ...s, ...mark, ...tag }))])
+    if (geo.arcs.length)    setArcs   (prev => [...prev, ...geo.arcs   .map(s => ({ ...s, ...mark, ...tag }))])
     setIncludeEdgeSel(prev => [...prev, { solidId: hit.solidId, edgeId: hit.edgeId }])
     return true
   }
@@ -11474,7 +11482,10 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     if (tool==='trim'||tool==='delete'||tool==='extend'||tool==='trace'||tool==='text'||tool==='select'||tool==='join'){if(e.key==='Escape'){resetText();resetSelection();resetJoin();resetDim();setTool('line');return}}
 
-    if (tool==='includeedge'){if(e.key==='Escape'){resetIncludeEdge();setTool('line');return}}
+    if (tool==='includeedge'){
+      if(e.key==='Escape'){resetIncludeEdge();setTool('line');return}
+      if((e.key==='c'||e.key==='C')&&!e.ctrlKey&&!e.altKey&&!e.metaKey){setIncludeEdgeConstruction(v=>!v);return}
+    }
 
     if (tool==='select'&&selection.length>0){
       // A picked spline point goes first (Delete removes just that point, not
@@ -11990,7 +12001,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     ['dim',        IconDim,        'Dimension',      '#E91E63'],
     ['axis',       IconAxis,       'Revolve Axis',   '#E0E0E0'],
     ['trace',      IconTrace,      'Trace Image',    '#607D8B'],
-    ['includeedge', IconIncludeEdge, 'Include Edge — click any edge on any solid to add it as a construction line', '#4FC3F7'],
+    ['includeedge', IconIncludeEdge, 'Include Edge — click any edge on any solid to add it to the sketch (firm or construction)', '#4FC3F7'],
   ]
 
   const editConfig=[
@@ -14478,8 +14489,24 @@ const App3D = forwardRef(function App3D(props, ref) {
                 <div style={{textAlign:'center',fontSize:9,color:'#666',marginTop:2}}>
                   edge{includeEdgeSel.length===1?'':'s'} included
                 </div>
+                {/* Firm = becomes part of the new profile; Construction = reference
+                    only (dashed, snappable, ignored when the solid is built). */}
+                <div style={{display:'flex',gap:4,marginTop:8}}>
+                  {[[false,'FIRM','Part of the new profile'],[true,'CONSTR.','Reference only — not part of the solid']].map(([val,label,tip])=>{
+                    const on=includeEdgeConstruction===val
+                    return (
+                      <button key={label} title={tip} onClick={()=>setIncludeEdgeConstruction(val)}
+                        style={{flex:1,padding:'4px 0',fontSize:9,fontFamily:'monospace',cursor:'pointer',
+                          letterSpacing:'0.04em',borderRadius:4,
+                          background:on?`${toolColor}33`:'transparent',
+                          border:`1px solid ${on?toolColor:'#3a3a5a'}`,color:on?toolColor:'#777'}}>
+                        {label}
+                      </button>
+                    )
+                  })}
+                </div>
                 <div style={{marginTop:8,textAlign:'center',fontSize:9,color:'#666'}}>
-                  Click any edge on any solid. Esc when done.
+                  Click any edge on any solid. C switches firm / construction. Esc when done.
                 </div>
               </div>
             )

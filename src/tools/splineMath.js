@@ -244,18 +244,21 @@ export function performSplineTrim(preview, splines) {
   if (!sp) return splines
 
   const { fullSampled, uStart, uEnd } = preview
-  const styleField = sp.style ? { style: sp.style } : {}
+  // Everything that isn't the curve itself (style, plane/facePlane tag, textId,
+  // includedEdge, …) belongs to both leftover pieces — dropping the plane tag
+  // made the 3D view draw them on the default plane, so they jumped.
+  const { points: _pts, closed: _closed, polyline: _polyline, ...carried } = sp
   const newSplines = splines.filter((_, i) => i !== preview.idx)
 
-  // Part before the trim — carry style from original spline
+  // Part before the trim
   if (uStart > 1e-4) {
     const pts = subPolyline(fullSampled, 0, uStart)
-    if (pts.length >= 2) newSplines.push({ points: pts, closed: false, polyline: true, ...styleField })
+    if (pts.length >= 2) newSplines.push({ ...carried, points: pts, closed: false, polyline: true })
   }
-  // Part after the trim — carry style from original spline
+  // Part after the trim
   if (uEnd < 1 - 1e-4) {
     const pts = subPolyline(fullSampled, uEnd, 1)
-    if (pts.length >= 2) newSplines.push({ points: pts, closed: false, polyline: true, ...styleField })
+    if (pts.length >= 2) newSplines.push({ ...carried, points: pts, closed: false, polyline: true })
   }
 
   return newSplines

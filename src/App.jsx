@@ -12,6 +12,7 @@ import { nearestFilletLine, computeFillet } from './tools/filletMath.js'
 import { computeExtendPreview } from './tools/extendMath.js'
 import { sampleSpline, nearestSpline, computeSplineTrimPreview, performSplineTrim, distToSpline } from './tools/splineMath.js'
 import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform } from './tools/selectMath.js'
+import { isEditableSpline, hitSplineNode, moveSplineNode, insertSplineNode, deleteSplineNode } from './tools/splineEdit.js'
 import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine, perpLabelOffset } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
 import { loadJSON, exportDXF, parseDXF, saveProjectAs, canPickSaveLocation } from './tools/saveLoad.js'
@@ -162,6 +163,13 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   const selectSnapshotRef=useRef(null)                  // entity snapshot at drag start
   const selectBBoxRef=useRef(null)                      // bbox at drag start
   const [selectLiveGeom,setSelectLiveGeom]=useState(null) // live-transformed geometry during drag
+  // Spline point editing (Select tool, one hand-drawn spline selected): its
+  // points show as dots you can drag; double-click the curve adds one; a
+  // selected point + Delete removes it. Mirrors App3D.jsx — see tools/splineEdit.js.
+  const [splineNodeSel,setSplineNodeSel]=useState(null)     // {idx,node} — the point Delete would remove
+  const [splineNodeHover,setSplineNodeHover]=useState(null) // {idx,node} under the cursor
+  const [splineNodeDragging,setSplineNodeDragging]=useState(false)
+  const splineNodeDragRef=useRef(null)                      // {idx,node,startScreen,moved} while a point is held
   // Dimension editing state
   const [selectDimField,setSelectDimField]=useState(null)   // currently focused field
   const [selectDimInput,setSelectDimInput]=useState('')      // value being typed in current field
@@ -937,6 +945,23 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     })
     setSelectHover(best)
   },[tool,mousePos,lines,circles,arcs,splines,dims,selection,selectLiveGeom,viewTransform.scale])
+
+  // The one spline (if any) whose points can be edited right now: Select tool,
+  // exactly one entity selected, and it's a hand-drawn spline. Reads the live
+  // (mid-drag) geometry so the dots follow the cursor.
+  function soleEditableSpline(){
+    if (tool!=='select'||selection.length!==1||selection[0].kind!=='spline') return null
+    const sp=(selectLiveGeom?.splines||splines)[selection[0].idx]
+    return isEditableSpline(sp)?{idx:selection[0].idx,sp}:null
+  }
+
+  // Point under the cursor → hover highlight; a changed selection forgets the picked point.
+  useEffect(()=>{
+    const ed=soleEditableSpline()
+    const i=ed&&mousePos?hitSplineNode(ed.sp,mousePos,12/viewTransform.scale):-1
+    setSplineNodeHover(i>=0?{idx:ed.idx,node:i}:null)
+  },[tool,mousePos,selection,splines,selectLiveGeom,viewTransform.scale])
+  useEffect(()=>{ setSplineNodeSel(null) },[selection,tool])
 
   useEffect(()=>{
     setIntersectionPts(computeAllIntersections(lines,circles,arcs,splines))
@@ -1729,6 +1754,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
                   ctx.restore()
                 }
               }
+            } else if (e0.kind==='spline'){
+              if (isEditableSpline(curSplines[e0.idx])) drawLabel(ctx,'Drag a point · double-click to add one · Delete removes',(bbox.x1+bbox.x2)/2,bbox.y1-18/sc,inactiveColor,sc)
             } else if (e0.kind==='arc'){
               const a=curArcs[e0.idx];if(a){
                 const r=pxToMm(a.r)
@@ -1796,6 +1823,24 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           }
           ctx.restore()
         }
+      }
+    }
+
+    // Spline points (Select tool, one hand-drawn spline selected): start =
+    // green, end = red, in-between = orange; hovered/picked ones grow.
+    if (tool==='select'&&selection.length===1&&selection[0].kind==='spline'){
+      const eSp=(selectLiveGeom?.splines||splines)[selection[0].idx]
+      if (isEditableSpline(eSp)){
+        eSp.points.forEach((pt,i)=>{
+          const isStart=!eSp.closed&&i===0, isEnd=!eSp.closed&&i===eSp.points.length-1
+          const isSel=splineNodeSel?.idx===selection[0].idx&&splineNodeSel.node===i
+          const isHov=splineNodeHover?.idx===selection[0].idx&&splineNodeHover.node===i
+          ctx.save();ctx.translate(pt.x,pt.y);ctx.scale(1/sc,1/sc)
+          ctx.beginPath();ctx.arc(0,0,(isSel||isHov)?7.5:5.5,0,Math.PI*2)
+          ctx.fillStyle=isSel?'#FFD600':isStart?'#4CAF50':isEnd?'#F44336':'#FF9800'
+          ctx.fill();ctx.strokeStyle=isSel?'#fff':'#222';ctx.lineWidth=1.5;ctx.stroke()
+          ctx.restore()
+        })
       }
     }
 
@@ -2028,7 +2073,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       if (geo) drawLineIndicator(ctx,geo.x,geo.y,geo.type,sc)
     }
 
-  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,deferredTangent,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,canvasSize,tKeyDown,pKeyDown,perpSourceLineIdx,drawStyle,intersectionPts,joinHover,joinFirstPt,pageConfig,dims,dimToolPreview,dimToolPts,gridVisible,gridSizeMm])
+  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,deferredTangent,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,canvasSize,tKeyDown,pKeyDown,perpSourceLineIdx,drawStyle,intersectionPts,joinHover,joinFirstPt,pageConfig,dims,dimToolPreview,dimToolPts,gridVisible,gridSizeMm])
 
   function handleMouseDown(e){
     if (e.button===1){e.preventDefault();isPanningRef.current=true;lastPanPosRef.current={x:e.clientX,y:e.clientY}}
@@ -2043,6 +2088,16 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         const curCircles = selectLiveGeom?.circles || circles
         const curArcs    = selectLiveGeom?.arcs    || arcs
         const curSplines = selectLiveGeom?.splines || splines
+        // A point of the selected spline wins over the bounding-box handles.
+        const edSpl=soleEditableSpline()
+        if (edSpl){
+          const ni=hitSplineNode(edSpl.sp,worldPos,12/viewTransform.scale)
+          if (ni>=0){
+            splineNodeDragRef.current={idx:edSpl.idx,node:ni,startScreen:{x:sx,y:sy},moved:false}
+            setSplineNodeSel({idx:edSpl.idx,node:ni})
+            return
+          }
+        }
         const bbox=selectionBBox(selection,curLines,curCircles,curArcs,curSplines)
         if (bbox&&selection.length>0){
           const handles=getBBoxHandles(bbox)
@@ -2074,6 +2129,21 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   function handleMouseUp(e){
     if (e.button===1) isPanningRef.current=false
     if (e.button===0){
+      // Let go of a spline point: a real drag commits the new curve (undoable),
+      // a plain click just leaves the point picked. Either way the click that
+      // follows must not toggle the spline's own selection.
+      if (splineNodeDragRef.current){
+        const d=splineNodeDragRef.current
+        splineNodeDragRef.current=null
+        if (d.moved&&selectLiveGeom){
+          commit(snapshot())
+          setSplines(selectLiveGeom.splines)
+          setSelectLiveGeom(null)
+        }
+        setSplineNodeDragging(false)
+        wasDragRef.current=true
+        return
+      }
       // Commit handle drag
       if (tool==='select'&&selectDragHandleRef.current){
         if (!selectLiveGeom){
@@ -2159,6 +2229,9 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     }
 
     if (tool==='select'){
+      // The 2nd click of a double-click would toggle the entity straight back
+      // off; the double-click itself (handleDoubleClick) does the real work.
+      if (e.detail>1) return
       const curLines   = selectLiveGeom?.lines   || lines
       const curCircles = selectLiveGeom?.circles || circles
       const curArcs    = selectLiveGeom?.arcs    || arcs
@@ -2193,7 +2266,11 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           else setSelection(p=>[...p,selectHover])
         } else {
           const sole=selection.length===1&&selection[0].kind===selectHover.kind&&selection[0].idx===selectHover.idx
-          setSelection(sole?[]:[selectHover])
+          // Clicking the already-selected shape deselects it — except a hand-drawn
+          // spline, whose curve is what you double-click to add a point (the
+          // first click of that double-click must not drop the selection).
+          const keepSpline=sole&&selectHover.kind==='spline'&&isEditableSpline(curSplines[selectHover.idx])
+          setSelection(sole&&!keepSpline?[]:[selectHover])
           setSelectDimField(null);setSelectDimPending({});setSelectDimAnchor('mc')
         }
       } else if (!e.shiftKey){
@@ -2617,6 +2694,22 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   }
 
   function handleDoubleClick(e){
+    // Select tool, one hand-drawn spline picked: double-click on the curve adds a
+    // point there (and picks it, ready to drag or delete).
+    if (tool==='select'){
+      const ed=soleEditableSpline()
+      if (!ed) return
+      const rect=canvasRef.current.getBoundingClientRect()
+      const pos=screenToWorld(e.clientX-rect.left,e.clientY-rect.top)
+      if (hitSplineNode(ed.sp,pos,12/viewTransform.scale)>=0) return
+      const ins=insertSplineNode(ed.sp,pos,12/viewTransform.scale)
+      if (!ins) return
+      e.preventDefault()
+      commit(snapshot())
+      setSplines(p=>p.map((s,i)=>i===ed.idx?ins.sp:s))
+      setSplineNodeSel({idx:ed.idx,node:ins.index})
+      return
+    }
     if (tool==='line'&&startPoint){
       e.preventDefault()
       const segsSoFar=linesRef.current.length-chainStartLenRef.current
@@ -2667,6 +2760,21 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     }
 
     const worldPos=screenToWorld(sx,sy)
+
+    // Dragging a spline point: snaps like the drawing tools do (geometry first,
+    // then the grid), ignoring the spline's own points so it can't snap to itself.
+    if (splineNodeDragRef.current&&(e.buttons&1)){
+      const d=splineNodeDragRef.current
+      if (!d.moved&&Math.hypot(sx-d.startScreen.x,sy-d.startScreen.y)<4) return   // still a click
+      d.moved=true
+      const others=splines.filter((_,i)=>i!==d.idx)
+      const geo=getGeoSnap(worldPos,lines,circles,arcs,null,false,others,intersectionPts)
+      const pos=geo?{x:geo.x,y:geo.y}:(gridSnap?snapToGrid(worldPos):worldPos)
+      setSplineNodeDragging(true)
+      setSelectLiveGeom({lines,circles,arcs,splines:splines.map((sp,i)=>i===d.idx?moveSplineNode(sp,d.node,pos):sp)})
+      setMousePos(pos)
+      return
+    }
 
     // Handle drag for select tool
     if (tool==='select'&&selectDragHandleRef.current&&selectDragStartRef.current&&(e.buttons&1)){
@@ -2722,6 +2830,20 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     if (tool==='trim'||tool==='delete'||tool==='extend'||tool==='trace'||tool==='text'||tool==='select'||tool==='join'){if(e.key==='Escape'){resetText();resetSelection();resetJoin();resetDim();setTool('line');return}}
 
     if (tool==='select'&&selection.length>0){
+      // A picked spline point goes first (Delete removes just that point, not
+      // the whole spline).
+      if ((e.key==='Delete'||e.key==='Backspace')&&splineNodeSel&&!selectDimField){
+        const nsp=deleteSplineNode(splines[splineNodeSel.idx],splineNodeSel.node)
+        if (nsp){
+          commit(snapshot())
+          setSplines(p=>p.map((s,i)=>i===splineNodeSel.idx?nsp:s))
+        } else {
+          setLoadError('A spline needs at least '+(splines[splineNodeSel.idx]?.closed?3:2)+' points — select the whole spline and press Delete to remove it.')
+          setTimeout(()=>setLoadError(null),4000)
+        }
+        setSplineNodeSel(null)
+        return
+      }
       // Delete selected entities
       if (e.key==='Delete'&&!selectDimField){
         commit(snapshot())
@@ -3483,7 +3605,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           <div style={{flex:1,overflow:'hidden',minWidth:0}}>
           <canvas ref={canvasRef}
           width={canvasSize.w} height={canvasSize.h}
-          style={{background:'white',cursor:isPanningRef.current?'grabbing':tool==='select'?(selectDragHandleRef.current?'grabbing':selectHover?'pointer':'default'):'crosshair',display:'block',touchAction:'none'}}
+          style={{background:'white',cursor:isPanningRef.current?'grabbing':tool==='select'?((selectDragHandleRef.current||splineNodeDragging)?'grabbing':(selectHover||splineNodeHover)?'pointer':'default'):'crosshair',display:'block',touchAction:'none'}}
           onClick={handleClick} onDoubleClick={handleDoubleClick} onContextMenu={handleContextMenu}
           onMouseMove={handleMouseMove} onMouseDown={handleMouseDown} onMouseUp={handleMouseUp}
         />

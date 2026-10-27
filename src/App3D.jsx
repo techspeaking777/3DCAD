@@ -17,6 +17,7 @@ import { nearestFilletLine, computeFillet } from './tools/filletMath.js'
 import { computeExtendPreview } from './tools/extendMath.js'
 import { sampleSpline, nearestSpline, computeSplineTrimPreview, performSplineTrim, distToSpline } from './tools/splineMath.js'
 import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform } from './tools/selectMath.js'
+import { isEditableSpline, hitSplineNode, moveSplineNode, insertSplineNode, deleteSplineNode } from './tools/splineEdit.js'
 import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine, perpLabelOffset } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
 import { loadJSON, exportDXF, parseDXF, saveProjectAs, canPickSaveLocation, exportFaceDXF as writeFaceDXF, saveBlobAs, saveProjectFileAs, loadProjectFile, serializeProject, parseProjectData } from './tools/saveLoad.js'
@@ -1909,6 +1910,13 @@ const App3D = forwardRef(function App3D(props, ref) {
   const selectSnapshotRef=useRef(null)                  // entity snapshot at drag start
   const selectBBoxRef=useRef(null)                      // bbox at drag start
   const [selectLiveGeom,setSelectLiveGeom]=useState(null) // live-transformed geometry during drag
+  // Spline point editing (Select tool, one hand-drawn spline selected): its
+  // points show as dots you can drag; double-click the curve adds one; a
+  // selected point + Delete removes it. See tools/splineEdit.js.
+  const [splineNodeSel,setSplineNodeSel]=useState(null)     // {idx,node} — the point Delete would remove
+  const [splineNodeHover,setSplineNodeHover]=useState(null) // {idx,node} under the cursor
+  const [splineNodeDragging,setSplineNodeDragging]=useState(false)
+  const splineNodeDragRef=useRef(null)                      // {idx,node,startScreen,moved} while a point is held
   // Dimension editing state
   const [selectDimField,setSelectDimField]=useState(null)   // currently focused field
   const [selectDimInput,setSelectDimInput]=useState('')      // value being typed in current field
@@ -3110,6 +3118,23 @@ const App3D = forwardRef(function App3D(props, ref) {
     setSelectHover(best)
   },[tool,mousePos,lines,circles,arcs,splines,dims,selection,selectLiveGeom,viewTransform.scale])
 
+  // The one spline (if any) whose points can be edited right now: Select tool,
+  // exactly one entity selected, and it's a hand-drawn spline. Reads the live
+  // (mid-drag) geometry so the dots follow the cursor.
+  function soleEditableSpline(){
+    if (tool!=='select'||selection.length!==1||selection[0].kind!=='spline') return null
+    const sp=(selectLiveGeom?.splines||splines)[selection[0].idx]
+    return isEditableSpline(sp)?{idx:selection[0].idx,sp}:null
+  }
+
+  // Point under the cursor → hover highlight; a changed selection forgets the picked point.
+  useEffect(()=>{
+    const ed=soleEditableSpline()
+    const i=ed&&mousePos?hitSplineNode(ed.sp,mousePos,12/viewTransform.scale):-1
+    setSplineNodeHover(i>=0?{idx:ed.idx,node:i}:null)
+  },[tool,mousePos,selection,splines,selectLiveGeom,viewTransform.scale])
+  useEffect(()=>{ setSplineNodeSel(null) },[selection,tool])
+
   useEffect(()=>{
     setIntersectionPts(computeAllIntersections(lines,circles,arcs,splines))
   },[lines,circles,arcs,splines])
@@ -3801,6 +3826,8 @@ const App3D = forwardRef(function App3D(props, ref) {
               drawLabel(ctx,(radActive?'✏ R ':'R ')+((radActive&&selectDimInput?selectDimInput:pxToMm(c.r).toFixed(2))+' mm'),bx,bbox.y1-18/sc,radActive?activeColor:inactiveColor,sc)
               if (!selectDimField) drawLabel(ctx,'Tab to edit',bx,bbox.y1-36/sc,'#444',sc)
             }
+          } else if (e0.kind==='spline'){
+            if (isEditableSpline(curSplines[e0.idx])) drawLabel(ctx,'Drag a point · double-click to add one · Delete removes',bx,bbox.y1-18/sc,inactiveColor,sc)
           } else if (e0.kind==='arc'){
             const a=curArcs[e0.idx];if(a){
               const span=norm2pi(a.endAngle-a.startAngle)*180/Math.PI
@@ -3817,6 +3844,25 @@ const App3D = forwardRef(function App3D(props, ref) {
           if (!selectDimField) drawLabel(ctx,`${selection.length} entities · Tab to edit`,bx,bbox.y1-54/sc,'#444',sc)
         }
         ctx.restore()
+      }
+    }
+
+    // ── Spline points (Select tool, one hand-drawn spline selected) ──
+    // Start = green, end = red, in-between = orange, like the point colours
+    // used for editing curves in most CAD tools. Hovered/picked ones grow.
+    if (tool==='select'&&selection.length===1&&selection[0].kind==='spline'){
+      const eSp=(selectLiveGeom?.splines||splines)[selection[0].idx]
+      if (isEditableSpline(eSp)){
+        eSp.points.forEach((pt,i)=>{
+          const isStart=!eSp.closed&&i===0, isEnd=!eSp.closed&&i===eSp.points.length-1
+          const isSel=splineNodeSel?.idx===selection[0].idx&&splineNodeSel.node===i
+          const isHov=splineNodeHover?.idx===selection[0].idx&&splineNodeHover.node===i
+          ctx.save();ctx.translate(pt.x,pt.y);ctx.scale(1/sc,1/sc)
+          ctx.beginPath();ctx.arc(0,0,(isSel||isHov)?7.5:5.5,0,Math.PI*2)
+          ctx.fillStyle=isSel?'#FFD600':isStart?'#4CAF50':isEnd?'#F44336':'#FF9800'
+          ctx.fill();ctx.strokeStyle=isSel?'#fff':'#222';ctx.lineWidth=1.5;ctx.stroke()
+          ctx.restore()
+        })
       }
     }
 
@@ -4084,7 +4130,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (segs) for (const s of segs) drawPreviewLine(ctx,s.x1,s.y1,s.x2,s.y2,'#FFEB3B',1,sc)
     }
 
-  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover])
+  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover])
 
 
   // ── Phase 2 Step 3: plane tagging ────────────────────────────────────────
@@ -10121,6 +10167,16 @@ const App3D = forwardRef(function App3D(props, ref) {
         const curCircles = selectLiveGeom?.circles || circles
         const curArcs    = selectLiveGeom?.arcs    || arcs
         const curSplines = selectLiveGeom?.splines || splines
+        // A point of the selected spline wins over the bounding-box handles.
+        const edSpl=soleEditableSpline()
+        if (edSpl){
+          const ni=hitSplineNode(edSpl.sp,worldPos,12/viewTransform.scale)
+          if (ni>=0){
+            splineNodeDragRef.current={idx:edSpl.idx,node:ni,startScreen:{x:sx,y:sy},moved:false}
+            setSplineNodeSel({idx:edSpl.idx,node:ni})
+            return
+          }
+        }
         const bbox=selectionBBox(selection,curLines,curCircles,curArcs,curSplines)
         if (bbox&&selection.length>0){
           const handles=getBBoxHandles(bbox)
@@ -10152,6 +10208,21 @@ const App3D = forwardRef(function App3D(props, ref) {
   function handleMouseUp(e){
     if (e.button===1) isPanningRef.current=false
     if (e.button===0){
+      // Let go of a spline point: a real drag commits the new curve (undoable),
+      // a plain click just leaves the point picked. Either way the click that
+      // follows must not toggle the spline's own selection.
+      if (splineNodeDragRef.current){
+        const d=splineNodeDragRef.current
+        splineNodeDragRef.current=null
+        if (d.moved&&selectLiveGeom){
+          commit(snapshot())
+          setSplines(selectLiveGeom.splines)
+          setSelectLiveGeom(null)
+        }
+        setSplineNodeDragging(false)
+        wasDragRef.current=true
+        return
+      }
       // Commit handle drag
       if (tool==='select'&&selectDragHandleRef.current){
         if (!selectLiveGeom){
@@ -10429,6 +10500,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
 
     if (tool==='select'){
+      // The 2nd click of a double-click would toggle the entity straight back
+      // off; the double-click itself (handleDoubleClick) does the real work.
+      if (e.detail>1) return
       const curLines   = selectLiveGeom?.lines   || lines
       const curCircles = selectLiveGeom?.circles || circles
       const curArcs    = selectLiveGeom?.arcs    || arcs
@@ -10463,7 +10537,11 @@ const App3D = forwardRef(function App3D(props, ref) {
           else setSelection(p=>[...p,selectHover])
         } else {
           const sole=selection.length===1&&selection[0].kind===selectHover.kind&&selection[0].idx===selectHover.idx
-          setSelection(sole?[]:[selectHover])
+          // Clicking the already-selected shape deselects it — except a hand-drawn
+          // spline, whose curve is what you double-click to add a point (the
+          // first click of that double-click must not drop the selection).
+          const keepSpline=sole&&selectHover.kind==='spline'&&isEditableSpline(curSplines[selectHover.idx])
+          setSelection(sole&&!keepSpline?[]:[selectHover])
           setSelectDimField(null);setSelectDimPending({});setSelectDimAnchor('mc')
         }
       } else if (!e.shiftKey){
@@ -10953,6 +11031,21 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   function handleDoubleClick(e){
+    // Select tool, one hand-drawn spline picked: double-click on the curve adds a
+    // point there (and picks it, ready to drag or delete).
+    if (tool==='select'){
+      const ed=soleEditableSpline()
+      if (!ed) return
+      const pos=screenToWorld(e.clientX,e.clientY)
+      if (hitSplineNode(ed.sp,pos,12/viewTransform.scale)>=0) return
+      const ins=insertSplineNode(ed.sp,pos,12/viewTransform.scale)
+      if (!ins) return
+      e.preventDefault()
+      commit(snapshot())
+      setSplines(p=>p.map((s,i)=>i===ed.idx?ins.sp:s))
+      setSplineNodeSel({idx:ed.idx,node:ins.index})
+      return
+    }
     if (tool==='line'&&startPoint){
       e.preventDefault()
       const segsSoFar=linesRef.current.length-chainStartLenRef.current
@@ -11037,6 +11130,21 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (tool==='movecopy3d' && moveCopy3dSel!=null) { return }
 
     const worldPos=screenToWorld(sx,sy)
+
+    // Dragging a spline point: snaps like the drawing tools do (geometry first,
+    // then the grid), ignoring the spline's own points so it can't snap to itself.
+    if (splineNodeDragRef.current&&(e.buttons&1)){
+      const d=splineNodeDragRef.current
+      if (!d.moved&&Math.hypot(sx-d.startScreen.x,sy-d.startScreen.y)<4) return   // still a click
+      d.moved=true
+      const others=splines.filter((_,i)=>i!==d.idx)
+      const geo=getGeoSnap(worldPos,snapLines,snapCircles,snapArcs,null,false,others,intersectionPts)
+      const pos=geo?{x:geo.x,y:geo.y}:(gridSnap?snapToGrid(worldPos):worldPos)
+      setSplineNodeDragging(true)
+      setSelectLiveGeom({lines,circles,arcs,splines:splines.map((sp,i)=>i===d.idx?moveSplineNode(sp,d.node,pos):sp)})
+      setMousePos(pos)
+      return
+    }
 
     // Handle drag for select tool
     if (tool==='select'&&selectDragHandleRef.current&&selectDragStartRef.current&&(e.buttons&1)){
@@ -11369,6 +11477,20 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (tool==='includeedge'){if(e.key==='Escape'){resetIncludeEdge();setTool('line');return}}
 
     if (tool==='select'&&selection.length>0){
+      // A picked spline point goes first (Delete removes just that point, not
+      // the whole spline).
+      if ((e.key==='Delete'||e.key==='Backspace')&&splineNodeSel&&!selectDimField){
+        const nsp=deleteSplineNode(splines[splineNodeSel.idx],splineNodeSel.node)
+        if (nsp){
+          commit(snapshot())
+          setSplines(p=>p.map((s,i)=>i===splineNodeSel.idx?nsp:s))
+        } else {
+          setLoadError('A spline needs at least '+(splines[splineNodeSel.idx]?.closed?3:2)+' points — select the whole spline and press Delete to remove it.')
+          setTimeout(()=>setLoadError(null),4000)
+        }
+        setSplineNodeSel(null)
+        return
+      }
       // Delete selected entities
       if (e.key==='Delete'&&!selectDimField){
         commit(snapshot())
@@ -12509,14 +12631,14 @@ const App3D = forwardRef(function App3D(props, ref) {
             ref={viewport3dRef}
             width={canvasSize.w}
             height={canvasSize.h}
-            lines={lines} circles={circles} arcs={arcs} splines={splines}
+            lines={lines} circles={circles} arcs={arcs} splines={splineNodeDragging&&selectLiveGeom?selectLiveGeom.splines:splines}
             solids={solids}
             xray={xray}
             features={features}
             activeSketchId={activeSketchId}
             cursor={
               extrudeTool ? 'crosshair' :
-              tool==='select'?(selectDragHandleRef.current?'grabbing':selectHover?'pointer':'default'):
+              tool==='select'?((selectDragHandleRef.current||splineNodeDragging)?'grabbing':(selectHover||splineNodeHover)?'pointer':'default'):
               'crosshair'
             }
             onScaleChange={handleScaleChange}

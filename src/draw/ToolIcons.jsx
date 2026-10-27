@@ -487,6 +487,19 @@ export function IconShell3D({ color = '#4DB6AC', size = 70 }) {
   )
 }
 
+export function IconSoften3D({ color = '#A470F2', size = 70 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>
+      <GroundShadow color={color}/>
+      {/* A slab with every edge rounded off: a pillowy top, soft sides, and a
+          flat base line (the face that stays sharp). */}
+      <path d="M35 14 Q57 20 57 30 Q57 36 35 44 Q13 36 13 30 Q13 20 35 14 Z" fill={color} fillOpacity="0.35" stroke={color} strokeWidth="1.75" strokeLinejoin="round"/>
+      <path d="M13 30 Q13 36 35 44 Q57 36 57 30 L57 48 Q57 54 35 62 Q13 54 13 48 Z" fill={color} fillOpacity="0.12" stroke={color} strokeWidth="1.75" strokeLinejoin="round"/>
+      <path d="M35 44 L35 62" stroke={color} strokeWidth="1" strokeDasharray="2 2"/>
+    </svg>
+  )
+}
+
 export function IconPattern3D({ color = '#4DB6AC', size = 70 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>

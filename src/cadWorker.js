@@ -1,6 +1,6 @@
 import opencascade from 'replicad-opencascadejs/src/replicad_single.js'
 import opencascadeWasm from 'replicad-opencascadejs/src/replicad_single.wasm?url'
-import { setOC, Sketcher, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, Vector, importSTEP, makeBSplineApproximation, assembleWire, genericSweep } from 'replicad'
+import { setOC, Sketcher, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, EdgeFinder, Vector, importSTEP, makeBSplineApproximation, assembleWire, genericSweep } from 'replicad'
 import { projectedProfilePlane, dedupePoints3d } from './tools/sweepProject.js'
 
 const SCALE = 2
@@ -313,6 +313,134 @@ function getSeamEdgeHashes(shape) {
     }
   }
   return seamHashes
+}
+
+// ── Soften ───────────────────────────────────────────────────────────────────
+// Rounds every edge of a body, each as large as it will take: tries the target
+// radius on all of them at once, then edge by edge for whatever fails, then
+// retries the leftovers at half the radius, and so on down to a minimum. Each
+// radius round comes back as an ordinary fillet op ({radius, edgePoints}) so the
+// rebuild/replay code needs nothing new. Faces named in keepFacePoints keep
+// their outline edges sharp (the flat base of a part).
+const SOFTEN_MIN_RADIUS = 0.4        // mm — below this a rounding isn't worth it
+const SOFTEN_TIME_BUDGET_MS = 60000  // stop trying new edges after this long
+const SOFTEN_SMOOTH_COS = 0.9995     // faces meeting closer than ~2° are already smooth
+
+function shapeIsValid(shape) {
+  const oc = getOC()
+  const analyzer = new oc.BRepCheck_Analyzer(shape.wrapped, true, false)
+  const valid = analyzer.IsValid_2()
+  analyzer.delete()
+  return valid
+}
+
+function edgeFilterForPoints(pts) {
+  return e => e.either(pts.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt)))
+}
+
+function trySoftenFillet(shape, pts, radius) {
+  try {
+    const out = shape.fillet(radius, edgeFilterForPoints(pts))
+    return shapeIsValid(out) ? out : null
+  } catch (_) {
+    return null
+  }
+}
+
+// One entry per edge that two clearly-different faces share (not a seam, not an
+// edge between two faces that already flow into each other, not on a kept face).
+function softenCandidates(shape, keepFacePoints) {
+  const oc = getOC()
+  const protectedHashes = new Set()
+  if (keepFacePoints?.length) {
+    const kept = new FaceFinder().either(
+      keepFacePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
+    ).find(shape)
+    for (const face of kept) for (const edge of face.edges) protectedHashes.add(edge.hashCode)
+  }
+  const byEdge = new Map()   // edge hash -> { edge, faces: [] }
+  for (const face of shape.faces) {
+    for (const edge of face.edges) {
+      let rec = byEdge.get(edge.hashCode)
+      if (!rec) byEdge.set(edge.hashCode, rec = { edge, faces: [] })
+      rec.faces.push(face)
+    }
+  }
+  const out = []
+  for (const [hash, { edge, faces }] of byEdge) {
+    if (protectedHashes.has(hash)) continue
+    if (faces.length !== 2 || faces[0] === faces[1]) continue
+    if (oc.BRepTools.IsReallyClosed(edge.wrapped, faces[0].wrapped)) continue
+    const mid = edge.pointAt(0.5)
+    const n1 = faces[0].normalAt(mid), n2 = faces[1].normalAt(mid)
+    if (n1.dot(n2) > SOFTEN_SMOOTH_COS) continue
+    out.push({ pt: [mid.x, mid.y, mid.z], len: edge.length })
+  }
+  out.sort((a, b) => b.len - a.len)
+  return out
+}
+
+// One radius round: rounds as many of `cands` as will go together at `radius`.
+// Tries the whole group at once, and when that fails splits it in half and tries
+// each half on top of what's already accepted — a few bad edges cost a handful of
+// fillets instead of one per edge.
+function softenRound(cur, cands, radius, deadline) {
+  const accepted = [], rejected = []
+  let shape = null
+  const visit = group => {
+    if (!group.length) return
+    if (Date.now() > deadline) { rejected.push(...group); return }
+    const trial = trySoftenFillet(cur, [...accepted, ...group].map(c => c.pt), radius)
+    if (trial) { accepted.push(...group); shape = trial; return }
+    if (group.length === 1) { rejected.push(group[0]); return }
+    const mid = group.length >> 1
+    visit(group.slice(0, mid)); visit(group.slice(mid))
+  }
+  visit(cands)
+  return { accepted, rejected, shape }
+}
+
+// The radius ladder: target, half, quarter … down to the floor (included).
+function softenLadder(radius, floor) {
+  const out = [radius]
+  while (out[out.length - 1] > floor + 1e-9) out.push(Math.max(floor, out[out.length - 1] / 2))
+  return out
+}
+
+function softenShape(base, { radius, minRadius, keepFacePoints }) {
+  const t0 = Date.now()
+  const floor = Math.min(minRadius ?? SOFTEN_MIN_RADIUS, radius)
+  const ladder = softenLadder(radius, floor)
+  const candidates = softenCandidates(base, keepFacePoints)
+  const total = candidates.length
+  // Cheap first pass: the biggest rung each edge takes on its own. Grouping edges
+  // by this keeps the big all-at-once attempts from failing over and over.
+  let remaining = []
+  let unfit = 0
+  for (const c of candidates) {
+    for (const rung of ladder) {
+      if (Date.now() - t0 > SOFTEN_TIME_BUDGET_MS) break
+      if (trySoftenFillet(base, [c.pt], rung)) { c.rmax = rung; break }
+    }
+    if (c.rmax) remaining.push(c); else unfit++
+  }
+  const rounds = []
+  let cur = base
+  for (const r of ladder) {
+    if (Date.now() - t0 > SOFTEN_TIME_BUDGET_MS) break
+    const due = remaining.filter(c => c.rmax + 1e-9 >= r)
+    if (!due.length) continue
+    const waiting = remaining.filter(c => c.rmax + 1e-9 < r)
+    // An edge swallowed by a neighbour's rounding no longer exists — drop it quietly.
+    const live = due.filter(c => edgeFilterForPoints([c.pt])(new EdgeFinder()).find(cur).length > 0)
+    const { accepted, rejected, shape: next } = softenRound(cur, live, r, t0 + SOFTEN_TIME_BUDGET_MS)
+    remaining = [...rejected, ...waiting]
+    if (accepted.length) {
+      rounds.push({ radius: r, edgePoints: accepted.map(a => a.pt) })
+      cur = next
+    }
+  }
+  return { shape: cur, rounds, total, skipped: unfit + remaining.length, timedOut: Date.now() - t0 >= SOFTEN_TIME_BUDGET_MS }
 }
 
 // For a cylindrical face viewed non-end-on, meshEdges/projectEdge alone
@@ -634,6 +762,7 @@ self.onmessage = async function(e) {
     return
   }
   const { type, id, params } = e.data
+  let softenInfo = null
   try {
     if (type==='exportSTL' || type==='exportSTEP') {
       // Shared by both export formats — see gatherAndFuseExportSolids below.
@@ -832,6 +961,19 @@ self.onmessage = async function(e) {
         analyzer.delete()
         if (!valid) throw new Error(`${opLabel} failed: radius too large for the selected edge(s) — try a smaller radius`)
       }
+      shapeStore.set(params.solidId, shape)
+    } else if (type==='softenAll') {
+      // Auto-radius fillet of a whole body — see softenShape above.
+      let base = shapeStore.get(params.solidId)
+      if (!base) {
+        if (!params.base) throw new Error('Soften-MISS: base not in store and no fallback params')
+        console.warn('[cadWorker] shapeStore miss — rebuilding base from params')
+        base = await buildBase(params.base)
+      }
+      const res = softenShape(base, params)
+      if (!res.rounds.length) throw new Error('Soften failed: none of the edges could be rounded — try a smaller radius')
+      shape = res.shape
+      softenInfo = { rounds: res.rounds, total: res.total, skipped: res.skipped, timedOut: res.timedOut }
       shapeStore.set(params.solidId, shape)
     } else if (type==='shell3d') {
       // Face-pick shell: applies to whatever this solid currently looks like,
@@ -1089,7 +1231,7 @@ self.onmessage = async function(e) {
     if (!shape) throw new Error('Null shape')
     const faces = shape.mesh({ tolerance:0.05, angularTolerance:30 })
     const edges = stripSeamEdges(shape, shape.meshEdges({ keepMesh:true }))
-    self.postMessage({ type:'result', id, faces, edges })
+    self.postMessage({ type:'result', id, faces, edges, ...(softenInfo ? { soften: softenInfo } : {}) })
   } catch(err) {
     // Full detail stays in the console for debugging; the message that goes to
     // the app (and the red banner students see) is plain English.

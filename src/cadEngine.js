@@ -30,7 +30,7 @@ class CadEngine {
       )
 
       this._worker.onmessage = (e) => {
-        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, planeData, message } = e.data
+        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, planeData, soften, message } = e.data
 
         if (type === 'ready') {
           this._ready = true
@@ -61,7 +61,7 @@ class CadEngine {
             dxfData ? { dxfData } :
             orthoViews ? { orthoViews } :
             planeData ? { planeData } :
-            { faces, edges }
+            { faces, edges, ...(soften ? { soften } : {}) }
           )
         } else if (type === 'error') {
           pending.reject(new Error(message || 'CAD operation failed'))
@@ -101,6 +101,11 @@ class CadEngine {
   /** Round (or bevel) one or more edges of an existing solid — params: {solidId, edgePoints:[[x,y,z],...] (mm), radius, operation:'fillet'|'chamfer' (defaults to 'fillet'), base?}. */
   async fillet3d(params) {
     return this._send('fillet3d', params)
+  }
+
+  /** Round every edge of a solid as much as each will take — params: {solidId, radius (mm, the target), minRadius?, keepFacePoints?:[[x,y,z],...] (faces whose outline edges stay sharp), base?}. Resolves {faces, edges, soften:{rounds:[{radius, edgePoints}], total, skipped}}. */
+  async softenAll(params) {
+    return this._send('softenAll', params)
   }
 
   /** Hollow an existing solid — params: {solidId, facePoints:[[x,y,z],...] (mm) of faces to remove, thickness, direction:'inward'|'outward' (defaults to 'inward'), base?}. */

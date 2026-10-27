@@ -54,7 +54,7 @@ import {
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
   IconUndo, IconRedo, IconFitView, IconReframe, IconNew, IconSave, IconLoad, IconCloudSave, IconCloudLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
   IconIncludeEdge,
-  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D, IconRevolve3D, IconSpring3D, IconShell3D, IconPattern3D, IconXray3D,
+  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D, IconRevolve3D, IconSpring3D, IconShell3D, IconPattern3D, IconSoften3D, IconXray3D,
 } from './draw/ToolIcons.jsx'
 import { glowStroke, glowFill } from './draw/vectorTheme.js'
 import { resamplePolyline, projectedProfilePlane, dedupePoints3d, smoothPoints3d } from './tools/sweepProject.js'
@@ -65,7 +65,7 @@ import { resamplePolyline, projectedProfilePlane, dedupePoints3d, smoothPoints3d
 const SOLID_ICON_COMPONENTS = {
   extrude: IconExtrude3D, cutout: IconCutout3D, fillet3d: IconFillet3D,
   mirror3d: IconMirror3D, loft3d: IconLoft3D, join3d: IconJoin3D, movecopy3d: IconMoveCopy3D,
-  sweep3d: IconSweep3D, revolve: IconRevolve3D, spring3d: IconSpring3D, shell3d: IconShell3D, pattern3d: IconPattern3D,
+  sweep3d: IconSweep3D, revolve: IconRevolve3D, spring3d: IconSpring3D, shell3d: IconShell3D, pattern3d: IconPattern3D, soften3d: IconSoften3D,
   // Reuses the additive Sweep icon's shape, rendered in Cutout's color —
   // same "one glyph, color signals cut variant" convention loftcutout/
   // revolvecut use.
@@ -1574,7 +1574,7 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   const [cadError, setCadError] = useState(null)
   const [saveToast, setSaveToast] = useState(null)
-  function flashSaved(msg='Saved'){ setSaveToast(msg); setTimeout(() => setSaveToast(null), 2000) }
+  function flashSaved(msg='Saved', ms=2000){ setSaveToast(msg); setTimeout(() => setSaveToast(null), ms) }
 
   // ── Cloud save/load (classroom feature) ──────────────────────────────────
   // Talks to the website's classroom backend — see tools/cloudSave.js's own
@@ -1651,7 +1651,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }, [features])
   const [activeSketchId,setActiveSketchId]=useState(null)  // which sketch is being edited
-  const featureCountRef=useRef({sketch:0,extrude:0,cutout:0,fillet:0,chamfer:0,mirror:0,join:0,loft:0,sweep:0,spring:0,shell:0})       // for auto-naming
+  const featureCountRef=useRef({sketch:0,extrude:0,cutout:0,fillet:0,chamfer:0,mirror:0,join:0,loft:0,sweep:0,spring:0,shell:0,soften:0})       // for auto-naming
 
   const viewport3dRef=useRef(null)
   const getViewCubeAxes=useCallback(()=>viewport3dRef.current?.getCameraAxes?.()??null,[])
@@ -1699,6 +1699,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (id==='extrude'||id==='cutout'||id==='revolve'||id==='revolvecut') activateExtrudeTool(id)
     else if (id==='fillet3d') activateFillet3DTool()
     else if (id==='shell3d') activateShell3DTool()
+    else if (id==='soften3d') activateSoften3DTool()
     else if (id==='pattern3d') activatePattern3DTool()
     else if (id==='mirror3d') activateMirror3DTool()
     else if (id==='join3d') activateJoin3DTool()
@@ -1727,7 +1728,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // space that doesn't belong to any visible sketch. Snapping back to
   // 'select' the moment sketchMode goes false closes that off in one place
   // instead of guarding every sketch tool's click handler individually.
-  const ALWAYS_AVAILABLE_TOOLS = useRef(new Set(['select','extrude','cutout','fillet3d','shell3d','measure','exportfacedxf','exportstl','exportstep','color','join3d','mirror3d','loft3d'])).current
+  const ALWAYS_AVAILABLE_TOOLS = useRef(new Set(['select','extrude','cutout','fillet3d','shell3d','soften3d','measure','exportfacedxf','exportstl','exportstep','color','join3d','mirror3d','loft3d'])).current
   useEffect(() => {
     if (!sketchMode && tool && !ALWAYS_AVAILABLE_TOOLS.has(tool)) setTool('select')
   }, [sketchMode])
@@ -4354,6 +4355,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     featureCountRef.current.fillet += 1
     return `Fillet ${featureCountRef.current.fillet}`
   }
+  function nextSoftenName() {
+    featureCountRef.current.soften = (featureCountRef.current.soften ?? 0) + 1
+    return `Soften ${featureCountRef.current.soften}`
+  }
   function nextChamferName() {
     featureCountRef.current.chamfer += 1
     return `Chamfer ${featureCountRef.current.chamfer}`
@@ -4462,6 +4467,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (tool==='spring3d' && !springState) { startSpringPlanePick({ kind:'face', facePlane }); return }
     if (tool==='exportfacedxf') { handleExportFaceDXFFaceClick(facePlane); return }
     if (tool==='shell3d') { handleShellFaceClick(facePlane); return }
+    if (tool==='soften3d') { handleSoftenFaceClick(facePlane); return }
     if (extrudeTool && extrudeOffsetMode) { handleExtrudeOffsetPlanePick({ kind:'face', facePlane }); return }
     if (extrudeState) return  // step 3 (depth): ignore stray face clicks
     enterSketch(facePlane)
@@ -5059,6 +5065,44 @@ const App3D = forwardRef(function App3D(props, ref) {
     setEditingFeatureId(null)
   }
 
+  // ── Soften (3D) state machine ──────────────────────────────────────────────
+  // Rounds every edge of a body as much as each will take (the worker steps the
+  // radius down per edge until it fits — see softenShape in cadWorker.js).
+  // Shares Shell's face-pick pipeline: the FIRST face clicked picks the body
+  // and marks that face to stay flat (its outline edges stay sharp — the base
+  // a part sits on); more clicks add/remove flat faces. The radius panel is
+  // up as soon as a body is picked. Each radius round the worker reports is
+  // saved as an ordinary fillet feature, so rebuild/edit need nothing new.
+  const [soften3dSolidId, setSoften3dSolidId] = useState(null)
+  const [soften3dFaces, setSoften3dFaces] = useState([])           // [{solidId, point, normal, key}] faces that stay flat
+  const [soften3dRadiusInput, setSoften3dRadiusInput] = useState('3')
+  const [soften3dHandlePos, setSoften3dHandlePos] = useState(null)
+  const [soften3dBusy, setSoften3dBusy] = useState(false)
+
+  function activateSoften3DTool() {
+    resetSelection()
+    resetDrawState()
+    restoreHiddenEditSolid()
+    if (sketchModeRef.current) {
+      setSketchMode(false)
+      setActivePlane(null)
+      setActiveSketchId(null)
+      activePlaneRef.current = null
+      viewport3dRef.current?.restoreSavedView()
+    }
+    setTool('soften3d')
+    setExtrudeTool(null)
+    setExtrudeState(null)
+    setEditingFeatureId(null)
+    resetSoften3D()
+  }
+  function resetSoften3D() {
+    setSoften3dSolidId(null)
+    setSoften3dFaces([])
+    setSoften3dHandlePos(null)
+    setSoften3dBusy(false)
+  }
+
   // ── Measure (3D) state machine ────────────────────────────────────────────
   // An explicit mode toggle (measureMode, buttons in the SmartStepBar below)
   // decides what a click/hover can even see — this replaced an earlier
@@ -5530,6 +5574,65 @@ const App3D = forwardRef(function App3D(props, ref) {
     } catch (err) {
       console.error('Shell failed:', err)
       setCadError(`Shell failed: ${err.message || String(err)} — try a smaller thickness or different faces.`)
+      setTimeout(() => setCadError(null), 6000)
+    }
+  }
+
+  // Click while Soften is armed. The first face picks the body (and stays
+  // flat); later clicks on the same body toggle more flat faces.
+  function handleSoftenFaceClick(facePlane) {
+    if (soften3dBusy || facePlane.solidId == null) return
+    if (soften3dSolidId != null && facePlane.solidId !== soften3dSolidId) return
+    const point = { x: facePlane.point.x, y: facePlane.point.y, z: facePlane.point.z }
+    const normal = { x: facePlane.normal.x, y: facePlane.normal.y, z: facePlane.normal.z }
+    const key = `${facePlane.solidId}_${[point.x,point.y,point.z].map(v=>v.toFixed(1)).join('_')}`
+    if (soften3dSolidId == null) setSoften3dSolidId(facePlane.solidId)
+    setSoften3dFaces(prev => prev.some(f => f.key === key) ? prev.filter(f => f.key !== key) : [...prev, { solidId: facePlane.solidId, point, normal, key }])
+    if (soften3dSolidId == null) {
+      const screenPt = viewport3dRef.current?.worldToScreen(point.x, point.y, point.z)
+      setSoften3dHandlePos(screenPt ? { x: screenPt.x + 20, y: screenPt.y - 20 } : { x: window.innerWidth/2, y: window.innerHeight/2 })
+    }
+  }
+
+  async function commitSoften3D() {
+    if (soften3dSolidId == null || soften3dBusy) return
+    const SCALE = 2
+    const solidId = soften3dSolidId
+    const radius = parseFloat(soften3dRadiusInput)
+    if (!(radius > 0)) {
+      setCadError('Soften needs a radius above 0 mm.')
+      setTimeout(() => setCadError(null), 4000)
+      return
+    }
+    const keepFacePoints = soften3dFaces.map(f => [f.point.x/SCALE, f.point.y/SCALE, f.point.z/SCALE])
+    const targetSolid = solids.find(s => s.id === solidId)
+    if (!targetSolid) { resetSoften3D(); return }
+    setSoften3dBusy(true)
+    try {
+      const meshData = await cadEngine.softenAll({ solidId, radius, keepFacePoints, base: buildBaseWorkerParams(targetSolid) })
+      const { rounds, total, skipped, timedOut } = meshData.soften
+      feat3d.commit(features)
+      const group = replicadMeshToThree(meshData, targetSolid.color, solidId)
+      const updatedSolid = { ...targetSolid, group }
+      setSolids(prev => prev.map(s => s.id === solidId ? updatedSolid : s))
+      // Names computed OUTSIDE the updater — see nextSketchName's comment.
+      const stamp = Date.now()
+      const newFeats = rounds.map((r, i) => ({
+        id: `fillet-${solidId}-${stamp}-${i}`, type: 'fillet', operation: 'fillet',
+        name: nextSoftenName(),
+        solidId, edgePoints: r.edgePoints, edgeIds: [], radius: r.radius, color: targetSolid.color,
+      }))
+      setFeatures(prev => [...prev, ...newFeats])
+      await rebuildDependentMirrors(updatedSolid)
+      const fmt = v => String(Math.round(v * 100) / 100)
+      const done = total - skipped
+      const parts = rounds.map(r => `${r.edgePoints.length} at ${fmt(r.radius)} mm`).join(', ')
+      flashSaved(`Softened ${done} of ${total} edges (${parts})${timedOut ? ` — stopped early, run Soften again to finish` : skipped ? ` — ${skipped} too tight to round` : ''}`, 7000)
+      resetSoften3D()
+    } catch (err) {
+      console.error('Soften failed:', err)
+      setSoften3dBusy(false)
+      setCadError(`${err.message || String(err)}`)
       setTimeout(() => setCadError(null), 6000)
     }
   }
@@ -8041,6 +8144,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (tool !== 'shell3d') {
       setShell3dSel([]); setShell3dAccepted(false); setShell3dHandlePos(null)
     }
+  }, [tool])
+  useEffect(() => {
+    if (tool !== 'soften3d') resetSoften3D()
   }, [tool])
 
   // Keeps Measure's point-mode markers (P1 dot, live hover dot + connector)
@@ -11349,6 +11455,16 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (fillet3dAccepted || fillet3dSel.length>0) { resetFillet3D(); return }
       resetFillet3D(); setTool('select'); return
     }
+    if (e.key==='Escape'&&tool==='soften3d'){
+      if (soften3dBusy) return
+      if (soften3dSolidId!=null) { resetSoften3D(); return }
+      setTool('select'); return
+    }
+    if (e.key==='Enter'&&tool==='soften3d'&&soften3dSolidId!=null){
+      e.preventDefault()
+      commitSoften3D()
+      return
+    }
     if ((e.key==='Enter'||e.key==='Tab')&&tool==='shell3d'&&!shell3dAccepted&&shell3dSel.length>0){
       // Promote from "still picking faces" to "thickness popup" — mirrors
       // Fillet's own Tab-to-accept.
@@ -12231,13 +12347,13 @@ const App3D = forwardRef(function App3D(props, ref) {
                 [{id:'spring3d', label:'SPRING',  color:'#F06292'}, {id:'shell3d',   label:'SHELL',   color:'#4DB6AC'}],
                 [{id:'fillet3d', label:'FILLET',  color:'#A470F2'}, {id:'mirror3d',  label:'MIRROR',  color:'#8E65F3'}],
                 [{id:'join3d',   label:'JOIN',    color:'#FFEE88'}, {id:'movecopy3d',label:'MOVE/COPY', color:'#FF9800'}],
-                [{id:'pattern3d',label:'PATTERN', color:'#4DB6AC'}],
+                [{id:'pattern3d',label:'PATTERN', color:'#4DB6AC'}, {id:'soften3d', label:'SOFTEN', color:'#A470F2'}],
               ]
               // Same "is this tool currently running" checks as before, now
               // keyed by the underlying add/cut tool id so both variants of a
               // shape button can light it up.
               const toolActive = id =>
-                  id==='fillet3d' ? tool==='fillet3d' : id==='shell3d' ? tool==='shell3d' : id==='pattern3d' ? tool==='pattern3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
+                  id==='fillet3d' ? tool==='fillet3d' : id==='shell3d' ? tool==='shell3d' : id==='soften3d' ? tool==='soften3d' : id==='pattern3d' ? tool==='pattern3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
                 : id==='loft3d' ? ((tool==='loft3d' || !!loftState) && loftTool!=='loftcutout')
                 : id==='loftcutout' ? ((tool==='loft3d' || !!loftState) && loftTool==='loftcutout')
                 : id==='sweep3d' ? ((tool==='sweep3d' || !!sweepState) && sweepTool!=='sweepcut')
@@ -12675,13 +12791,13 @@ const App3D = forwardRef(function App3D(props, ref) {
             // distance — confusing visual noise with nothing to click.
             // Once a base IS picked, face-hovering is no longer a pending
             // pick, so sketchArmed should go false for that offset flow.
-            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode && !extrudeOffsetBase) || (tool==='mirror3d' && mirror3dSelectionDone && !mirror3dOffsetBase) || (tool==='loft3d' && !loftState) || (tool==='sweep3d' && !sweepState && !sweepOffsetBase) || (tool==='spring3d' && !springState && !springOffsetBase) || tool==='exportfacedxf' || (tool==='shell3d' && !shell3dAccepted)}
+            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode && !extrudeOffsetBase) || (tool==='mirror3d' && mirror3dSelectionDone && !mirror3dOffsetBase) || (tool==='loft3d' && !loftState) || (tool==='sweep3d' && !sweepState && !sweepOffsetBase) || (tool==='spring3d' && !springState && !springOffsetBase) || tool==='exportfacedxf' || (tool==='shell3d' && !shell3dAccepted) || (tool==='soften3d' && !soften3dBusy)}
             mirrorPlanePickArmed={tool==='mirror3d' && mirror3dSelectionDone && !mirror3dOffsetBase}
-            dxfPickMode={tool==='exportfacedxf' || tool==='shell3d'}
-            dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : tool==='shell3d' ? shell3dSel : []}
-            facePickLabel={tool==='shell3d' ? 'click to remove' : null}
+            dxfPickMode={tool==='exportfacedxf' || tool==='shell3d' || tool==='soften3d'}
+            dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : tool==='shell3d' ? shell3dSel : tool==='soften3d' ? soften3dFaces : []}
+            facePickLabel={tool==='shell3d' ? 'click to remove' : tool==='soften3d' ? (soften3dSolidId==null ? 'click to pick' : 'click to keep flat') : null}
             extrudeArmed={!!extrudeState || (!!loftState && !sketchMode)}
-            showWorkPlanes={!sketchMode && !cutoutTargetPicker && tool!=='fillet3d' && tool!=='shell3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && tool!=='movecopy3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hideWorkPlanesManual && (tool==='extrude' || tool==='cutout' || tool==='revolve' || tool==='revolvecut' || tool==='sweep3d'))}
+            showWorkPlanes={!sketchMode && !cutoutTargetPicker && tool!=='fillet3d' && tool!=='shell3d' && tool!=='soften3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && tool!=='movecopy3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hideWorkPlanesManual && (tool==='extrude' || tool==='cutout' || tool==='revolve' || tool==='revolvecut' || tool==='sweep3d'))}
             activePlane={activePlane}
             sketchMode={sketchMode}
             gridVisible={gridVisible}
@@ -13136,6 +13252,21 @@ const App3D = forwardRef(function App3D(props, ref) {
                   : []
             }
             onStepBack={step => { if (step===1) resetShell3D() }}
+          />
+
+          {/* ── SmartStep bar: overlays bottom of viewport during Soften ── */}
+          <SmartStepBar
+            op={tool==='soften3d' ? 'SOFTEN' : null}
+            steps={[{ id:1, label:'Pick Body' }, { id:2, label:'Set Radius' }]}
+            currentStep={soften3dSolidId!=null ? 2 : 1}
+            color="#A470F2"
+            hint={
+              soften3dSolidId!=null
+                ? 'Type the biggest rounding you want, then press Enter.'
+                : 'Click the face that stays flat (usually the bottom).'
+            }
+            action={soften3dSolidId!=null ? [{label: soften3dBusy ? 'Softening…' : '✓ Soften', enabled: !soften3dBusy, onClick:commitSoften3D}] : []}
+            onStepBack={step => { if (step===1 && !soften3dBusy) resetSoften3D() }}
           />
 
           {/* ── SmartStep bar: overlays bottom of viewport during Measure —
@@ -14293,6 +14424,71 @@ const App3D = forwardRef(function App3D(props, ref) {
           </div>
           <div style={{color:'#445566', fontSize:10, marginTop:6, textAlign:'center'}}>
             Wall thickness{shell3dSel.length>1 ? ` · ${shell3dSel.length} faces` : ''} · ↵ to accept · Esc to cancel
+          </div>
+        </div>
+      )}
+
+      {/* ── Soften panel (radius + which faces stay flat) ─────────────────── */}
+      {tool==='soften3d' && soften3dSolidId!=null && soften3dHandlePos && (
+        <div style={{
+          position: 'fixed',
+          left: Math.max(8, Math.min(soften3dHandlePos.x, window.innerWidth - 260)),
+          top:  Math.max(8, Math.min(soften3dHandlePos.y, window.innerHeight - 190)),
+          zIndex: 1000,
+          background: 'rgba(15,20,40,0.95)',
+          border: '1.5px solid #A470F2',
+          borderRadius: 8,
+          padding: '10px 14px',
+          width: 230,
+          boxSizing: 'border-box',
+          boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
+          fontFamily: 'monospace',
+        }}>
+          <div style={{display:'flex', alignItems:'center', gap:8}}>
+            <div style={{
+              flex:1, background:'#0a0e1a', border:'1px solid #2a3a5a',
+              borderRadius:4, padding:'4px 8px',
+              display:'flex', alignItems:'center', justifyContent:'space-between',
+            }}>
+              <input
+                autoFocus
+                disabled={soften3dBusy}
+                value={soften3dRadiusInput}
+                onChange={e=>setSoften3dRadiusInput(e.target.value)}
+                onKeyDown={e=>{
+                  e.stopPropagation()
+                  if (e.key==='Enter') commitSoften3D()
+                  else if (e.key==='Escape' && !soften3dBusy) resetSoften3D()
+                }}
+                style={{
+                  background:'none', border:'none', outline:'none',
+                  color:'#dce8ff', fontFamily:'monospace', fontSize:16,
+                  fontWeight:'bold', flex:1, minWidth:0,
+                }}
+              />
+              <span style={{color:'#6688aa', fontSize:12}}>mm</span>
+            </div>
+            <button
+              disabled={soften3dBusy}
+              onClick={()=>commitSoften3D()}
+              style={{
+                padding:'4px 10px', background: '#A470F2', color:'#0d0d1a',
+                border:'none', borderRadius:4, cursor: soften3dBusy ? 'default' : 'pointer',
+                fontFamily:'monospace', fontSize:12, fontWeight:'bold',
+              }}
+            >{soften3dBusy ? '…' : '↵'}</button>
+          </div>
+          <div style={{color:'#9fb4d8', fontSize:11, marginTop:8, display:'flex', alignItems:'center', justifyContent:'space-between', gap:8}}>
+            <span>{soften3dFaces.length===0 ? 'Every edge gets rounded' : `${soften3dFaces.length} flat face${soften3dFaces.length!==1?'s':''} kept sharp`}</span>
+            {soften3dFaces.length>0 && !soften3dBusy && (
+              <button onClick={()=>setSoften3dFaces([])} style={{
+                background:'#0a0e1a', color:'#aaa', border:'1px solid #2a3a5a', borderRadius:4,
+                padding:'2px 6px', cursor:'pointer', fontFamily:'monospace', fontSize:10,
+              }}>Round all</button>
+            )}
+          </div>
+          <div style={{color:'#445566', fontSize:10, marginTop:6, textAlign:'center'}}>
+            {soften3dBusy ? 'Working out how big each edge can go… big parts can take a while' : 'Each edge takes the biggest rounding that fits · click a face to keep it flat · Esc to cancel'}
           </div>
         </div>
       )}

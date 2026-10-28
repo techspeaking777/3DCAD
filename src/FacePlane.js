@@ -484,12 +484,23 @@ function nearestBoundarySegment(allLoops, point) {
   return best
 }
 
+// A chained boundary loop repeats its first point at the end once it closes
+// (extractFaceBoundaryLoops3D), so a plain 4-corner rectangle arrives as 5
+// points. The roundness tests must count DISTINCT points: a rectangle's four
+// corners are all equidistant from its centre, so counting the repeat let a
+// thin tessellation facet of a curved wall pass as a "circle" (dashed circle
+// in the sketch, origin moved to the middle of the face).
+function withoutClosingPoint3D(loop) {
+  return loop.length > 1 && keyOf3D(loop[0]) === keyOf3D(loop[loop.length - 1]) ? loop.slice(0, -1) : loop
+}
+
 // Orientation-independent roundness test — works directly on raw 3D loop
 // points (all coplanar, since a loop always bounds one flat face region),
 // unlike fitCircleIfRound below which needs a FacePlane's own uAxis/vAxis
 // already chosen. Used by faceHitToPlane to detect "this face has no
 // meaningful edge to orient from" BEFORE picking uAxis/vAxis, not after.
 function loopIsRound(loop, tolerance = 0.03) {
+  loop = withoutClosingPoint3D(loop)
   if (loop.length < 5) return false
   const centroid = loop.reduce((s, p) => s.add(p), new THREE.Vector3()).multiplyScalar(1 / loop.length)
   const dists = loop.map(p => centroid.distanceTo(p))
@@ -644,6 +655,7 @@ export function fitCircleLeastSquares(pts) {
 }
 
 function fitCircleIfRound(loop, facePlane, tolerance = 0.03, minPoints = 5) {
+  loop = withoutClosingPoint3D(loop)
   if (loop.length < minPoints) return null
   const pts = loop.map(p => facePlane.worldToSketch(p))
   const { cx, cy, r, dists } = fitCircleCentroid(pts)

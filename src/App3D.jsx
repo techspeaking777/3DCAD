@@ -13095,6 +13095,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             extrudeTool={extrudeTool}
             filletActive={tool==='fillet3d'}
             measureActive={tool==='measure'}
+            softenActive={tool==='soften3d'}
             onClick={handleClick}
             onDoubleClick={handleDoubleClick}
             onContextMenu={handleContextMenu}

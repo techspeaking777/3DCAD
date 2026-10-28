@@ -397,6 +397,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     gridSizeMm     = 5,      // minor grid line spacing — mirrors the grid-size dropdown in App3D.jsx
     filletActive   = false,  // true while the fillet edge-pick tool is active
     measureActive  = false,  // true while the measure tool is active (reuses fillet's edge-highlight machinery, see measureActiveRef)
+    softenActive   = false,  // true while Soften is active: same edge-highlight machinery, but picked edges are yellow and the hovered one orange
     // Mirror tool step 2 (Pick Plane): true while hovering a work plane or
     // solid face is a live "this is what I'm about to mirror across" pick,
     // not yet an offset-distance drag — see handleMouseMoveInternal's
@@ -448,6 +449,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   const hoverEdgeHighlightRef    = useRef(null)  // { points: number[], matrixWorld } | null
   const selectedEdgeHighlightsRef = useRef([])   // [{ points: number[], matrixWorld }]
   const filletActiveRef  = useRef(false)
+  const softenActiveRef  = useRef(false)
   const measureActiveRef = useRef(false)
   // Whole-solid highlight (Mirror tool step 1: "this is the solid you're
   // about to mirror") — tracks the currently-glowing mesh so it can be reset
@@ -758,10 +760,12 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       // orbit/zoom exactly like the face-hover highlight above. Mutually
       // exclusive with sketchArmed/sketch-mode's use of this same canvas —
       // fillet3d never sets sketchArmed — so the two never fight over clearing.
-      if (oc && (filletActiveRef.current || measureActiveRef.current)) {
+      if (oc && (filletActiveRef.current || measureActiveRef.current || softenActiveRef.current)) {
         const ctx3 = oc.getContext('2d')
         ctx3.setTransform(1,0,0,1,0,0)
-        ctx3.clearRect(0,0,oc.width,oc.height)
+        // Soften's keep-flat face mode arms the face-frame hover above, which has
+        // already cleared and drawn on this canvas this frame — don't wipe it.
+        if (!(softenActiveRef.current && sketchArmedRef.current && !inSketchMode)) ctx3.clearRect(0,0,oc.width,oc.height)
         const rect3 = mountRef.current?.getBoundingClientRect()
         const W = rect3?.width || oc.width
         const H = rect3?.height || oc.height
@@ -791,8 +795,8 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
         // the two tools are never active at once, but a distinct color keeps
         // "picked an edge to measure" visually different from "picked an
         // edge to fillet" if a screenshot/memory of one is compared later.
-        const selColor = measureActiveRef.current ? '#4FC3F7' : '#ff9800'
-        const hovColor = measureActiveRef.current ? '#84FFFF' : '#ffe14d'
+        const selColor = measureActiveRef.current ? '#4FC3F7' : softenActiveRef.current ? '#ffe14d' : '#ff9800'
+        const hovColor = measureActiveRef.current ? '#84FFFF' : softenActiveRef.current ? '#ff9800' : '#ffe14d'
         for (const sel of selectedEdgeHighlightsRef.current) drawEdge(sel, selColor)
 
         // Skip drawing the hover highlight if it's the same edge already in
@@ -1091,6 +1095,13 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       selectedEdgeHighlightsRef.current = []
     }
   }, [filletActive])
+  useEffect(() => {
+    softenActiveRef.current = softenActive
+    if (!softenActive) {
+      hoverEdgeHighlightRef.current = null
+      selectedEdgeHighlightsRef.current = []
+    }
+  }, [softenActive])
   useEffect(() => {
     measureActiveRef.current = measureActive
     if (!measureActive) {

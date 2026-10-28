@@ -5908,6 +5908,12 @@ const App3D = forwardRef(function App3D(props, ref) {
   // instant a ring is grabbed, read every mouse move after that, no
   // re-render should ever depend on it.
   const moveCopy3dRotateBasisRef = useRef(null)
+  // World Axes button: show the gizmo along the horizontal/vertical world axes
+  // instead of the body's own (rotated) axes. Everything downstream — move
+  // direction, rotate axis, the preview — reads the gizmo's orientation, so
+  // handing showMoveGizmo an identity rotation is the whole feature. Sticky
+  // across selections, reset when the tool is re-activated.
+  const [moveCopy3dWorldAxes, setMoveCopy3dWorldAxes] = useState(false)
 
   // A solid's stored transform.rotation (axis-angle, or absent = identity)
   // as a THREE.Quaternion — the one conversion point between the
@@ -5956,6 +5962,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     // whole point of a custom pivot is rotate-copying many parts around the
     // same picked center (e.g. a wheel's axis) without re-picking each time.
     setMoveCopy3dPivotOverride(null)
+    setMoveCopy3dWorldAxes(false)
   }
 
   // skipPreviewReset: passed through to hideMoveGizmo — see its own comment.
@@ -6022,8 +6029,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     const pivotOverride = moveCopy3dPivotOverride
       ? new THREE.Vector3(mmToPx(moveCopy3dPivotOverride[0]), mmToPx(moveCopy3dPivotOverride[1]), mmToPx(moveCopy3dPivotOverride[2]))
       : null
-    viewport3dRef.current?.showMoveGizmo(moveCopy3dSel, rotationToQuat(solid?.transform?.rotation), pivotOverride)
-  }, [moveCopy3dSel, tool, moveCopy3dSnapStep, moveCopy3dPivotPicking, moveCopy3dPivotOverride])
+    viewport3dRef.current?.showMoveGizmo(moveCopy3dSel, moveCopy3dWorldAxes ? null : rotationToQuat(solid?.transform?.rotation), pivotOverride)
+  }, [moveCopy3dSel, tool, moveCopy3dSnapStep, moveCopy3dPivotPicking, moveCopy3dPivotOverride, moveCopy3dWorldAxes])
 
   useEffect(() => {
     if (tool !== 'movecopy3d' || moveCopy3dHoverSolidId==null) { viewport3dRef.current?.clearSolidHover(); return }
@@ -13358,6 +13365,13 @@ const App3D = forwardRef(function App3D(props, ref) {
               // comment) — re-picking a different pivot point is Clear then
               // Set again, a small added click in exchange for one fewer
               // button sitting in this row the rest of the time.
+              // World Axes — snaps the gizmo back to horizontal/vertical after
+              // the body has been rotated (its arrows/rings otherwise follow the
+              // body's own tilted axes). Toggle: click again for the body's axes.
+              ...(moveCopy3dDragHandle ? [] : [{
+                label:'⊞ World Axes', enabled:true, active: moveCopy3dWorldAxes,
+                onClick: () => setMoveCopy3dWorldAxes(v => !v),
+              }]),
               ...(moveCopy3dDragHandle ? [] : [{
                 label: moveCopy3dPivotPicking ? '⊙ Picking…' : moveCopy3dPivotOverride ? '⊙ Clear Pivot' : '⊙ Set Pivot',
                 enabled:true, active: moveCopy3dPivotPicking || !!moveCopy3dPivotOverride,

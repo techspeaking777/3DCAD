@@ -1278,6 +1278,32 @@ self.onmessage = async function(e) {
         shapes.push(s)
       }
       if (shapes.length < 2) throw new Error('Need at least 2 shapes to join')
+      if (params.mode === 'subtract') {
+        // First member is the target; every later one is a hole body cut out of it.
+        shape = shapes[0]
+        for (let i = 1; i < shapes.length; i++) {
+          if (overlapVolume(shape, shapes[i], FUSE_FUZZY_TOL) < 1e-6) {
+            throw new Error('A hole body doesn’t overlap the body it’s cutting — move it so it passes into the solid.')
+          }
+          const before = ocVolume(shape.wrapped)
+          try {
+            shape = cutTolerant(shape, shapes[i])
+          } catch (err) {
+            throw new Error('The cut left the body in separate pieces or couldn’t be resolved — try nudging the hole body so its faces aren’t exactly flush with the solid.', { cause: err })
+          }
+          if (before - ocVolume(shape.wrapped) < 1e-6) {
+            throw new Error('The hole body didn’t remove anything — move it so it passes into the solid.')
+          }
+        }
+        {
+          const oc = getOC()
+          const unifier = new oc.ShapeUpgrade_UnifySameDomain_2(shape.wrapped, true, true, false)
+          unifier.Build()
+          shape = cast(unifier.Shape())
+          unifier.delete()
+        }
+        if (params.solidId) shapeStore.set(params.solidId, shape)
+      } else {
       shape = shapes.reduce((a, b) => fuseTolerant(a, b))
       // A fuse can come back wrapped in a Compound container even when it
       // DID successfully weld into one continuous body — cast() only looks
@@ -1311,6 +1337,7 @@ self.onmessage = async function(e) {
         unifier.delete()
       }
       if (params.solidId) shapeStore.set(params.solidId, shape)
+      }
     } else if (type==='transformShape') {
       // Bakes a Move/Copy/Rotate's transform into the solid's actual OCC
       // geometry — same shapeStore-or-cold-rebuild-from-params fallback

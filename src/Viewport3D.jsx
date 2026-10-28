@@ -1670,11 +1670,14 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     highlightJoinMembers(solidIds) {
       this.clearJoinHighlight()
       const s = stateRef.current; if (!s?.solidsGroup) return
-      for (const solidId of solidIds) {
+      // An entry is a plain solidId (light blue) or {solidId, color} — Subtract
+      // glows its target and its hole bodies in different colours.
+      for (const entry of solidIds) {
+        const solidId = typeof entry === 'object' ? entry.solidId : entry
         const group = s.solidsGroup.children.find(g => g.userData?.solidId === solidId)
         const faceMesh = group?.children.find(c => c.isMesh && !c.userData?.isSolidEdge)
         if (faceMesh) {
-          faceMesh.material.emissive.set(0x4dd9ec)
+          faceMesh.material.emissive.set(typeof entry === 'object' ? entry.color : 0x4dd9ec)
           highlightedJoinMeshesRef.current.push(faceMesh)
         }
       }

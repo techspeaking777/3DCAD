@@ -54,7 +54,7 @@ import {
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
   IconUndo, IconRedo, IconFitView, IconReframe, IconNew, IconSave, IconLoad, IconCloudSave, IconCloudLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
   IconIncludeEdge,
-  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D, IconRevolve3D, IconSpring3D, IconShell3D, IconPattern3D, IconSoften3D, IconXray3D,
+  IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconSubtract3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D, IconRevolve3D, IconSpring3D, IconShell3D, IconPattern3D, IconSoften3D, IconXray3D,
 } from './draw/ToolIcons.jsx'
 import { glowStroke, glowFill } from './draw/vectorTheme.js'
 import { resamplePolyline, projectedProfilePlane, dedupePoints3d, smoothPoints3d } from './tools/sweepProject.js'
@@ -64,7 +64,7 @@ import { resamplePolyline, projectedProfilePlane, dedupePoints3d, smoothPoints3d
 // the old solid-icons.png raster sprite sheet.
 const SOLID_ICON_COMPONENTS = {
   extrude: IconExtrude3D, cutout: IconCutout3D, fillet3d: IconFillet3D,
-  mirror3d: IconMirror3D, loft3d: IconLoft3D, join3d: IconJoin3D, movecopy3d: IconMoveCopy3D,
+  mirror3d: IconMirror3D, loft3d: IconLoft3D, join3d: IconJoin3D, subtract3d: IconSubtract3D, movecopy3d: IconMoveCopy3D,
   sweep3d: IconSweep3D, revolve: IconRevolve3D, spring3d: IconSpring3D, shell3d: IconShell3D, pattern3d: IconPattern3D, soften3d: IconSoften3D,
   // Reuses the additive Sweep icon's shape, rendered in Cutout's color —
   // same "one glyph, color signals cut variant" convention loftcutout/
@@ -99,6 +99,7 @@ const SHAPE_OPS = {
   loft3d:   { add:'loft3d',   cut:'loftcutout', label:'LOFT',    cutLabel:'LOFT CUT',    color:'#FBDA2D' },
   sweep3d:  { add:'sweep3d',  cut:'sweepcut',   label:'SWEEP',   cutLabel:'SWEEP CUT',   color:'#7ED957' },
   spring3d: { add:'spring3d', cut:'springcut',  label:'SPRING',  cutLabel:'SPRING CUT',  color:'#F06292' },
+  join3d:   { add:'join3d',   cut:'subtract3d', label:'JOIN',    cutLabel:'SUBTRACT',    color:'#FFEE88' },
 }
 const CUT_COLOR = '#53D3E4'
 // Move/Copy's rotate-drag angle snap, gated by the same gridSnap toggle the
@@ -1135,7 +1136,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
 
           return (
             <div key={feat.id}
-              title={isLocked ? `Part of ${features.find(f=>f.id===feat.joinedInto)?.name || 'a Join'} — delete the join to edit` : undefined}
+              title={isLocked ? `Part of ${features.find(f=>f.id===feat.joinedInto)?.name || 'a Join'} — delete it to edit` : undefined}
               style={{
               borderLeft, background: itemBg,
               padding: '6px 10px 6px 8px',
@@ -1361,7 +1362,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                     <div style={{width:8,height:8,borderRadius:'50%',
                       background:feat.color||'#FFEE88', flexShrink:0}}/>
                     <span style={{color:'#8fa0b8', fontSize:10}}>
-                      join · {(feat.memberFeatureIds||[]).length} bodies
+                      {feat.booleanOp==='subtract' ? 'subtract' : 'join'} · {(feat.memberFeatureIds||[]).length} bodies
                     </span>
                   </div>
                 </div>
@@ -1651,7 +1652,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }, [features])
   const [activeSketchId,setActiveSketchId]=useState(null)  // which sketch is being edited
-  const featureCountRef=useRef({sketch:0,extrude:0,cutout:0,fillet:0,chamfer:0,mirror:0,join:0,loft:0,sweep:0,spring:0,shell:0,soften:0})       // for auto-naming
+  const featureCountRef=useRef({sketch:0,extrude:0,cutout:0,fillet:0,chamfer:0,mirror:0,join:0,subtract:0,loft:0,sweep:0,spring:0,shell:0,soften:0})       // for auto-naming
 
   const viewport3dRef=useRef(null)
   const getViewCubeAxes=useCallback(()=>viewport3dRef.current?.getCameraAxes?.()??null,[])
@@ -1703,6 +1704,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     else if (id==='pattern3d') activatePattern3DTool()
     else if (id==='mirror3d') activateMirror3DTool()
     else if (id==='join3d') activateJoin3DTool()
+    else if (id==='subtract3d') activateSubtract3DTool()
     else if (id==='loft3d') activateLoft3DTool('loft')
     else if (id==='loftcutout') activateLoft3DTool('loftcutout')
     else if (id==='sweep3d') activateSweep3DTool('sweep')
@@ -1728,7 +1730,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // space that doesn't belong to any visible sketch. Snapping back to
   // 'select' the moment sketchMode goes false closes that off in one place
   // instead of guarding every sketch tool's click handler individually.
-  const ALWAYS_AVAILABLE_TOOLS = useRef(new Set(['select','extrude','cutout','fillet3d','shell3d','soften3d','measure','exportfacedxf','exportstl','exportstep','color','join3d','mirror3d','loft3d'])).current
+  const ALWAYS_AVAILABLE_TOOLS = useRef(new Set(['select','extrude','cutout','fillet3d','shell3d','soften3d','measure','exportfacedxf','exportstl','exportstep','color','join3d','subtract3d','mirror3d','loft3d'])).current
   useEffect(() => {
     if (!sketchMode && tool && !ALWAYS_AVAILABLE_TOOLS.has(tool)) setTool('select')
   }, [sketchMode])
@@ -2202,7 +2204,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   function resetAllToolState(){
     resetDrawState(); resetSelection(); resetSpline(); resetOffset(); resetMirror(); resetCenter()
     resetMoveCopy(); resetRotateCopy(); resetResize(); resetFillet(); resetTrace(); resetDim(); resetJoin(); resetText(); resetIncludeEdge()
-    resetMeasure(); resetMirror3D(); resetJoin3D(); resetLoft3D(); resetFillet3D(); resetExportSTL(); resetExportSTEP()
+    resetMeasure(); resetMirror3D(); resetJoin3D(); resetSubtract3D(); resetLoft3D(); resetFillet3D(); resetExportSTL(); resetExportSTEP()
     setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
     setTool('select')
     setLines([]); setCircles([]); setArcs([]); setSplines([])
@@ -4375,6 +4377,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     featureCountRef.current.join += 1
     return `Join ${featureCountRef.current.join}`
   }
+  function nextSubtractName() {
+    featureCountRef.current.subtract = (featureCountRef.current.subtract ?? 0) + 1
+    return `Subtract ${featureCountRef.current.subtract}`
+  }
   function nextLoftName() {
     featureCountRef.current.loft += 1
     return `Loft ${featureCountRef.current.loft}`
@@ -4451,7 +4457,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (tool==='mirror3d' && !mirror3dSelectionDone) return
     // Join (picking bodies the whole time it's active, no second step) — same
     // stray-hit guard as Mirror step 1 above.
-    if (tool==='join3d') return
+    if (tool==='join3d' || tool==='subtract3d') return
     if (tool==='loft3d' && !loftState) { startLoftProfile1({ kind:'face', facePlane }); return }
     // Sweep's own offset-plane pick — must run BEFORE the plain sweep
     // plane-pick branch below, which would otherwise always win first (its
@@ -4502,7 +4508,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     // change) the instant it happened, reading as "highlights then reverts."
     if (tool==='mirror3d' && !mirror3dSelectionDone) return
     // Join (picking bodies the whole time it's active) — same guard.
-    if (tool==='join3d') return
+    if (tool==='join3d' || tool==='subtract3d') return
     // Idle/select-tool clicks: work planes have no occlusion check and are
     // always visible/clickable (see the comment above), so a plain click
     // anywhere near one — with no tool active at all — used to fall through
@@ -6806,6 +6812,116 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }
 
+  // ── Subtract (3D boolean cut with a finished body) ───────────────────────
+  // Same shape as Join: the result is a 'join'-operation solid carrying
+  // booleanOp:'subtract', its members locked via joinedInto, so rebuild,
+  // un-join (delete) and project load all reuse the Join machinery. Step 1
+  // picks the body to cut (member 0), step 2 picks one or more hole bodies;
+  // position a hole body first with Move/Copy.
+  const [subtractTargetId, setSubtractTargetId] = useState(null)   // featureId of the body being cut
+  const [subtractToolIds, setSubtractToolIds] = useState([])       // [featureId, ...] hole bodies
+  const [subtractHoverSolidId, setSubtractHoverSolidId] = useState(null)
+  const [subtractBusy, setSubtractBusy] = useState(false)
+
+  function activateSubtract3DTool() {
+    activateJoin3DTool()
+    setTool('subtract3d')
+    setSubtractTargetId(null)
+    setSubtractToolIds([])
+    setSubtractHoverSolidId(null)
+  }
+
+  function resetSubtract3D() {
+    setSubtractTargetId(null)
+    setSubtractToolIds([])
+    setSubtractHoverSolidId(null)
+    viewport3dRef.current?.clearSolidHover()
+  }
+
+  function handleSubtractBodyClick(e) {
+    if (tool !== 'subtract3d' || subtractBusy) return
+    const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
+    if (!hit || hit.solidId == null) return
+    const feat = baseFeatureForSolid(hit.solidId)
+    if (!feat) return
+    if (!subtractTargetId) { setSubtractTargetId(feat.id); setSubtractHoverSolidId(null); return }
+    if (feat.id === subtractTargetId) { setSubtractTargetId(null); return }   // click it again to pick another
+    const ids = feat.groupId ? features.filter(f => f.groupId === feat.groupId && f.id !== subtractTargetId).map(f => f.id) : [feat.id]
+    setSubtractToolIds(prev => {
+      const allSelected = ids.every(id => prev.includes(id))
+      return allSelected ? prev.filter(id => !ids.includes(id)) : [...new Set([...prev, ...ids])]
+    })
+  }
+
+  function handleSubtractHover(e) {
+    const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
+    const solidId = hit?.solidId ?? null
+    const picked = id => id != null && [subtractTargetId, ...subtractToolIds].some(fid => fid && features.find(f => f.id === fid)?.solidId === id)
+    setSubtractHoverSolidId(prev => {
+      const next = picked(solidId) ? null : solidId
+      return next === prev ? prev : next
+    })
+  }
+
+  // Target glows light blue, hole bodies red, the body under the cursor orange.
+  useEffect(() => {
+    if (tool !== 'subtract3d') return
+    const solidOf = id => features.find(f => f.id === id)?.solidId
+    const entries = []
+    if (subtractTargetId) entries.push({ solidId: solidOf(subtractTargetId), color: 0x4dd9ec })
+    for (const id of subtractToolIds) entries.push({ solidId: solidOf(id), color: 0xe5484d })
+    viewport3dRef.current?.highlightJoinMembers(entries.filter(en => en.solidId != null))
+  }, [subtractTargetId, subtractToolIds, tool])
+
+  useEffect(() => {
+    if (tool !== 'subtract3d' || subtractHoverSolidId == null) { if (tool === 'subtract3d') viewport3dRef.current?.clearSolidHover(); return }
+    viewport3dRef.current?.hoverSolid(subtractHoverSolidId)
+  }, [subtractHoverSolidId, tool])
+
+  // Leaving the tool drops its picks.
+  useEffect(() => {
+    if (tool !== 'subtract3d') { setSubtractTargetId(null); setSubtractToolIds([]); setSubtractHoverSolidId(null) }
+  }, [tool])
+
+  // Cuts every hole body out of the target in one worker call. Members (target
+  // first) are removed from `solids` but stay in the tree, locked, like a Join.
+  async function commitSubtract() {
+    if (subtractBusy || !subtractTargetId || subtractToolIds.length < 1) return
+    const selIds = [subtractTargetId, ...subtractToolIds]
+    const memberFeats = selIds.map(id => features.find(f => f.id === id)).filter(Boolean)
+    const memberSolids = memberFeats.map(f => solids.find(s => s.id === f.solidId)).filter(Boolean)
+    if (memberSolids.length < 2 || memberFeats.length !== memberSolids.length) return
+    setSubtractBusy(true)
+    resetSubtract3D()
+    feat3d.commit(features)
+    try {
+      const newSolidId = Date.now()
+      const members = memberSolids.map(s => ({
+        solidId: s.id, base: buildBaseWorkerParams(s), ops: buildSolidOpsForWorker(s, features),
+      }))
+      const meshData = await cadEngine.joinShapes({ solidId: newSolidId, members, mode: 'subtract' })
+      const color = memberSolids[0].color
+      const group = replicadMeshToThree(meshData, color, newSolidId)
+      const featId = `subtract-${newSolidId}`
+      const name = nextSubtractName()   // outside the updater — see nextSketchName's comment
+      setSolids(prev => [
+        ...prev.filter(s => !memberSolids.some(m => m.id === s.id)),
+        { id: newSolidId, group, operation: 'join', memberSolidIds: memberSolids.map(s => s.id), color },
+      ])
+      setFeatures(prev => [
+        ...prev.map(f => memberFeats.some(m => m.id === f.id) ? { ...f, joinedInto: featId } : f),
+        { id: featId, type: 'extrude', name, operation: 'join', booleanOp: 'subtract',
+          solidId: newSolidId, memberFeatureIds: selIds, memberSolidIds: memberSolids.map(s => s.id), color },
+      ])
+    } catch (err) {
+      console.error('Subtract failed:', err)
+      setCadError(`Subtract failed: ${err.message || String(err)}`)
+      setTimeout(() => setCadError(null), 8000)
+    } finally {
+      setSubtractBusy(false)
+    }
+  }
+
   // ── Loft (multi-profile lofted solid) state machine ───────────────────────
   // Step 1: pick a work plane or face — becomes Profile 1's plane, and fixes
   //   the shared normal/uAxis basis every later profile reuses (only the
@@ -8111,10 +8227,24 @@ const App3D = forwardRef(function App3D(props, ref) {
       } else {
         const tempSolid = featureToTempSolid(mf)
         rebuiltSolids.push(tempSolid)
-        members.push({ solidId: mf.solidId, base: buildBaseWorkerParams(tempSolid), ops: buildSolidOpsForWorker(tempSolid, feats) })
+        if (mf.transform) {
+          // A moved/rotated member (always the case for a Subtract's hole body):
+          // base+ops alone rebuild it where it was first drawn, so rebuild it in
+          // the worker with its transform baked in and reference that instead.
+          await rebuildFeatureSolid(mf, feats, solidsLookup)
+          members.push({ solidId: mf.solidId, base: null, ops: [] })
+        } else {
+          members.push({ solidId: mf.solidId, base: buildBaseWorkerParams(tempSolid), ops: buildSolidOpsForWorker(tempSolid, feats) })
+        }
       }
     }
-    const meshData = await cadEngine.joinShapes({ solidId: joinSolid.id, members })
+    // A Subtract's member order matters (target first, then the hole bodies), but
+    // the loop above builds mirrors last — put them back in the order they were picked.
+    if (joinFeat.booleanOp === 'subtract') {
+      const order = (joinFeat.memberFeatureIds || []).map(id => feats.find(f => f.id === id)?.solidId)
+      members.sort((a, b) => order.indexOf(a.solidId) - order.indexOf(b.solidId))
+    }
+    const meshData = await cadEngine.joinShapes({ solidId: joinSolid.id, members, mode: joinFeat.booleanOp })
     return { meshData, baseWorkerParams: null }
   }
 
@@ -10670,6 +10800,10 @@ const App3D = forwardRef(function App3D(props, ref) {
       handleJoin3DBodyClick(e)
       return
     }
+    if (tool==='subtract3d') {
+      handleSubtractBodyClick(e)
+      return
+    }
 
     // Move/Copy step 2b: a handle is already armed — this click accepts the
     // live drag value, wherever in the canvas it lands (same "click anywhere
@@ -11341,6 +11475,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (tool==='fillet'&&!filletAccepted&&filletSel.length===2) setFilletAccepted(true)
     if (tool==='center'&&centerSel.length>0) commitCenter()
     if (tool==='join3d'&&joinSel.length>=2) commitJoin()
+    if (tool==='subtract3d'&&subtractTargetId&&subtractToolIds.length>=1) commitSubtract()
   }
 
   // Raw mousemove fires far faster than the screen can repaint (120Hz+ on a
@@ -11381,6 +11516,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (tool==='mirror3d' && !mirror3dSelectionDone) { handleMirror3DHover(e); return }
     // Join — picks bodies the whole time it's active, same hover pattern.
     if (tool==='join3d') { handleJoin3DHover(e); return }
+    if (tool==='subtract3d') { handleSubtractHover(e); return }
     // Move/Copy — same hover pattern, only while still picking the body
     // (once picked, mouse movement instead drives handleMoveCopy3DDragMove/
     // handleMoveCopy3DGizmoHover on the root div's own unthrottled
@@ -11723,6 +11859,15 @@ const App3D = forwardRef(function App3D(props, ref) {
       e.preventDefault()
       commitJoin()
       return
+    }
+    if ((e.key==='Enter'||e.key==='Tab')&&tool==='subtract3d'&&subtractTargetId&&subtractToolIds.length>=1){
+      e.preventDefault()
+      commitSubtract()
+      return
+    }
+    if (e.key==='Escape'&&tool==='subtract3d'){
+      if (subtractTargetId||subtractToolIds.length>0) { resetSubtract3D(); return }
+      resetSubtract3D(); setTool('select'); return
     }
     if (e.key==='Escape'&&tool==='join3d'){
       if (joinSel.length>0) { resetJoin3D(); return }
@@ -12491,6 +12636,7 @@ const App3D = forwardRef(function App3D(props, ref) {
               // shape button can light it up.
               const toolActive = id =>
                   id==='fillet3d' ? tool==='fillet3d' : id==='shell3d' ? tool==='shell3d' : id==='soften3d' ? tool==='soften3d' : id==='pattern3d' ? tool==='pattern3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
+                : id==='subtract3d' ? tool==='subtract3d'
                 : id==='loft3d' ? ((tool==='loft3d' || !!loftState) && loftTool!=='loftcutout')
                 : id==='loftcutout' ? ((tool==='loft3d' || !!loftState) && loftTool==='loftcutout')
                 : id==='sweep3d' ? ((tool==='sweep3d' || !!sweepState) && sweepTool!=='sweepcut')
@@ -12934,7 +13080,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : tool==='shell3d' ? shell3dSel : tool==='soften3d' ? soften3dKeepFaces : []}
             facePickLabel={tool==='shell3d' ? 'click to remove' : tool==='soften3d' ? 'click to keep flat' : null}
             extrudeArmed={!!extrudeState || (!!loftState && !sketchMode)}
-            showWorkPlanes={!sketchMode && !cutoutTargetPicker && tool!=='fillet3d' && tool!=='shell3d' && tool!=='soften3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && tool!=='movecopy3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hideWorkPlanesManual && (tool==='extrude' || tool==='cutout' || tool==='revolve' || tool==='revolvecut' || tool==='sweep3d'))}
+            showWorkPlanes={!sketchMode && !cutoutTargetPicker && tool!=='fillet3d' && tool!=='shell3d' && tool!=='soften3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && tool!=='subtract3d' && tool!=='movecopy3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hideWorkPlanesManual && (tool==='extrude' || tool==='cutout' || tool==='revolve' || tool==='revolvecut' || tool==='sweep3d'))}
             activePlane={activePlane}
             sketchMode={sketchMode}
             gridVisible={gridVisible}
@@ -13139,6 +13285,21 @@ const App3D = forwardRef(function App3D(props, ref) {
               : 'Click two or more bodies to merge into one, then press Enter.'}
             action={{label:'✓ Join', enabled:joinSel.length>=2, onClick:commitJoin}}
             onStepBack={()=>{}}
+          />
+
+          {/* ── SmartStep bar: overlays bottom of viewport during Subtract ── */}
+          <SmartStepBar
+            op={tool==='subtract3d' ? 'SUBTRACT' : null}
+            steps={[{ id:1, label:'Pick Body' }, { id:2, label:'Pick Holes' }]}
+            currentStep={subtractTargetId ? 2 : 1}
+            color="#53D3E4"
+            hint={!subtractTargetId
+              ? 'Click the body you want to cut into.'
+              : subtractToolIds.length>0
+                ? `${subtractToolIds.length} hole bod${subtractToolIds.length>1?'ies':'y'} picked — Enter to subtract.`
+                : 'Click the bodies that make the hole (move them into place first).'}
+            action={{label:'✓ Subtract', enabled:!!subtractTargetId && subtractToolIds.length>=1 && !subtractBusy, onClick:commitSubtract}}
+            onStepBack={step=>{ if (step===1) { setSubtractTargetId(null); setSubtractToolIds([]) } }}
           />
 
           {/* ── SmartStep bar: overlays bottom of viewport during Move/Copy ── */}

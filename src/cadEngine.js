@@ -186,6 +186,8 @@ class CadEngine {
    * {solidId, members: [{solidId, base, ops}, ...]} — base/ops are the same
    * shape buildBaseWorkerParams()/buildSolidOpsForWorker() already produce,
    * used only as a cold-rebuild fallback if a member isn't in shapeStore.
+   * With `mode: 'subtract'` the FIRST member is the target and every later
+   * member is cut out of it instead of fused in.
    */
   async joinShapes(params) {
     return this._send('joinShapes', params)

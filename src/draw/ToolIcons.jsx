@@ -346,6 +346,24 @@ export function IconJoin3D({ color = '#FFEE88', size = 70 }) {
   )
 }
 
+export function IconSubtract3D({ color = '#53D3E4', size = 70 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>
+      <GroundShadow color={color} cy="56"/>
+      {/* the solid being cut */}
+      <path d="M32 24 L50 33 L32 42 L14 33 Z" fill={color} fillOpacity="0.35" stroke={color} strokeWidth="1.5"/>
+      <path d="M14 33 L32 42 L32 60 L14 51 Z" fill={color} fillOpacity="0.12" stroke={color} strokeWidth="1.5"/>
+      <path d="M32 42 L50 33 L50 51 L32 60 Z" fill={color} fillOpacity="0.2" stroke={color} strokeWidth="1.5"/>
+      {/* the hole body, dashed, biting into the top corner */}
+      <path d="M46 10 L60 17 L46 24 L32 17 Z" fill="none" stroke={color} strokeWidth="1.5" strokeDasharray="3 2"/>
+      <path d="M32 17 L46 24 L46 38 L32 31 Z" fill="none" stroke={color} strokeWidth="1.5" strokeDasharray="3 2"/>
+      <path d="M46 24 L60 17 L60 31 L46 38 Z" fill="none" stroke={color} strokeWidth="1.5" strokeDasharray="3 2"/>
+      {/* minus sign */}
+      <path d="M6 12 L18 12" stroke={color} strokeWidth="2.5" strokeLinecap="round"/>
+    </svg>
+  )
+}
+
 export function IconMoveCopy3D({ color = '#FF9800', size = 70 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 70 70" fill="none" style={glow(color)}>

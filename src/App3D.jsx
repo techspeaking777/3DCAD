@@ -2791,7 +2791,12 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (res.angleSnap==='vertical') return{axis:'x',value:start.x,from:null,angleSnap:'vertical'}
     if (res.angleSnap==='horizontal') return{axis:'y',value:start.y,from:null,angleSnap:'horizontal'}
     const t=res.tracks?.[0]
-    if (!t) return null
+    if (!t){
+      // No guide showing: Shift squares the line up to whichever of
+      // horizontal / vertical the cursor is closer to.
+      if (Math.abs(raw.x-start.x)>=Math.abs(raw.y-start.y)) return{axis:'y',value:start.y,from:null,angleSnap:'horizontal'}
+      return{axis:'x',value:start.x,from:null,angleSnap:'vertical'}
+    }
     const from={x:t.fromX,y:t.fromY}
     if (t.toX===t.fromX&&t.toY!==t.fromY) return{axis:'x',value:t.fromX,from,angleSnap:null}
     return{axis:'y',value:t.fromY,from,angleSnap:null}

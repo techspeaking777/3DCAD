@@ -1811,6 +1811,11 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [dimLocked,setDimLocked]=useState(false)
   const [angleInput,setAngleInput]=useState('')
   const [angleLocked,setAngleLocked]=useState(false)
+  // Hold Shift while an alignment guide shows → the end point stays ON that
+  // guide however the mouse wanders. {axis:'x'|'y', value, from, angleSnap}:
+  // x = vertical guide at that x, y = horizontal; `from` is the tracked point
+  // the guide hangs off (null when it's the line's own start H/V).
+  const [alignLock,setAlignLock]=useState(null)
   const [focusField,setFocusField]=useState('dim')
   const [trackedPts,setTrackedPts]=useState([])
   const [deferredTangent,setDeferredTangent]=useState(null)
@@ -2779,7 +2784,26 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }
 
+  // Reads whichever guide computeEnd is showing right now (the line's own
+  // H/V first, else the first alignment track) as a lock for the Shift key.
+  function captureAlignLock(start,raw,tracked){
+    const res=computeEnd(start,raw,tracked)
+    if (res.angleSnap==='vertical') return{axis:'x',value:start.x,from:null,angleSnap:'vertical'}
+    if (res.angleSnap==='horizontal') return{axis:'y',value:start.y,from:null,angleSnap:'horizontal'}
+    const t=res.tracks?.[0]
+    if (!t) return null
+    const from={x:t.fromX,y:t.fromY}
+    if (t.toX===t.fromX&&t.toY!==t.fromY) return{axis:'x',value:t.fromX,from,angleSnap:null}
+    return{axis:'y',value:t.fromY,from,angleSnap:null}
+  }
+
   function computeEnd(start,raw,tracked){
+    if (alignLock&&!dimLocked&&!angleLocked){
+      const ex=alignLock.axis==='x'?alignLock.value:raw.x
+      const ey=alignLock.axis==='y'?alignLock.value:raw.y
+      return{x:ex,y:ey,snapType:null,angleSnap:alignLock.angleSnap,
+        tracks:alignLock.from?[{fromX:alignLock.from.x,fromY:alignLock.from.y,toX:ex,toY:ey}]:[]}
+    }
     if (!dimLocked&&!angleLocked){
       const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,start,false,splines,intersectionPts)
       // 'online' is the weakest geo-snap tier (any point along an edge, not a
@@ -2881,6 +2905,17 @@ const App3D = forwardRef(function App3D(props, ref) {
       return Math.abs(pos.y-tp.y)<d||Math.abs(pos.x-tp.x)<d
     })
     if (next.length!==current.length){trackedPtsRef.current=next;setTrackedPts(next)}
+  },[])
+
+  // The Shift guide-lock belongs to one segment: a new start point (or none)
+  // drops it, as does letting go of Shift or the window losing focus.
+  useEffect(()=>{setAlignLock(null)},[startPoint,tool])
+  useEffect(()=>{
+    const up=e=>{if(e.key==='Shift')setAlignLock(null)}
+    const blur=()=>setAlignLock(null)
+    window.addEventListener('keyup',up)
+    window.addEventListener('blur',blur)
+    return()=>{window.removeEventListener('keyup',up);window.removeEventListener('blur',blur)}
   },[])
 
   useEffect(()=>{
@@ -4014,7 +4049,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       } else {
       const hSnap=getGeoSnap(mousePos,snapLines,snapCircles,snapArcs,startPoint,tKeyDown,splines,intersectionPts)
       let endPt,isTanEnd=false
-      if (hSnap?.type==='tan'){
+      if (hSnap?.type==='tan'&&!alignLock){
         const c=hSnap.circleIdx!==undefined?circles[hSnap.circleIdx]:{cx:hSnap.cx,cy:hSnap.cy,r:hSnap.r}
         const tanPts=getTanPtsOnCircle(startPoint.x,startPoint.y,c.cx,c.cy,c.r)
         tanPts.forEach(tp=>drawPreviewLine(ctx,startPoint.x,startPoint.y,tp.x,tp.y,sketchLineColor,0.25,sc))
@@ -4040,7 +4075,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       // offset keeps them stacked (never side-by-side) at any line angle.
       const angOff={x:dimOff.x,y:dimOff.y-24/sc}
       drawLabel(ctx,(dimLocked?'🔒 ':'')+(dimInput||lenMm.toFixed(1))+' mm',midX+dimOff.x,midY+dimOff.y,dimLocked?'#FF9800':focusField==='dim'?'#1565C0':'#2196F3',sc)
-      if (!isTanEnd) drawLabel(ctx,(angleLocked?'🔒 ':'')+(angleInput||computeLiveAngle(startPoint,endPt).toFixed(1))+'°',midX+angOff.x,midY+angOff.y,angleLocked?'#FF9800':focusField==='angle'?'#6A1B9A':'#9C27B0',sc)
+      if (!isTanEnd) drawLabel(ctx,(angleLocked||alignLock?'🔒 ':'')+(angleInput||computeLiveAngle(startPoint,endPt).toFixed(1))+'°',midX+angOff.x,midY+angOff.y,angleLocked||alignLock?'#FF9800':focusField==='angle'?'#6A1B9A':'#9C27B0',sc)
       if (isTanEnd) drawLineIndicator(ctx,endPt.x,endPt.y,'tan',sc)
       } // end !pKeyDown
 
@@ -11318,7 +11353,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           return
         }
         const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,startPoint,tKeyDown,splines,intersectionPts)
-        if (geo?.type==='tan'){
+        if (geo?.type==='tan'&&!alignLock){
           const c=geo.circleIdx!==undefined?circles[geo.circleIdx]:{cx:geo.cx,cy:geo.cy,r:geo.r}
           const tanPts=getTanPtsOnCircle(startPoint.x,startPoint.y,c.cx,c.cy,c.r)
           const best=nearestPt(tanPts,raw)
@@ -11593,6 +11628,11 @@ const App3D = forwardRef(function App3D(props, ref) {
       // the SmartStepBar's own ✓ Confirm/✕ Cancel buttons play.
       if (e.key==='Enter' && cutoutTargetPicker.selected.size>0) { e.preventDefault(); confirmCutoutTargets(); return }
       if (e.key==='Escape') { cancelCutoutTargetPicker(); return }
+      return
+    }
+    // Hold Shift while an alignment guide shows → lock the line onto it.
+    if (e.key==='Shift'&&!e.repeat&&!alignLock&&startPoint&&mousePos&&(tool==='line'||tool==='axis')){
+      setAlignLock(captureAlignLock(startPoint,mousePos,trackedPts))
       return
     }
     if ((e.key==='t'||e.key==='T')&&!e.ctrlKey&&!e.shiftKey&&(tool==='line'||tool==='circle')){setTKeyDown(p=>!p);return}
@@ -12197,7 +12237,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           hints:[K('T','toggle off'), K('Esc')] }
         return { step:null, total:null, color:c,
           action:`${dimLocked?'🔒 ':''}${dimInput||'—'} mm  ·  ${angleLocked?'🔒 ':''}${angleInput||'—'}°`,
-          hints:[K('Tab','toggle field'), K('Enter','lock'), K('T','tangent'), K('Esc')] }
+          hints:[K('Tab','toggle field'), K('Enter','lock'), K('hold Shift','lock guide'), K('T','tangent'), K('Esc')] }
       }
       return { step:null, total:null, color:c,
         action:'Click first point',

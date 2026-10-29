@@ -2804,9 +2804,14 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   function computeEnd(start,raw,tracked){
     if (alignLock&&!dimLocked&&!angleLocked){
-      const ex=alignLock.axis==='x'?alignLock.value:raw.x
-      const ey=alignLock.axis==='y'?alignLock.value:raw.y
-      return{x:ex,y:ey,snapType:null,angleSnap:alignLock.angleSnap,
+      let ex=alignLock.axis==='x'?alignLock.value:raw.x
+      let ey=alignLock.axis==='y'?alignLock.value:raw.y
+      let lockAngle=alignLock.angleSnap
+      // The guide fixes one axis; the free axis still squares up to
+      // horizontal / vertical from the start point when it is close.
+      if (alignLock.axis==='x'&&checkAngle(start,{x:ex,y:ey})==='horizontal'){ey=start.y;lockAngle='horizontal'}
+      else if (alignLock.axis==='y'&&checkAngle(start,{x:ex,y:ey})==='vertical'){ex=start.x;lockAngle='vertical'}
+      return{x:ex,y:ey,snapType:null,angleSnap:lockAngle,
         tracks:alignLock.from?[{fromX:alignLock.from.x,fromY:alignLock.from.y,toX:ex,toY:ey}]:[]}
     }
     if (!dimLocked&&!angleLocked){

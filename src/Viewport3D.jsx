@@ -647,6 +647,16 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
           }
           ctx2.restore()
         }
+        // Translucent fill for a face (outer loop + holes, even-odd so holes stay clear).
+        const fillLoops = (loops, color) => {
+          ctx2.save(); ctx2.fillStyle = color; ctx2.beginPath()
+          for (const loop of loops) {
+            loop.forEach((p, i) => { const q = toScreenWorld(p); if (i === 0) ctx2.moveTo(q.x, q.y); else ctx2.lineTo(q.x, q.y) })
+            ctx2.closePath()
+          }
+          ctx2.fill('evenodd')
+          ctx2.restore()
+        }
 
         // Sketch-orientation preview for a hovered face: the face's bounding
         // rectangle drawn ON the sketch plane (not the solid), with a thick
@@ -717,7 +727,15 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
             if (!mesh) continue
             const pt = new THREE.Vector3(sel.point.x, sel.point.y, sel.point.z)
             const nrm = new THREE.Vector3(sel.normal.x, sel.normal.y, sel.normal.z)
-            strokeLoops(facePickBoundaryLoops({ object: mesh, point: pt }, nrm), '#FFD54F', 3)
+            const loops = facePickBoundaryLoops({ object: mesh, point: pt }, nrm)
+            if (softenActiveRef.current) {
+              // Soften's "keep flat" faces: green fill + outline, so they read apart
+              // from the yellow picked edges and the orange hover.
+              fillLoops(loops, 'rgba(61, 220, 132, 0.5)')
+              strokeLoops(loops, '#3DDC84', 3)
+            } else {
+              strokeLoops(loops, '#FFD54F', 3)
+            }
           }
         }
 

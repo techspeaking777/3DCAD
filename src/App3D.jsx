@@ -3525,12 +3525,14 @@ const App3D = forwardRef(function App3D(props, ref) {
         ctx.moveTo(pts[0].x, pts[0].y)
         pts.slice(1).forEach(p => ctx.lineTo(p.x, p.y))
         ctx.closePath()
-        // Subtle fill tint matching the active plane colour
-        const pc = activePlane==='XZ' ? 'rgba(255,80,80,0.10)'
-                 : activePlane==='YZ' ? 'rgba(60,220,100,0.10)'
-                 : 'rgba(80,140,255,0.10)'
-        ctx.fillStyle = pc
+        // Warm amber fill — a plane-coloured tint vanished against a solid of
+        // the same colour (a face sketch on a blue body is blue-on-blue).
+        ctx.fillStyle = 'rgba(255,170,0,0.35)'
         ctx.fill()
+        // Pale halo under the dashed outline so the edge reads on any background
+        ctx.strokeStyle = 'rgba(255,255,255,0.6)'
+        ctx.lineWidth = 4.5/sc
+        ctx.stroke()
         // Bright outline to show it's a closed profile
         const bc = activePlane==='XZ' ? '#ff5533'
                  : activePlane==='YZ' ? '#33dd66'

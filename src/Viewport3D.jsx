@@ -232,6 +232,9 @@ function pt2three(sx, sy, plane, facePlane) {
   }
 }
 
+// Warm amber — a blue fill vanished against a blue solid (face sketches).
+const FILL_COLOR = 0xffaa00
+
 function buildFill(pts, plane, facePlane, color=0xaaccff) {
   if (pts.length < 3) return null
   const shape = new THREE.Shape()
@@ -290,7 +293,7 @@ function buildFill(pts, plane, facePlane, color=0xaaccff) {
       break
   }
   const mat = new THREE.MeshBasicMaterial({
-    color, transparent:true, opacity:0.20,
+    color, transparent:true, opacity:0.35,
     side:THREE.DoubleSide, depthTest:false, depthWrite:false,
   })
   const mesh = new THREE.Mesh(geo, mat)
@@ -924,7 +927,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
         const fp = feat.facePlane || null
         const profiles = detectProfiles(fLines, fArcs, planeId, fCircles, fSplines)
         profiles.forEach(pts => {
-          const fill = buildFill(pts, planeId, fp, 0x6699ff)
+          const fill = buildFill(pts, planeId, fp, FILL_COLOR)
           if (fill) geomGroup.add(fill)
         })
       }
@@ -967,7 +970,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       const fp = pLines[0]?.facePlane || pArcs[0]?.facePlane || pCircles[0]?.facePlane || pSplines[0]?.facePlane || null
       const profiles = detectProfiles(pLines, pArcs, pid, pCircles, pSplines)
       profiles.forEach(pts => {
-        const fill = buildFill(pts, pid, fp, 0x6699ff)
+        const fill = buildFill(pts, pid, fp, FILL_COLOR)
         if (fill) geomGroup.add(fill)
       })
     })

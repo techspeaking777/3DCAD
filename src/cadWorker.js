@@ -1817,7 +1817,7 @@ function makePath(pts, planeId, normal, origin, uAxis) {
  * revolution. angleDeg defaults to 360 for a full solid; a smaller value
  * produces a partial "pie slice" revolve.
  */
-function buildRevolve({ pts, planeId, normal, origin, uAxis, circle=null, axis, angleDeg=360, reverse=false }) {
+function buildRevolve({ pts, planeId, normal, origin, uAxis, circle=null, axis, angleDeg=360, reverse=false, both=false }) {
   // offsetMm=0 — unlike extrude, revolve has no depth/direction offset to
   // apply; the profile sketches exactly at the plane it was drawn on.
   const plane = buildProfilePlane(planeId, 0, normal, origin, uAxis)
@@ -1838,7 +1838,11 @@ function buildRevolve({ pts, planeId, normal, origin, uAxis, circle=null, axis, 
   // than negate the angle (not guaranteed to behave the same in the native API).
   if (reverse) axisDir = [-axisDir[0], -axisDir[1], -axisDir[2]]
 
-  return sketch.revolve(axisDir, { origin: axisOrigin, angle: angleDeg })
+  const solid = sketch.revolve(axisDir, { origin: axisOrigin, angle: angleDeg })
+  // "Both ways": the sweep above runs 0 → angle from the profile; turn it back
+  // by half so the profile sits in the MIDDLE of the sweep (a full 360 is unchanged).
+  if (both && angleDeg < 360) return solid.rotate(-angleDeg / 2, axisOrigin, axisDir)
+  return solid
 }
 
 /**

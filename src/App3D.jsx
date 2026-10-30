@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react'
+import { useState, useRef, useEffect, useMemo, useCallback, forwardRef, useImperativeHandle } from 'react'
 import * as THREE from 'three'
 import Viewport3D from './Viewport3D.jsx'
 import { planeColor, planeAxisLabels, sketchToWorld, worldToSketch } from './SketchPlane.js'
@@ -160,6 +160,22 @@ function linearCutBoxPx(pts, planeId, facePlane, cutDepthMm, cutDirection) {
   return box
 }
 
+// The sketch's built-in X and Y origin axes are guide lines, not entities, so the
+// snap system never sees them. The Dimension tool uses this to measure to them:
+// near the origin → the origin; near an axis → the point on it. With `from` (the
+// dimension's first point) the axis point is the PERPENDICULAR foot, so the
+// number is the true distance to the axis, not a slanted one. Returns
+// {x, y, axis:'x'|'y'|'origin'} or null. `tol` is in sketch px.
+function originAxisSnap(pos, tol, from) {
+  if (Math.hypot(pos.x, pos.y) <= tol) return { x: 0, y: 0, axis: 'origin' }
+  const nearX = Math.abs(pos.y) <= tol   // the horizontal axis (y = 0)
+  const nearY = Math.abs(pos.x) <= tol   // the vertical axis (x = 0)
+  if (!nearX && !nearY) return null
+  const useX = nearX && (!nearY || Math.abs(pos.y) <= Math.abs(pos.x))
+  if (useX) return { x: from ? from.x : pos.x, y: 0, axis: 'x' }
+  return { x: 0, y: from ? from.y : pos.y, axis: 'y' }
+}
+
 // Unit world normal an extrude grows along ('front'), per sketch plane — the same
 // table the depth drag and the snap use (XZ's is -Y, see planeExtrudeDirection).
 function extrudeNormal(planeId, facePlane) {
@@ -238,9 +254,10 @@ function cutTargetSolids(solids, profileBoxes) {
 // exactly along the axis for a valid revolve.
 function profileCrossesAxis(pts, axis) {
   const dx = axis.x2 - axis.x1, dy = axis.y2 - axis.y1
+  const len = Math.hypot(dx, dy) || 1
   let sign = 0
   for (const p of pts) {
-    const cross = dx*(p.y-axis.y1) - dy*(p.x-axis.x1)
+    const cross = (dx*(p.y-axis.y1) - dy*(p.x-axis.x1)) / len   // distance from the axis, px
     if (Math.abs(cross) < 0.5) continue
     const s = Math.sign(cross)
     if (sign === 0) sign = s
@@ -281,7 +298,7 @@ function buildCutWorkerParamsBase(cutFeat) {
   if (cutFeat.revolveAxis) {
     return {
       pts: cutFeat.profilePts, planeId: cutFeat.planeId,
-      axis: cutFeat.revolveAxis, angleDeg: cutFeat.angleDeg ?? 360, reverse: !!cutFeat.revolveReverse,
+      axis: cutFeat.revolveAxis, angleDeg: cutFeat.angleDeg ?? 360, ...revolveWorkerDir(cutFeat.revolveReverse),
       circle: cutFeat.profilePts.circleMeta || null,
       ...facePlaneParams(cutFeat.facePlane),
     }
@@ -363,7 +380,7 @@ function buildBaseWorkerParams(solid) {
   if (solid.operation === 'revolve') {
     return {
       pts: solid.profilePts, planeId: solid.planeId,
-      axis: solid.revolveAxis, angleDeg: solid.angleDeg ?? 360, reverse: !!solid.revolveReverse,
+      axis: solid.revolveAxis, angleDeg: solid.angleDeg ?? 360, ...revolveWorkerDir(solid.revolveReverse),
       circle: solid.profilePts.circleMeta || null,
       ...facePlaneParams(solid.facePlane),
     }
@@ -606,16 +623,78 @@ function revolveSweepBoxPx(pts, axis, angleDeg, reverse, planeId, facePlane) {
   const axisDir = new THREE.Vector3(w2.x-w1.x, w2.y-w1.y, w2.z-w1.z).normalize()
   const worldPts = pts.map(p => { const w = toWorld(p.x, p.y); return new THREE.Vector3(w.x, w.y, w.z) })
 
-  const sign = reverse ? -1 : 1
+  const [lo, hi] = revolveRangeDeg(angleDeg, reverse)
   const SAMPLES = 16
   const allPts = []
   for (let i = 0; i <= SAMPLES; i++) {
-    const ang = THREE.MathUtils.degToRad(sign * (i/SAMPLES) * angleDeg)
+    const ang = THREE.MathUtils.degToRad(lo + (i/SAMPLES) * (hi - lo))
     for (const v of worldPts) {
       allPts.push(v.clone().sub(axisOrigin).applyAxisAngle(axisDir, ang).add(axisOrigin))
     }
   }
   return new THREE.Box3().setFromPoints(allPts)
+}
+
+// A revolve's direction is stored in `revolveReverse`: false = counter-clockwise,
+// true = clockwise, 'both' = centred on the sketch (half each way). (Kept in the
+// one field so older saved projects, which hold a plain boolean, still load.)
+// → the start/end angle (deg) the profile sweeps through about the axis.
+function revolveRangeDeg(angleDeg, rev) {
+  if (rev === 'both') return [-angleDeg / 2, angleDeg / 2]
+  return rev ? [-angleDeg, 0] : [0, angleDeg]
+}
+// → the worker's { reverse, both } flags for that stored value.
+function revolveWorkerDir(rev) {
+  return { reverse: rev === true, both: rev === 'both' }
+}
+
+// The two built-in origin axes as revolve axes, so a revolve needs no drawn Axis
+// line: 'vertical' spins about the sketch's vertical origin axis, 'horizontal'
+// about the horizontal one. (Sketch px, y-down; 100 px long — only the direction
+// and a point on it matter.)
+function originRevolveAxis(kind) {
+  return kind === 'horizontal'
+    ? { x1: 0, y1: 0, x2: 100, y2: 0, preset: 'horizontal' }
+    : { x1: 0, y1: 0, x2: 0, y2: -100, preset: 'vertical' }
+}
+
+// The translucent solid a revolve would make, in world units (px): the profile
+// swept about the axis through [lo, hi] degrees. Walls are one quad strip per
+// loop segment (steps ≤ ~10° so facets read as smooth); a partial sweep gets a
+// flat cap at each end. `pts` may carry `.holes`, like buildExtrudePrismGeometry.
+function buildRevolveGeometry(pts, axis, planeId, facePlane, [lo, hi]) {
+  const toWorld = (x, y) => { const w = facePlane ? facePlane.sketchToWorld(x, y) : sketchToWorld(x, y, planeId); return new THREE.Vector3(w.x, w.y, w.z) }
+  const axisOrigin = toWorld(axis.x1, axis.y1)
+  const axisDir = toWorld(axis.x2, axis.y2).sub(axisOrigin).normalize()
+  const open = loop => {
+    const last = loop[loop.length - 1], first = loop[0]
+    return loop.length > 1 && last.x === first.x && last.y === first.y ? loop.slice(0, -1) : loop
+  }
+  const loops = [pts, ...(pts.holes || [])].map(open)
+  const world = loops.map(loop => loop.map(p => toWorld(p.x, p.y)))
+  const spin = (v, deg) => v.clone().sub(axisOrigin).applyAxisAngle(axisDir, THREE.MathUtils.degToRad(deg)).add(axisOrigin)
+  const steps = Math.max(2, Math.ceil(Math.abs(hi - lo) / 10))
+  const tris = []
+  for (const loop of world) {
+    for (let i = 0; i < loop.length; i++) {
+      const a = loop[i], b = loop[(i + 1) % loop.length]
+      for (let s = 0; s < steps; s++) {
+        const t0 = lo + (hi - lo) * s / steps, t1 = lo + (hi - lo) * (s + 1) / steps
+        const a0 = spin(a, t0), b0 = spin(b, t0), a1 = spin(a, t1), b1 = spin(b, t1)
+        tris.push(a0, b0, b1, a0, b1, a1)
+      }
+    }
+  }
+  if (Math.abs(hi - lo) < 359.99) {
+    const flat = loops.map(loop => loop.map(p => new THREE.Vector2(p.x, p.y)))
+    const worldAll = world.flat()
+    for (const [i, j, k] of THREE.ShapeUtils.triangulateShape(flat[0], flat.slice(1))) {
+      for (const t of [lo, hi]) tris.push(spin(worldAll[i], t), spin(worldAll[j], t), spin(worldAll[k], t))
+    }
+  }
+  const geo = new THREE.BufferGeometry().setFromPoints(tris)
+  geo.computeVertexNormals()
+  return geo
 }
 
 // Cheap bounding-box estimate for a loft cutout's swept volume — same
@@ -3170,9 +3249,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     } else if (dimToolStep===1){
       // Got p1, show linear dim to mouse
       const p1=dimToolPts[0]
-      const dx=mousePos.x-p1.x,dy=mousePos.y-p1.y
-      const len=Math.hypot(dx,dy)
-      if(len>1) setDimToolPreview({kind:'linear',x1:p1.x,y1:p1.y,x2:mousePos.x,y2:mousePos.y,offset:0})
+      // Near an origin axis the end drops perpendicular onto it, like the click will
+      const ax=originAxisSnap(mousePos,SELECT_DIST*1.5/zoomRef.scale,p1)
+      const ex=ax?ax.x:mousePos.x,ey=ax?ax.y:mousePos.y
+      if(Math.hypot(ex-p1.x,ey-p1.y)>1) setDimToolPreview({kind:'linear',x1:p1.x,y1:p1.y,x2:ex,y2:ey,offset:0})
     } else if (dimToolStep===2){
       // Got p1+p2, set offset distance
       const [p1,p2]=dimToolPts
@@ -4920,13 +5000,6 @@ const App3D = forwardRef(function App3D(props, ref) {
       const axisLine = isRevolveTool
         ? lines.find(l => l.style === 'axis' && (l.plane||'XY') === planeId)
         : null
-      if (isRevolveTool && !axisLine) {
-        setSketchMode(true)
-        setActivePlane(plane)
-        setCadError('Draw a revolve axis first — use the Axis tool to mark the line this profile spins around.')
-        setTimeout(() => setCadError(null), 6000)
-        return
-      }
       // The profile must stay entirely on one side of the axis; a crossing
       // produces self-intersecting geometry in the CAD kernel, so it's
       // blocked here with a clear message rather than left to fail opaquely
@@ -4938,7 +5011,25 @@ const App3D = forwardRef(function App3D(props, ref) {
         setTimeout(() => setCadError(null), 6000)
         return
       }
-      const revolveAxis = axisLine ? { x1:axisLine.x1, y1:axisLine.y1, x2:axisLine.x2, y2:axisLine.y2 } : null
+      let revolveAxis = axisLine ? { x1:axisLine.x1, y1:axisLine.y1, x2:axisLine.x2, y2:axisLine.y2 } : null
+      // No axis line drawn: spin about one of the sketch's own origin axes instead.
+      // Pick the one the profile sits wholly on one side of (nearer one if both
+      // work); the popup lets the user switch. If the profile crosses both, the
+      // popup shows the warning and Done stays blocked until it's moved.
+      if (isRevolveTool && !axisLine) {
+        const saved = editingFeat?.revolveAxis?.preset
+        const gap = a => Math.min(...best.pts.map(p => Math.abs(a.preset === 'vertical' ? p.x : p.y)))
+        const opts = ['vertical', 'horizontal'].map(originRevolveAxis).filter(a => !profileCrossesAxis(best.pts, a))
+        const pick = (saved && opts.find(a => a.preset === saved)) || opts.sort((a, b) => gap(a) - gap(b))[0] || originRevolveAxis(saved || 'vertical')
+        if (editingFeat && profileCrossesAxis(best.pts, pick)) {
+          setSketchMode(true)
+          setActivePlane(plane)
+          setCadError('Profile crosses the axis — a revolve needs the whole profile on one side of the axis.')
+          setTimeout(() => setCadError(null), 6000)
+          return
+        }
+        revolveAxis = pick
+      }
 
       // Use original depth/direction/extent when editing; defaults for new.
       // Cutouts store their extent under cutDirection/cutDepthMm, not direction/depthMm,
@@ -8990,7 +9081,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       ctx.fillStyle = strokeColor
       ctx.font = 'bold 13px monospace'
       ctx.textAlign = 'center'
-      ctx.fillText(`${reverse ? '↻' : '↺'} ${angleDeg}°`, midX, midY - 16)
+      ctx.fillText(`${reverse === 'both' ? '↺↻' : reverse ? '↻' : '↺'} ${angleDeg}°`, midX, midY - 16)
       ctx.restore()
     }
   }
@@ -8999,7 +9090,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // sweep direction reads clearly at a glance, looping while the popup is open.
   function startRevolveAnim(vp, profilePts, axis, planeId, facePlane, angleDeg, reverse, color) {
     cancelRevolveAnim()
-    const sign = reverse ? -1 : 1
+    const [lo, hi] = revolveRangeDeg(angleDeg, reverse)
     const duration = 1400
     let startTime = null
     function frame(now) {
@@ -9007,7 +9098,9 @@ const App3D = forwardRef(function App3D(props, ref) {
       const elapsed = (now - startTime) % (duration*2)
       const t = elapsed < duration ? elapsed/duration : (2 - elapsed/duration)
       const eased = t*t*(3-2*t)   // smoothstep
-      drawRevolveGhost(vp, profilePts, axis, planeId, facePlane, sign*eased*angleDeg, angleDeg, reverse, color)
+      // One way: 0 → the far end. Both ways: sweep from one end to the other through the sketch.
+      const theta = reverse === 'both' ? lo + eased*(hi - lo) : (reverse ? lo : hi) * eased
+      drawRevolveGhost(vp, profilePts, axis, planeId, facePlane, theta, angleDeg, reverse, color)
       revolveAnimRef.current = requestAnimationFrame(frame)
     }
     revolveAnimRef.current = requestAnimationFrame(frame)
@@ -9020,10 +9113,28 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (!axis || !vp || !prof) { cancelRevolveAnim(); return }
     const angleDeg = Math.min(360, Math.max(1, parseFloat(extrudeState.depthInput) || 360))
     startRevolveAnim(vp, prof, axis, extrudeState.planeId, extrudeState.facePlane||null,
-      angleDeg, !!extrudeState.revolveReverse, (extrudeTool === 'cutout' || extrudeTool === 'revolvecut') ? '#e05a4e' : extrudeColor)
+      angleDeg, extrudeState.revolveReverse || false, (extrudeTool === 'cutout' || extrudeTool === 'revolvecut') ? '#e05a4e' : extrudeColor)
     return () => cancelRevolveAnim()
   }, [extrudeState?.revolveAxis, extrudeState?.profiles, extrudeState?.pickedIdx,
       extrudeState?.planeId, extrudeState?.facePlane, extrudeState?.depthInput, extrudeState?.revolveReverse, extrudeTool])
+
+  // Revolve's live 3D preview: the profile swept about the axis, translucent (red
+  // for a Revolve Cut, which also glows the bodies it will cut). Rebuilt whenever
+  // the axis, angle or direction changes — cheap, no worker round-trip.
+  useEffect(() => {
+    const vp = viewport3dRef.current
+    const st = extrudeState
+    const prof = st?.profiles?.[st.pickedIdx]
+    if (!vp || !st?.armed || !st.revolveAxis || !prof) { vp?.hideExtrudeSolidPreview?.(); return }
+    if (profileCrossesAxis(prof, st.revolveAxis)) { vp.hideExtrudeSolidPreview?.(); return }
+    const isCut = extrudeTool === 'revolvecut'
+    const angleDeg = Math.min(360, Math.max(1, parseFloat(st.depthInput) || 360))
+    vp.showExtrudeSolidPreview(
+      buildRevolveGeometry(prof, st.revolveAxis, st.planeId, st.facePlane || null, revolveRangeDeg(angleDeg, st.revolveReverse || false)),
+      isCut ? '#e05a4e' : extrudeColor)
+    return () => vp.hideExtrudeSolidPreview?.()
+  }, [extrudeState?.armed, extrudeState?.revolveAxis, extrudeState?.profiles, extrudeState?.pickedIdx,
+      extrudeState?.planeId, extrudeState?.facePlane, extrudeState?.depthInput, extrudeState?.revolveReverse, extrudeTool, extrudeColor])
 
   // Linear extrude/cutout preview: same "breathing" ping-pong treatment as the
   // revolve ghost, but scaling the extrude depth (0 → full depthMm → 0) instead
@@ -9510,11 +9621,44 @@ const App3D = forwardRef(function App3D(props, ref) {
   }, [extrudeState?.armed, extrudeState?.revolveAxis, extrudeState?.planeId, extrudeState?.facePlane, extrudeState?.profiles,
       extrudeState?.extentMode, extrudeState?.depthInput, extrudeState?.direction, extrudeTool, editingFeatureId, solids])
 
+  // Same red glow for a Revolve Cut: the bodies its swept volume touches.
+  useEffect(() => {
+    const vp = viewport3dRef.current
+    const st = extrudeState
+    const prof = st?.profiles?.[st.pickedIdx]
+    if (extrudeTool !== 'revolvecut' || !st?.armed || !st.revolveAxis || !prof || editingFeatureId || !vp) return
+    if (profileCrossesAxis(prof, st.revolveAxis)) return
+    const angleDeg = Math.min(360, Math.max(1, parseFloat(st.depthInput) || 360))
+    const box = revolveSweepBoxPx(prof, st.revolveAxis, angleDeg, st.revolveReverse || false, st.planeId, st.facePlane || null)
+    vp.highlightJoinMembers(cutTargetSolids(solids, [box]).map(s => ({ solidId: s.id, color: 0xe5484d })))
+    return () => vp.clearJoinHighlight()
+  }, [extrudeState?.armed, extrudeState?.revolveAxis, extrudeState?.planeId, extrudeState?.facePlane, extrudeState?.profiles,
+      extrudeState?.pickedIdx, extrudeState?.depthInput, extrudeState?.revolveReverse, extrudeTool, editingFeatureId, solids])
+
+  // While sketching a Revolve: a warning (or null) if the closed shape can't be
+  // spun yet because it crosses every axis it could spin about — the drawn Axis
+  // line if there is one, otherwise both origin axes. Shown in the step bar so the
+  // problem is seen before Finish, not after.
+  const revolveSketchWarning = useMemo(() => {
+    if (!sketchMode || !activePlane || (extrudeTool !== 'revolve' && extrudeTool !== 'revolvecut')) return null
+    const planeId = typeof activePlane === 'string' ? activePlane : 'face'
+    const own = a => a.filter(x => !x.ghostRef)
+    const ownLines = own(lines)
+    const first = detectProfiles(ownLines, own(arcs), planeId, own(circles), own(splines))[0]
+    if (!first) return null
+    const drawn = ownLines.find(l => l.style === 'axis' && (l.plane || 'XY') === planeId)
+    const axes = drawn ? [drawn] : [originRevolveAxis('vertical'), originRevolveAxis('horizontal')]
+    if (axes.some(a => !profileCrossesAxis(first, a))) return null
+    return drawn
+      ? 'The shape crosses your axis line — keep all of it on one side.'
+      : 'The shape crosses both the X and Y axes — keep all of it on one side of one axis, or draw your own axis line.'
+  }, [sketchMode, activePlane, extrudeTool, lines, arcs, circles, splines])
+
   // The body an extrude sketched on a body's face can be fused into (the "Join to
   // body" switch): that body, if it is still visible and has a feature to lock.
   const joinableBodyId = (() => {
     const id = extrudeState?.facePlane?.solidId
-    if (id == null || extrudeTool !== 'extrude') return null
+    if (id == null || (extrudeTool !== 'extrude' && extrudeTool !== 'revolve')) return null
     const s = solids.find(x => x.id === id)
     return s && s.group && !s.hidden && baseFeatureForSolid(id) ? id : null
   })()
@@ -9750,6 +9894,13 @@ const App3D = forwardRef(function App3D(props, ref) {
     const pts = profiles[pickedIdx]
     const cached = cachedProfiles.find(p => p.pts === pts)
     const facePlane = state.facePlane || cached?.facePlane || null
+    // A revolve axis the shape crosses makes self-intersecting geometry — stay in
+    // the popup so another axis can be picked (the popup shows the same warning).
+    if (revolveAxis && pts && profileCrossesAxis(pts, revolveAxis)) {
+      setCadError('The shape crosses this axis — pick the other axis, or edit the sketch so it sits on one side.')
+      setTimeout(() => setCadError(null), 6000)
+      return
+    }
 
     // Cutout: through-all uses a huge depth to guarantee punch-through; value uses user depth.
     // Direction is respected either way — a one-way through-all cut only removes
@@ -9762,7 +9913,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     // Capture all state before clearing (setExtrudeState(null) makes extrudeState stale)
     const editingId = editingFeatureId
     // "Join to body" only applies to a brand-new plain extrude on a body's face.
-    const joinTargetId = (state.joinBody && !editingId && !isCutout && !revolveAxis) ? (facePlane?.solidId ?? null) : null
+    const joinTargetId = (state.joinBody && !editingId && !isCutout) ? (facePlane?.solidId ?? null) : null
     feat3d.commit(features)
     hiddenEditSolidRef.current = null   // committed — new solid replaces the hidden one
     setExtrudeState(null)
@@ -9784,7 +9935,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         // buildCutWorkerParams' own branching so the two stay in sync.
         const buildCut = p => revolveAxis
           ? {
-              pts: p, planeId, axis: revolveAxis, angleDeg, reverse: revolveReverse,
+              pts: p, planeId, axis: revolveAxis, angleDeg, ...revolveWorkerDir(revolveReverse),
               circle: p.circleMeta || null,
               ...(facePlane ? {
                 normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z],
@@ -9897,7 +10048,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         // needed the way multi-letter text or multi-body cutouts are.
         const solidId = editingFeat?.solidId || Date.now()
         const revolveParams = {
-          pts, planeId, direction, axis: revolveAxis, angleDeg, reverse: revolveReverse,
+          pts, planeId, direction, axis: revolveAxis, angleDeg, ...revolveWorkerDir(revolveReverse),
           circle: pts.circleMeta || null,
           ...(facePlane ? {
             normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z],
@@ -9920,6 +10071,20 @@ const App3D = forwardRef(function App3D(props, ref) {
           setFeatures(prev => prev.map(f => f.id === editingId ? revolveFeat : f))
         } else {
           setFeatures(prev => [...prev, revolveFeat])
+          // "Join to body": fuse the revolve into the body it was sketched on.
+          if (joinTargetId != null) {
+            const target = solids.find(s => s.id === joinTargetId)
+            const targetFeat = baseFeatureForSolid(joinTargetId)
+            if (target && targetFeat) {
+              try {
+                await joinMembers([targetFeat, revolveFeat], [target, solid], [...features, revolveFeat])
+              } catch (err) {
+                console.error('Join to body failed:', err)
+                setCadError(`The revolve was made, but joining it to the body failed: ${err.message || String(err)}`)
+                setTimeout(() => setCadError(null), 8000)
+              }
+            }
+          }
         }
         await rebuildDependentMirrors(solid)
 
@@ -11160,7 +11325,10 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     if (tool==='dim'){
       const snap=getGeoSnap(raw,snapLines,snapCircles,snapArcs,null,false,splines,intersectionPts)
-      const pt=snap?{x:snap.x,y:snap.y}:raw
+      // No geometry under the cursor: fall back to the sketch's X / Y origin axes
+      // (second point = the perpendicular foot from the first, so it measures TO the axis).
+      const axisPt=snap?null:originAxisSnap(raw,SELECT_DIST*1.5/zoomRef.scale,dimToolStep===1?dimToolPts[0]:null)
+      const pt=snap?{x:snap.x,y:snap.y}:axisPt?{x:axisPt.x,y:axisPt.y}:raw
 
       // Circle / arc: one click places dim
       if (dimToolPreview?.kind==='diameter'){
@@ -13338,13 +13506,13 @@ const App3D = forwardRef(function App3D(props, ref) {
               const isRev = extrudeTool === 'revolve' || extrudeTool === 'revolvecut'
               const isCut = extrudeTool === 'cutout' || extrudeTool === 'revolvecut'
               if (extrudeState) {
-                if (isRev) return 'Choose how far to spin it. 360° makes a full solid.'
+                if (isRev) return 'Pick the axis, how far to spin it and which way. 360° makes a full solid.'
                 if (extrudeState.toFace) return `Point at a face and click to ${isCut ? 'cut down' : 'extrude up'} to it. Esc goes back.`
                 return isCut ? 'Type a depth, then press Enter. Red bodies will be cut. Hover a corner, midpoint or centre to snap to it.'
                              : 'Drag or type how far to extrude, then press Enter. Hover a corner, midpoint or centre to snap to it.'
               }
               if (sketchMode) {
-                if (isRev) return 'Draw half of the shape, plus an axis line to spin it around, then press Finish.'
+                if (isRev) return revolveSketchWarning || 'Draw half of the shape on one side of the X or Y axis (or draw your own axis line), then press Finish.'
                 return isCut ? 'Draw the shape to remove, then press Finish.' : 'Draw a closed shape, then press Finish.'
               }
               if (extrudeOffsetBase) return 'Move the mouse or type a distance, Enter to confirm'
@@ -14171,32 +14339,78 @@ const App3D = forwardRef(function App3D(props, ref) {
           fontFamily: 'monospace',
           ...extrudePanelDrag.panelStyle,
         }}>
-          <DragHandle {...extrudePanelDrag.handleProps}>{(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? 'Cutout' : 'Extrude'}</DragHandle>
+          <DragHandle {...extrudePanelDrag.handleProps}>{extrudeState.revolveAxis ? (extrudeTool==='revolvecut' ? 'Revolve Cut' : 'Revolve') : (extrudeTool==='cutout'||extrudeTool==='revolvecut') ? 'Cutout' : 'Extrude'}</DragHandle>
           {extrudeState.revolveAxis ? (
             <>
-              {/* Revolve (extrude or cutout): sweep-angle input + a CW/CCW
-                  toggle. The axis (already drawn/selected in the sketch) plus
-                  a degrees value and sweep direction fully defines a solid —
+              {/* Revolve (extrude or cutout): axis, direction, sweep angle.
+                  The axis (an origin axis or the drawn Axis line) plus a
+                  degrees value and sweep direction fully defines a solid —
                   or cut volume — of revolution. */}
-              <div style={{display:'flex', alignItems:'center', gap:6, marginBottom:8}}>
-                {[
-                  {k:false, label:'CCW'},
-                  {k:true,  label:'CW'},
-                ].map(({k,label}) => (
-                  <button key={label}
-                    onClick={()=>setExtrudeState(prev=>({...prev, revolveReverse:k}))}
-                    title={label==='CW' ? 'Clockwise' : 'Counterclockwise'}
-                    style={{
-                      flex:1, padding:'4px 0', fontSize:12, cursor:'pointer',
-                      background: extrudeState.revolveReverse===k ? ((extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff') : '#050505',
-                      color: extrudeState.revolveReverse===k ? '#000' : ((extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'),
-                      border:`1px solid ${(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'}`,
-                      borderRadius: 2, fontFamily:'monospace', fontWeight:'bold', letterSpacing:'0.05em',
-                      textShadow: extrudeState.revolveReverse===k ? 'none' : `0 0 4px ${(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'}`,
-                    }}
-                  >{label}</button>
-                ))}
-              </div>
+              {(() => {
+                const accent = (extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'
+                const chip = (active, small) => ({
+                  flex:1, padding: small ? '3px 0' : '4px 2px', fontSize: small ? 11 : 11, cursor:'pointer',
+                  background: active ? accent : '#050505', color: active ? '#000' : accent,
+                  border:`1px solid ${accent}`, borderRadius:2, fontFamily:'monospace', fontWeight:'bold',
+                  textShadow: active ? 'none' : `0 0 4px ${accent}`,
+                })
+                const st = extrudeState
+                const prof = st.profiles?.[st.pickedIdx]
+                const drawnAxis = st.sketchLines?.find(l => l.style === 'axis' && (l.plane||'XY') === st.planeId)
+                const axisKind = st.revolveAxis.preset || 'drawn'
+                const crosses = !!prof && profileCrossesAxis(prof, st.revolveAxis)
+                const angleNow = String(parseFloat(st.depthInput))
+                const rev = st.revolveReverse || false
+                const pickAxis = (a) => updateExtrudeState(() => ({ revolveAxis: a }))
+                return (
+                  <>
+                    <div style={{color:'#889', fontSize:10, marginBottom:3, letterSpacing:'0.05em'}}>SPIN AROUND</div>
+                    <div style={{display:'flex', gap:4, marginBottom: crosses ? 4 : 8}}>
+                      <button style={chip(axisKind==='vertical')} title="The up-and-down origin axis of the sketch"
+                        onClick={()=>pickAxis(originRevolveAxis('vertical'))}>Vertical axis</button>
+                      <button style={chip(axisKind==='horizontal')} title="The left-to-right origin axis of the sketch"
+                        onClick={()=>pickAxis(originRevolveAxis('horizontal'))}>Horizontal axis</button>
+                      {drawnAxis && (
+                        <button style={chip(axisKind==='drawn')} title="The axis line you drew in the sketch"
+                          onClick={()=>pickAxis({ x1:drawnAxis.x1, y1:drawnAxis.y1, x2:drawnAxis.x2, y2:drawnAxis.y2 })}>Your line</button>
+                      )}
+                    </div>
+                    {crosses && (
+                      <div style={{color:'#ff6b6b', fontSize:10, marginBottom:8, lineHeight:1.3}}>
+                        The shape crosses this axis — try the other one, or edit the sketch.
+                      </div>
+                    )}
+                    <div style={{color:'#889', fontSize:10, marginBottom:3, letterSpacing:'0.05em'}}>DIRECTION</div>
+                    <div style={{display:'flex', gap:4, marginBottom:4}}>
+                      <button style={chip(rev===false)} title="Spin counter-clockwise (right-hand rule about the axis)"
+                        onClick={()=>updateExtrudeState(()=>({revolveReverse:false}))}>↺ Counter-clockwise</button>
+                      <button style={chip(rev===true)} title="Spin clockwise"
+                        onClick={()=>updateExtrudeState(()=>({revolveReverse:true}))}>↻ Clockwise</button>
+                    </div>
+                    <button style={{...chip(rev==='both'), width:'100%', flex:'none', marginBottom:8}}
+                      title="Spin half the angle each way, so the sketch sits in the middle of the shape"
+                      onClick={()=>updateExtrudeState(()=>({revolveReverse:'both'}))}>⇆ Both ways</button>
+                    <div style={{display:'flex', gap:4, marginBottom:6}}>
+                      {[90,180,270,360].map(a => (
+                        <button key={a} style={chip(angleNow===String(a), true)}
+                          onClick={()=>updateExtrudeState(()=>({depthInput:String(a)}))}>{a}°</button>
+                      ))}
+                    </div>
+                    {/* New body | Join to body — only when the sketch sits on a body's face. */}
+                    {joinableBodyId != null && !editingFeatureId && (
+                      <div style={{display:'flex', gap:4, marginBottom:8}}>
+                        {[
+                          {k:false, label:'New body',     title:'Keep the revolve as its own body'},
+                          {k:true,  label:'Join to body', title:'Fuse the revolve into the body you sketched on'},
+                        ].map(({k,label,title}) => (
+                          <button key={label} title={title} style={chip(!!st.joinBody === k)}
+                            onClick={()=>updateExtrudeState(()=>({joinBody:k}))}>{label}</button>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )
+              })()}
               <div style={{display:'flex', alignItems:'center', gap:8}}>
                 <div style={{
                   flex:1, background:'#000', border:`1px solid ${(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C55' : '#3ad6ff55'}`,

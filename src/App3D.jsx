@@ -147,11 +147,7 @@ function cutExtentRangeMm(depthMm, direction, planeId) {
 // Kept per profile (never unioned) so a solid sitting between two holes
 // isn't swept in just because it falls inside the whole grid's outer span.
 function linearCutBoxPx(pts, planeId, facePlane, cutDepthMm, cutDirection) {
-  const worldNormals = { XY:[0,0,1], XZ:[0,-1,0], YZ:[1,0,0] }
-  const [nx, ny, nz] = facePlane
-    ? [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z]
-    : (worldNormals[planeId] || [0,0,1])
-  const normalVec = new THREE.Vector3(nx, ny, nz)
+  const normalVec = extrudeNormal(planeId, facePlane)
   const worldPts = pts.map(pt => {
     const w = facePlane ? facePlane.sketchToWorld(pt.x, pt.y) : sketchToWorld(pt.x, pt.y, planeId)
     return new THREE.Vector3(w.x, w.y, w.z)
@@ -162,6 +158,57 @@ function linearCutBoxPx(pts, planeId, facePlane, cutDepthMm, cutDirection) {
   box.union(profBox.clone().translate(normalVec.clone().multiplyScalar(mmToPx(minMm))))
   box.union(profBox.clone().translate(normalVec.clone().multiplyScalar(mmToPx(maxMm))))
   return box
+}
+
+// Unit world normal an extrude grows along ('front'), per sketch plane — the same
+// table the depth drag and the snap use (XZ's is -Y, see planeExtrudeDirection).
+function extrudeNormal(planeId, facePlane) {
+  const worldNormals = { XY:[0,0,1], XZ:[0,-1,0], YZ:[1,0,0] }
+  const [nx, ny, nz] = facePlane
+    ? [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z]
+    : (worldNormals[planeId] || [0,0,1])
+  return new THREE.Vector3(nx, ny, nz)
+}
+
+// The translucent "what you'll get" prism for Extrude's live preview, in world
+// units (px). Straight walls only (a draft angle isn't shown). `pts` may carry
+// `.holes`, which are punched through the caps and given their own walls.
+function buildExtrudePrismGeometry(pts, planeId, facePlane, depthMm, direction) {
+  const n = extrudeNormal(planeId, facePlane)
+  const d = mmToPx(depthMm)
+  const [z0, z1] = direction === 'back' ? [-d, 0] : direction === 'both' ? [-d/2, d/2] : [0, d]
+  // A closing duplicate of the first point would shift the triangulation's indices.
+  const open = loop => {
+    const last = loop[loop.length - 1], first = loop[0]
+    return loop.length > 1 && last.x === first.x && last.y === first.y ? loop.slice(0, -1) : loop
+  }
+  const loops = [pts, ...(pts.holes || [])].map(open)
+  const flat = loops.map(loop => loop.map(p => new THREE.Vector2(p.x, p.y)))
+  const world = loops.map(loop => loop.map(p => {
+    const w = facePlane ? facePlane.sketchToWorld(p.x, p.y) : sketchToWorld(p.x, p.y, planeId)
+    return new THREE.Vector3(w.x, w.y, w.z)
+  }))
+  const at = (v, z) => v.clone().addScaledVector(n, z)
+  const tris = []
+  const quad = (a, b, c, e) => { tris.push(a, b, c, a, c, e) }
+
+  // Caps: triangulate once in sketch space, then lift to both planes.
+  const worldAll = world.flat()
+  const idx = THREE.ShapeUtils.triangulateShape(flat[0], flat.slice(1))
+  for (const [i, j, k] of idx) {
+    tris.push(at(worldAll[i], z0), at(worldAll[j], z0), at(worldAll[k], z0))
+    tris.push(at(worldAll[i], z1), at(worldAll[j], z1), at(worldAll[k], z1))
+  }
+  // Walls: one quad per loop segment.
+  for (const loop of world) {
+    for (let i = 0; i < loop.length; i++) {
+      const a = loop[i], b = loop[(i + 1) % loop.length]
+      quad(at(a, z0), at(b, z0), at(b, z1), at(a, z1))
+    }
+  }
+  const geo = new THREE.BufferGeometry().setFromPoints(tris)
+  geo.computeVertexNormals()
+  return geo
 }
 
 // Every visible body a new cutout will cut: its swept box must touch at
@@ -6869,30 +6916,39 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (memberSolids.length < 2) return
     feat3d.commit(features)
     try {
-      const newSolidId = Date.now()
-      const members = memberSolids.map(s => ({
-        solidId: s.id, base: buildBaseWorkerParams(s), ops: buildSolidOpsForWorker(s, features),
-      }))
-      const meshData = await cadEngine.joinShapes({ solidId: newSolidId, members })
-      const group = replicadMeshToThree(meshData, memberSolids[0].color, newSolidId)
-
-      const joinFeatId = `join-${newSolidId}`
-      const joinName = nextJoinName()   // outside the updater — see nextSketchName's comment
-      setSolids(prev => [
-        ...prev.filter(s => !memberSolids.some(m => m.id === s.id)),
-        { id: newSolidId, group, operation: 'join', memberSolidIds: memberSolids.map(s => s.id), color: memberSolids[0].color },
-      ])
-      setFeatures(prev => [
-        ...prev.map(f => memberFeats.some(m => m.id === f.id) ? { ...f, joinedInto: joinFeatId } : f),
-        { id: joinFeatId, type: 'extrude', name: joinName, operation: 'join',
-          solidId: newSolidId, memberFeatureIds: selIds, memberSolidIds: memberSolids.map(s => s.id),
-          color: memberSolids[0].color },
-      ])
+      await joinMembers(memberFeats, memberSolids, features)
     } catch (err) {
       console.error('Join failed:', err)
       setCadError(`Join failed: ${err.message || String(err)}`)
       setTimeout(() => setCadError(null), 6000)
     }
+  }
+
+  // The union itself, shared by the Join tool and Extrude's "Join to body".
+  // `allFeatures` must hold every feature the members' cold-rebuild ops come
+  // from (for a just-made extrude that includes the feature not yet in state).
+  // The first member's colour wins, so list the body that should keep its
+  // colour first. Throws on failure — callers report it.
+  async function joinMembers(memberFeats, memberSolids, allFeatures) {
+    const newSolidId = Date.now()
+    const members = memberSolids.map(s => ({
+      solidId: s.id, base: buildBaseWorkerParams(s), ops: buildSolidOpsForWorker(s, allFeatures),
+    }))
+    const meshData = await cadEngine.joinShapes({ solidId: newSolidId, members })
+    const group = replicadMeshToThree(meshData, memberSolids[0].color, newSolidId)
+
+    const joinFeatId = `join-${newSolidId}`
+    const joinName = nextJoinName()   // outside the updater — see nextSketchName's comment
+    setSolids(prev => [
+      ...prev.filter(s => !memberSolids.some(m => m.id === s.id)),
+      { id: newSolidId, group, operation: 'join', memberSolidIds: memberSolids.map(s => s.id), color: memberSolids[0].color },
+    ])
+    setFeatures(prev => [
+      ...prev.map(f => memberFeats.some(m => m.id === f.id) ? { ...f, joinedInto: joinFeatId } : f),
+      { id: joinFeatId, type: 'extrude', name: joinName, operation: 'join',
+        solidId: newSolidId, memberFeatureIds: memberFeats.map(f => f.id), memberSolidIds: memberSolids.map(s => s.id),
+        color: memberSolids[0].color },
+    ])
   }
 
   // ── Subtract (3D boolean cut with a finished body) ───────────────────────
@@ -8679,13 +8735,26 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (edgeHit?.edgeId == null) return null
     const nearest = nearestSnapCandidate(getEdgeSnapCandidates(vp, edgeHit.solidId, edgeHit.edgeId), edgeHit.point)
     if (!nearest) return null
+    return { s: signedDepthTo(nearest.point, p), point: nearest.point }
+  }
+
+  // Signed distance (mm) from the sketch plane to a world point (mm), along the
+  // extrude normal. Normals match Viewport3D.planeExtrudeDirection (XZ's is -Y).
+  function signedDepthTo(point, p) {
     const fp = p.facePlane
-    // Normals match Viewport3D.planeExtrudeDirection (XZ's is -Y, see its comment).
     const n = fp?.normal ? [fp.normal.x, fp.normal.y, fp.normal.z]
       : ({ XY:[0,0,1], XZ:[0,-1,0], YZ:[1,0,0] }[p.planeId] || [0,0,1])
     const o = fp?.origin ? [pxToMm(fp.origin.x), pxToMm(fp.origin.y), pxToMm(fp.origin.z)] : [0,0,0]
-    const [x, y, z] = nearest.point
-    return { s: (x-o[0])*n[0] + (y-o[1])*n[1] + (z-o[2])*n[2], point: nearest.point }
+    const [x, y, z] = point
+    return (x-o[0])*n[0] + (y-o[1])*n[1] + (z-o[2])*n[2]
+  }
+
+  // "To Face" mode: the spot under the cursor on any body's surface, as the same
+  // {s, point} the corner snap returns, so the extrude's end face lands on the
+  // face being pointed at (at that spot, for a tilted face). Null off the bodies.
+  function extrudeFaceSnap(e, vp, p) {
+    const hit = vp.raycastSolidFace?.(e.clientX, e.clientY)
+    return hit ? { s: signedDepthTo(hit.point, p), point: hit.point } : null
   }
 
   // Orange dot at the snapped point, drawn on top of the extrude preview.
@@ -8739,7 +8808,11 @@ const App3D = forwardRef(function App3D(props, ref) {
     // depth so the extrusion's end face passes exactly through that point
     // (same point-finder the Offset Plane step uses). It wins over grid
     // rounding, and is skipped when the user has typed an exact depth.
-    const snap = extrudeState.depthLocked ? null : extrudeDepthSnap(e, vp, p)
+    // In To Face mode the depth instead follows whichever surface the cursor is on,
+    // typed value or not (and holds its last value while the cursor is off the bodies).
+    const toFace = !!extrudeState.toFace
+    const snap = toFace ? extrudeFaceSnap(e, vp, p) : (extrudeState.depthLocked ? null : extrudeDepthSnap(e, vp, p))
+    if (toFace && !snap) { extrudeSnapRef.current = null; return }
     let mm, signed = proj
     if (snap) {
       // 'both' extends the same distance each way, so total depth is double.
@@ -8755,7 +8828,7 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     setExtrudeState(prev => {
       if (!prev?.armed) return prev
-      const nextDir = prev.direction === 'both' ? 'both' : (signed >= 0 ? 'front' : 'back')
+      const nextDir = (prev.direction === 'both' || (prev.directionLocked && !prev.toFace)) ? prev.direction : (signed >= 0 ? 'front' : 'back')
       // depthLocked (set when the user types into the depth box directly —
       // see its onChange) means they typed an exact value on purpose; the
       // mouse should still flip which side it's on (that's the whole point
@@ -8763,7 +8836,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       // silently overwrite the number they typed the instant the mouse
       // drifts back over the canvas, which is what happened before this —
       // any typed value got clobbered by the very next mousemove.
-      const nextDepth = prev.depthLocked ? prev.depthInput : mmStr
+      const nextDepth = (prev.depthLocked && !prev.toFace) ? prev.depthInput : mmStr
       if (prev.depthInput === nextDepth && prev.direction === nextDir) return prev
       return { ...prev, depthInput: nextDepth, direction: nextDir }
     })
@@ -9022,6 +9095,24 @@ const App3D = forwardRef(function App3D(props, ref) {
   }, [extrudeState?.armed, extrudeState?.revolveAxis, extrudeState?.planeId, extrudeState?.facePlane,
       extrudeState?.profiles, extrudeState?.pickedIdx, extrudeState?.centroid,
       extrudeState?.extentMode, extrudeState?.depthInput, extrudeState?.direction, extrudeTool, extrudeColor])
+
+  // The real-looking preview: a translucent solid of the chosen depth, rebuilt on
+  // every depth / direction change (cheap — a few hundred triangles). The canvas
+  // ghost above still supplies the arrow and the "20mm" label.
+  useEffect(() => {
+    const vp = viewport3dRef.current
+    const st = extrudeState
+    if (extrudeTool !== 'extrude' || !st?.armed || st.revolveAxis || !vp) return
+    const pts = st.profiles?.[st.pickedIdx]
+    const depthMm = parseFloat(st.depthInput)
+    if (!pts || !(depthMm > 0)) { vp.hideExtrudeSolidPreview(); return }
+    vp.showExtrudeSolidPreview(
+      buildExtrudePrismGeometry(pts, st.planeId, st.facePlane || null, depthMm, st.direction || 'front'),
+      extrudeColor)
+    return () => vp.hideExtrudeSolidPreview()
+  }, [extrudeState?.armed, extrudeState?.revolveAxis, extrudeState?.planeId, extrudeState?.facePlane,
+      extrudeState?.profiles, extrudeState?.pickedIdx, extrudeState?.depthInput, extrudeState?.direction,
+      extrudeTool, extrudeColor])
 
   // Loft's own parallel version of the extrude anim-loop pair above — kept
   // fully separate rather than folded into extrudeState's machinery, since
@@ -9294,6 +9385,22 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     // Phase 3: already armed → second click = commit
     if (extrudeState?.armed) {
+      if (extrudeState.toFace) {
+        // To Face: this click picks the face and accepts it as the end of the
+        // extrude. A click that lands on no body does nothing (stay in the mode).
+        const vp = viewport3dRef.current, p = extrudeAnimParamsRef.current
+        const click = lastClickClientRef.current
+        const snap = vp && p ? extrudeFaceSnap({ clientX: click.x, clientY: click.y }, vp, p) : null
+        if (!snap) return true
+        const both = (extrudeStateRef.current || extrudeState).direction === 'both'
+        const next = {
+          ...(extrudeStateRef.current || extrudeState), toFace: false, preToFace: null, depthLocked: true,
+          depthInput: String(Math.round(Math.max(0.1, Math.abs(snap.s) * (both ? 2 : 1)) * 100) / 100),
+          direction: both ? 'both' : (snap.s >= 0 ? 'front' : 'back'),
+        }
+        extrudeStateRef.current = next
+        setExtrudeState(next)
+      }
       // Only commit if click is not on the popup (popup has its own buttons)
       setSolids(prev => prev.filter(s => s.id!=='__preview__'))
       previewSolidRef.current = null
@@ -9378,6 +9485,65 @@ const App3D = forwardRef(function App3D(props, ref) {
   }, [extrudeState?.armed, extrudeState?.revolveAxis, extrudeState?.planeId, extrudeState?.facePlane, extrudeState?.profiles,
       extrudeState?.extentMode, extrudeState?.depthInput, extrudeState?.direction, extrudeTool, editingFeatureId, solids])
 
+  // The body an extrude sketched on a body's face can be fused into (the "Join to
+  // body" switch): that body, if it is still visible and has a feature to lock.
+  const joinableBodyId = (() => {
+    const id = extrudeState?.facePlane?.solidId
+    if (id == null || extrudeTool !== 'extrude') return null
+    const s = solids.find(x => x.id === id)
+    return s && s.group && !s.hidden && baseFeatureForSolid(id) ? id : null
+  })()
+
+  // "One way | Both ways | ⇄ Flip" for Extrude and Cutout. One way follows the
+  // mouse (hover either side of the plane) until Flip is pressed, which pins the
+  // side (`directionLocked`) so the mouse stops overriding it; clicking One way
+  // again hands the side back to the mouse. The ref is written synchronously —
+  // see the old direction toggle's comment: Enter right after a click must not
+  // read the pre-click direction.
+  function updateExtrudeState(patch) {
+    setExtrudeState(prev => {
+      const next = { ...prev, ...patch(prev) }
+      extrudeStateRef.current = next
+      return next
+    })
+  }
+  // To Face on/off. Turning it off WITHOUT picking a face puts back the depth and
+  // side it had before, since hovering has been rewriting them. (Picking a face
+  // keeps what the hover set — see handleExtrudeClick.)
+  function toggleToFace() {
+    updateExtrudeState(prev => prev.toFace
+      ? { toFace: false, ...(prev.preToFace || {}), preToFace: null }
+      : { toFace: true, preToFace: {
+          depthInput: prev.depthInput, direction: prev.direction,
+          depthLocked: prev.depthLocked, directionLocked: prev.directionLocked } })
+  }
+  function directionToggle(color, { compact = false } = {}) {
+    const oneWay = extrudeState.direction !== 'both'
+    const btn = (key, label, active, enabled, onClick, title) => (
+      <button key={key} onClick={onClick} title={title} disabled={!enabled}
+        style={{
+          flex: compact ? '0 0 auto' : 1, padding: compact ? '2px 8px' : '4px 0', fontSize: compact ? 10 : 11,
+          cursor: enabled ? 'pointer' : 'default', fontFamily: 'monospace', fontWeight: 'bold',
+          background: active ? color : '#050505', color: active ? '#000' : color,
+          border: `1px solid ${color}`, borderRadius: 2, opacity: enabled ? 1 : 0.35,
+          textShadow: active ? 'none' : `0 0 4px ${color}`,
+        }}>{label}</button>
+    )
+    return (
+      <div style={{ display: 'flex', gap: 4 }}>
+        {btn('one', 'One way', oneWay, true,
+          () => updateExtrudeState(prev => ({ direction: prev.direction === 'both' ? 'front' : prev.direction, directionLocked: false })),
+          'One way — grows to one side of the sketch. Hover either side of the plane to choose, or press Flip')}
+        {btn('both', 'Both ways', !oneWay, true,
+          () => updateExtrudeState(() => ({ direction: 'both' })),
+          'Both ways — grows equally on both sides of the sketch')}
+        {btn('flip', '⇄ Flip', false, oneWay,
+          () => updateExtrudeState(prev => ({ direction: prev.direction === 'back' ? 'front' : 'back', directionLocked: true })),
+          'Flip to the other side of the sketch')}
+      </div>
+    )
+  }
+
   function handleExtrudeDepthKey(e) {
     if (!extrudeStateRef.current) return
     if (e.key === 'Enter') {
@@ -9387,6 +9553,8 @@ const App3D = forwardRef(function App3D(props, ref) {
       setSolids(prev => prev.filter(s => s.id!=='__preview__'))
       commitExtrude()
     } else if (e.key === 'Escape') {
+      // First Esc leaves To Face mode (back to the typed/dragged depth); the next one cancels.
+      if (extrudeStateRef.current.toFace) { toggleToFace(); return }
       const vp = viewport3dRef.current
       const oc = vp?.getExtrudePreviewCanvas()
       if (oc) { const ctx=oc.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,oc.width,oc.height) }
@@ -9566,6 +9734,8 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     // Capture all state before clearing (setExtrudeState(null) makes extrudeState stale)
     const editingId = editingFeatureId
+    // "Join to body" only applies to a brand-new plain extrude on a body's face.
+    const joinTargetId = (state.joinBody && !editingId && !isCutout && !revolveAxis) ? (facePlane?.solidId ?? null) : null
     feat3d.commit(features)
     hiddenEditSolidRef.current = null   // committed — new solid replaces the hidden one
     setExtrudeState(null)
@@ -9814,6 +9984,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         }
 
         const newFeats = []
+        const newSolidObjs = []   // plain solid records, for "Join to body" below
         let profIdx = -1
         for (const profPts of profiles) {
           profIdx++
@@ -9898,6 +10069,8 @@ const App3D = forwardRef(function App3D(props, ref) {
             depthMm, direction, extentMode, draftAngleDeg, draftDirection, color, operation:'extrude', planeId,
             profilePts: profPts, facePlane, ...sketchGeom,
           })
+          newSolidObjs.push({ id: solidId, planeId, operation:'extrude', direction, depth: mmToPx(depthMm), depthMm,
+            draftAngleDeg, draftDirection, profilePts: profPts, color, facePlane })
           // Only the plain single-profile case supports dependent mirrors
           // today (matches the pre-existing behavior this branch replaces —
           // a multi-body group was never mirror-able, unchanged here).
@@ -9918,6 +10091,21 @@ const App3D = forwardRef(function App3D(props, ref) {
           setFeatures(prev => [...prev.filter(f => !oldIds.includes(f.id)), ...newFeats])
         } else {
           setFeatures(prev => [...prev, ...newFeats])
+          // "Join to body": fuse the new extrude into the body it was sketched
+          // on. If the union fails the extrude stays as its own body — say so.
+          if (joinTargetId != null) {
+            const target = solids.find(s => s.id === joinTargetId)
+            const targetFeat = baseFeatureForSolid(joinTargetId)
+            if (target && targetFeat) {
+              try {
+                await joinMembers([targetFeat, ...newFeats], [target, ...newSolidObjs], [...features, ...newFeats])
+              } catch (err) {
+                console.error('Join to body failed:', err)
+                setCadError(`The extrude was made, but joining it to the body failed: ${err.message || String(err)}`)
+                setTimeout(() => setCadError(null), 8000)
+              }
+            }
+          }
         }
       }
 
@@ -13124,6 +13312,7 @@ const App3D = forwardRef(function App3D(props, ref) {
               const isCut = extrudeTool === 'cutout' || extrudeTool === 'revolvecut'
               if (extrudeState) {
                 if (isRev) return 'Choose how far to spin it. 360° makes a full solid.'
+                if (extrudeState.toFace) return 'Point at a face and click to extrude up to it. Esc goes back.'
                 return isCut ? 'Type a depth, then press Enter. Red bodies will be cut. Hover a corner, midpoint or centre to snap to it.'
                              : 'Drag or type how far to extrude, then press Enter. Hover a corner, midpoint or centre to snap to it.'
               }
@@ -13881,35 +14070,10 @@ const App3D = forwardRef(function App3D(props, ref) {
                 {extrudeState && (
                   <span style={{color:'#6688aa',fontFamily:'monospace',fontSize:12,flexShrink:0}}>mm</span>
                 )}
-                {/* Direction toggle — front / both / back */}
-                {extrudeState && (
-                  <div style={{display:'flex',gap:2,flexShrink:0}}>
-                    {['front','both','back'].map(dir => (
-                      <button key={dir}
-                        title={dir==='both'?'Symmetric (both sides)':dir==='front'?'Front only':'Back only'}
-                        onClick={()=>setExtrudeState(prev=>{
-                          // Also write the ref synchronously — extrudeStateRef only
-                          // updates via a useEffect (see its declaration), which runs
-                          // AFTER this click's render commits. commitExtrude() prefers
-                          // the ref, so confirming (Enter/Finish) fast enough right
-                          // after this click could otherwise read the PRE-click
-                          // direction and silently commit the wrong one (e.g.
-                          // "Symmetric" selected but a one-sided extrude gets built).
-                          const next = {...prev, direction:dir}
-                          extrudeStateRef.current = next
-                          return next
-                        })}
-                        style={{
-                          padding:'2px 6px', fontSize:10, fontFamily:'monospace',
-                          background: extrudeState.direction===dir ? '#3a7bd5' : '#1e1e38',
-                          color: extrudeState.direction===dir ? '#fff' : '#6688aa',
-                          border:`1px solid ${extrudeState.direction===dir?'#3a7bd5':'#333'}`,
-                          borderRadius:3, cursor:'pointer',
-                        }}
-                      >
-                        {dir==='front'?'▶':dir==='both'?'◀▶':'◀'}
-                      </button>
-                    ))}
+                {/* Direction toggle — One way / Both ways / Flip */}
+                {extrudeState && !extrudeState.revolveAxis && (
+                  <div style={{flexShrink:0}}>
+                    {directionToggle((extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#e05a4e' : '#3a7bd5', { compact:true })}
                   </div>
                 )}
                 {/* Key badges */}
@@ -14058,32 +14222,29 @@ const App3D = forwardRef(function App3D(props, ref) {
               {/* Extent mode — One Way (direction/sign follows which side of the
                   plane the mouse is hovering, see handleExtrudeDragMove) vs
                   Symmetric (grows equally both ways, side ignored). */}
-              <div style={{display:'flex', alignItems:'center', gap:6, marginBottom:8}}>
-                {[
-                  {k:'oneway', icon:'▶',  label:'One Way — depth follows the mouse; hover either side of the plane to flip direction'},
-                  {k:'both',   icon:'◀▶', label:'Symmetric — grows equally on both sides'},
-                ].map(({k,icon,label}) => {
-                  const active = k==='both' ? extrudeState.direction==='both' : extrudeState.direction!=='both'
-                  return (
-                    <button key={k}
-                      onClick={()=>setExtrudeState(prev=>{
-                        const next = {...prev, direction: k==='both' ? 'both' : 'front'}
-                        extrudeStateRef.current = next
-                        return next
-                      })}
-                      title={label}
-                      style={{
-                        flex:1, padding:'4px 0', fontSize:13, cursor:'pointer',
-                        background: active ? '#3ad6ff' : '#050505',
-                        color: active ? '#000' : '#3ad6ff',
-                        border:'1px solid #3ad6ff',
-                        borderRadius: 2,
-                        textShadow: active ? 'none' : '0 0 4px #3ad6ff',
-                      }}
-                    >{icon}</button>
-                  )
-                })}
-              </div>
+              <div style={{marginBottom:8}}>{directionToggle('#3ad6ff')}</div>
+              {/* New body | Join to body — only when the sketch sits on a body's face.
+                  Join fuses the result into that body (one Join row in the tree). */}
+              {joinableBodyId != null && !editingFeatureId && (
+                <div style={{display:'flex', gap:4, marginBottom:8}}>
+                  {[
+                    {k:false, label:'New body',     title:'Keep the extrude as its own body'},
+                    {k:true,  label:'Join to body', title:'Fuse the extrude into the body you sketched on'},
+                  ].map(({k,label,title}) => {
+                    const active = !!extrudeState.joinBody === k
+                    return (
+                      <button key={label} title={title}
+                        onClick={()=>updateExtrudeState(()=>({joinBody:k}))}
+                        style={{
+                          flex:1, padding:'4px 0', fontSize:11, cursor:'pointer', fontFamily:'monospace', fontWeight:'bold',
+                          background: active ? '#3ad6ff' : '#050505', color: active ? '#000' : '#3ad6ff',
+                          border:'1px solid #3ad6ff', borderRadius:2,
+                          textShadow: active ? 'none' : '0 0 4px #3ad6ff',
+                        }}>{label}</button>
+                    )
+                  })}
+                </div>
+              )}
               {/* Draft angle — optional taper of this extrude's side walls, in/out
                   from the sketch plane (0° = off, the default). No face-picking:
                   the worker derives every side face and the neutral plane itself
@@ -14184,8 +14345,20 @@ const App3D = forwardRef(function App3D(props, ref) {
                   }}
                 >↵</button>
               </div>
+              {/* To Face — the depth follows whichever surface the cursor is on; a click on it accepts. */}
+              <button
+                onClick={toggleToFace}
+                title="Extrude exactly up to another face: point at it and click"
+                style={{
+                  width:'100%', marginTop:8, padding:'4px 0', fontSize:11, cursor:'pointer', fontFamily:'monospace', fontWeight:'bold',
+                  background: extrudeState.toFace ? '#3ad6ff' : '#050505', color: extrudeState.toFace ? '#000' : '#3ad6ff',
+                  border:'1px solid #3ad6ff', borderRadius:2,
+                  textShadow: extrudeState.toFace ? 'none' : '0 0 4px #3ad6ff',
+                }}>⇥ To face</button>
               <div style={{color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em'}}>
-                Move mouse to set depth{gridSnap ? ` (snap ${gridSizeMm}mm)` : ''} · type or ↵ to accept · Esc to cancel
+                {extrudeState.toFace
+                  ? 'Click a face to extrude up to it · Esc to go back'
+                  : <>Move mouse to set depth{gridSnap ? ` (snap ${gridSizeMm}mm)` : ''} · type or ↵ to accept · Esc to cancel</>}
               </div>
             </>
           )}
@@ -14253,32 +14426,7 @@ const App3D = forwardRef(function App3D(props, ref) {
               {/* Extent mode — One Way (direction/sign follows which side of
                   the plane the mouse is hovering) vs Symmetric (grows equally
                   both ways, side ignored) — same concept as the extrude popup. */}
-              <div style={{display:'flex', gap:4}}>
-                {[
-                  {k:'oneway', icon:'▶',  label:'One Way — depth follows the mouse; hover either side of the plane to flip direction'},
-                  {k:'both',   icon:'◀▶', label:'Symmetric — grows equally on both sides'},
-                ].map(({k,icon,label}) => {
-                  const active = k==='both' ? extrudeState.direction==='both' : extrudeState.direction!=='both'
-                  return (
-                    <button key={k}
-                      onClick={()=>setExtrudeState(prev=>{
-                        const next = {...prev, direction: k==='both' ? 'both' : 'front'}
-                        extrudeStateRef.current = next
-                        return next
-                      })}
-                      title={label}
-                      style={{
-                        flex:1, padding:'4px 0', fontSize:13, cursor:'pointer',
-                        background: active ? '#FF3B5C' : '#050505',
-                        color: active ? '#000' : '#FF3B5C',
-                        border:'1px solid #FF3B5C',
-                        borderRadius:2,
-                        textShadow: active ? 'none' : '0 0 4px #FF3B5C',
-                      }}
-                    >{icon}</button>
-                  )
-                })}
-              </div>
+              {directionToggle('#FF3B5C')}
 
               {/* Depth input (disabled for through-all) */}
               <div style={{display:'flex', gap:6, alignItems:'center'}}>

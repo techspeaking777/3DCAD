@@ -478,6 +478,8 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   // Built lazily on first use, repositioned in place on every call rather than
   // rebuilt — see showOffsetPlanePreview/hideOffsetPlanePreview.
   const offsetPlanePreviewRef = useRef(null)
+  // Extrude's translucent solid preview — see showExtrudeSolidPreview.
+  const extrudeSolidPreviewRef = useRef(null)
   // Sweep "Project onto surface": the projected path curve, drawn in 3D while
   // the user confirms it — see showProjectedPathPreview.
   const projectedPathPreviewRef = useRef(null)
@@ -1838,6 +1840,40 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       g.group.parent?.remove(g.group)
       g.edges.dispose(); g.mat.dispose()
       patternGhostsRef.current = null
+    },
+
+    /**
+     * Extrude's live 3D preview: a translucent copy of the solid-to-be, built by
+     * App3D (buildExtrudePrismGeometry, world units) and replaced on every depth
+     * change. It lives in the scene, NOT solidsGroup, so it is never picked,
+     * highlighted or exported — it is only there to be looked at.
+     */
+    showExtrudeSolidPreview(geometry, color) {
+      const s = stateRef.current; if (!s?.scene) { geometry.dispose(); return }
+      this.hideExtrudeSolidPreview()
+      const mat = new THREE.MeshPhongMaterial({
+        color, transparent: true, opacity: 0.42, side: THREE.DoubleSide, depthWrite: false,
+        polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
+      })
+      const mesh = new THREE.Mesh(geometry, mat)
+      mesh.renderOrder = 5
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geometry, 15),
+        new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.7 }),
+      )
+      edges.renderOrder = 6
+      const group = new THREE.Group()
+      group.add(mesh, edges)
+      s.scene.add(group)
+      extrudeSolidPreviewRef.current = group
+    },
+
+    hideExtrudeSolidPreview() {
+      const group = extrudeSolidPreviewRef.current
+      if (!group) return
+      group.parent?.remove(group)
+      group.traverse(o => { o.geometry?.dispose(); o.material?.dispose() })
+      extrudeSolidPreviewRef.current = null
     },
 
     /** Draws the projected path (array of [x,y,z] mm) as a bright 3D polyline. */

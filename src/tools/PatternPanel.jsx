@@ -1,8 +1,7 @@
 import { useState, useMemo, useEffect } from 'react'
 
 // ── Panel component ───────────────────────────────────────────────────────
-// Numeric-params form for the Pattern tool, modeled on SpringPanel.jsx's
-// structure. Two modes:
+// Numeric-params form for the Pattern tool. Two modes:
 //  • Circular — collects every number up front, then closes and hands off to
 //    an interactive "click a circular edge" pivot+axis pick in the viewport
 //    (App3D.jsx's handlePatternAxisHover/Click).

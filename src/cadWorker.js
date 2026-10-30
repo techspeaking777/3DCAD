@@ -2,6 +2,7 @@ import opencascade from 'replicad-opencascadejs/src/replicad_single.js'
 import opencascadeWasm from 'replicad-opencascadejs/src/replicad_single.wasm?url'
 import { setOC, Sketcher, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, Vector, importSTEP, makeBSplineApproximation, assembleWire, genericSweep } from 'replicad'
 import { projectedProfilePlane, dedupePoints3d } from './tools/sweepProject.js'
+import { springFrame } from './tools/springMath.js'
 
 const SCALE = 2
 // Tolerance (mm) for matching a picked screen point to the actual OCC edge —
@@ -773,11 +774,13 @@ function clampCutDepth(cut, baseParams) {
 // its own axis doesn't change that tangent at all, so it's safe to extend
 // BOTH ends here, not just the far one the way extendSweepCutPath must.
 // This only ever touches the CUT TOOL's final geometry (called from
-// buildCutShape below) — it never touches computeSpringPathPlane's own
-// origin/height, so the profile the user actually sketched stays anchored
-// exactly where they drew it.
+// buildCutShape below), so the profile the user actually sketched stays
+// anchored exactly where they drew it.
 const SPRING_CUT_OVH_MM = 1
 function extendSpringCutPath(cut) {
+  // Axis-sketched spring (see buildSpringAxial): the profile sits exactly where
+  // it was drawn and the coil grows from it, so only the far end can be pushed out.
+  if (cut.springAxis) return { ...cut, heightMm: cut.heightMm + SPRING_CUT_OVH_MM }
   const { origin, normal, heightMm } = cut
   const [nx, ny, nz] = normal
   return {
@@ -1150,11 +1153,6 @@ self.onmessage = async function(e) {
       const best = Math.floor(lo * 10) / 10
       const fits = best >= 0.1 && tryFilletOrChamfer(base, params.edgePoints, best, isChamfer)
       self.postMessage({ type:'result', id, filletMax: fits ? best : 0 })
-      return
-    }
-
-    if (type==='springProfilePlane') {
-      self.postMessage({ type:'result', id, planeData: computeSpringPathPlane(params) })
       return
     }
 
@@ -1998,16 +1996,19 @@ function buildSweepProjected({ pathPts3d, projDir, profilePts, profileCircle }) 
 }
 
 // Spring — a hand-sketched wire cross-section swept along a helical path.
-// Unlike a plain circle wire, the profile here is real user-sketched
-// geometry (same shape detectProfiles/buildMixedProfile produce for Sweep's
-// own profile), sketched on the EXACT plane replicad's sweepSketch call
-// below will compute internally — see computeSpringPathPlane, which App3D.jsx
-// calls BEFORE showing the sketch canvas, so what the user draws lines up
-// with what actually gets swept. The path itself is still purely parametric
-// (no hand-drawn points): replicad's own sketchHelix(pitch, height, radius,
-// center, dir, lefthand) builds the whole helical Sketch directly from plain
-// [x,y,z] arrays — no Plane/Vector wrapping, no makePath involved.
-function buildSpring({ pitchMm, heightMm, coilRadiusMm, origin, normal, lefthand=false, profilePts, profileCircle }) {
+// Springs made now are built by buildSpringAxial (profile + axis sketched
+// together, like a Revolve). buildSpringHelixFirst below is the ORIGINAL
+// build, kept only so projects saved with it still open: its profile was
+// sketched on the plane replicad's sweepSketch computes from a parametric
+// sketchHelix(pitch, height, radius, center, dir, lefthand) start point.
+function buildSpring(params) {
+  // New springs are sketched like a revolve (profile + axis in one sketch);
+  // anything saved before that (no springAxis) keeps the old helix-first build.
+  if (params.springAxis) return buildSpringAxial(params)
+  return buildSpringHelixFirst(params)
+}
+
+function buildSpringHelixFirst({ pitchMm, heightMm, coilRadiusMm, origin, normal, lefthand=false, profilePts, profileCircle }) {
   // A circular wire whose diameter reaches or exceeds the pitch means
   // consecutive coils physically overlap before any sweep math even runs —
   // BRepCheck_Analyzer's validity guard below only catches LOCAL topological
@@ -2047,33 +2048,63 @@ function buildSpring({ pitchMm, heightMm, coilRadiusMm, origin, normal, lefthand
   return shape
 }
 
-// Returns the exact plane buildSpring's own sweepSketch call will hand its
-// profile-building callback — mirrors Sketch.sweepSketch's plane math
-// EXACTLY (see node_modules/replicad/dist/replicad.js): startPoint =
-// wire.startPoint, normal = -tangentAt(~0) (normalized), xDir =
-// normal×defaultDirection×-1. sketchHelix's Sketch is built via `new
-// Sketch(assembleWire(...))` with no defaultOrigin/defaultDirection
-// override, so defaultDirection stays the class default [0,0,1] here —
-// NOT origin/normal, and NOT basis.normal the way a hand-sketched Sweep
-// path's own Sketcher(plane)-built Sketch would carry.
-//
-// This is computed by actually building the helix wire and reading real
-// values off it (wire.startPoint/tangentAt), rather than independently
-// re-deriving OpenCascade's gp_Ax3(origin,dir) X-direction convention by
-// hand — that convention is a real, deterministic algorithm, but it's
-// undocumented from the JS binding's perspective and not worth risking a
-// silent mismatch (a mirrored/misaligned profile plane) when replicad's own
-// wire object already knows the exact answer for free.
-function computeSpringPathPlane({ pitchMm, heightMm, coilRadiusMm, origin, normal, lefthand=false }) {
-  const pathSketch = sketchHelix(pitchMm, heightMm, coilRadiusMm, origin, normal, lefthand)
-  const startPoint = pathSketch.wire.startPoint
-  const tangent = pathSketch.wire.tangentAt(1e-9).multiply(-1).normalize()
-  const xDir = tangent.cross(new Vector([0, 0, 1])).multiply(-1).normalize()
-  return {
-    origin: [startPoint.x, startPoint.y, startPoint.z],
-    normal: [tangent.x, tangent.y, tangent.z],
-    uAxis: [xDir.x, xDir.y, xDir.z],
+// Spring sketched like a Revolve: one closed wire profile plus an axis line
+// (springAxis, sketch px) in the SAME sketch plane (normal/origin/uAxis, mm).
+// The coil grows from the profile along the axis (springReverse flips which
+// way) for heightMm. Nothing here needs the profile to be perpendicular to
+// the wire: a helix is a screw motion, so Frenet-sweeping the profile as
+// drawn (withCorrection off) just moves it by that screw motion about the
+// axis — the profile you see at the start IS the cross-section you drew.
+// The helix is only the guide: it is built around the axis through the
+// profile's centre height, then turned so it starts under the profile.
+function buildSpringAxial({ pitchMm, heightMm, lefthand=false, springAxis, springReverse=false, normal, origin, uAxis, profilePts, profileCircle }) {
+  const frame = springFrame({ pts: profilePts, circle: profileCircle }, springAxis, springReverse)
+  if (!frame) throw new Error('Spring failed: no wire profile')
+  const wireAlongMm = (frame.axialMaxPx - frame.axialMinPx) / SCALE
+  if (wireAlongMm >= pitchMm) {
+    throw new Error(`Spring failed: the wire is ${wireAlongMm.toFixed(2)}mm thick along the spring, which must be less than the pitch (${pitchMm.toFixed(2)}mm) or the coils overlap — increase the pitch or use a thinner wire`)
   }
+  if (frame.radialMinPx <= 0.5) throw new Error('Spring failed: the wire touches or crosses the axis — move the shape away from it')
+
+  const plane = buildProfilePlane('face', 0, normal, origin, uAxis)
+  const world = (x, y) => { const w = plane.toWorldCoords([x/SCALE, -y/SCALE]); return [w.x, w.y, w.z] }
+  const { ux, uy, nx, ny, zPx, radiusPx } = frame
+  const ox = springAxis.x1 + ux*zPx, oy = springAxis.y1 + uy*zPx      // axis point level with the profile centre
+  const center = world(ox, oy)
+  const along = world(ox + ux*100, oy + uy*100)
+  const toward = world(ox + nx*radiusPx, oy + ny*radiusPx)           // the profile centre
+  const profile = makeProfileOnPlane(profilePts, plane, true, profileCircle)
+  plane.delete()
+
+  const sub = (a, b) => [a[0]-b[0], a[1]-b[1], a[2]-b[2]]
+  const dot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+  const cross = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
+  const unit = a => { const l = Math.hypot(...a) || 1; return [a[0]/l, a[1]/l, a[2]/l] }
+  const dir = unit(sub(along, center))
+  const radial = sub(toward, center)
+  const coilRadiusMm = Math.hypot(...radial)
+  const radialUnit = unit(radial)
+
+  // Turn the helix so it starts in the profile's direction from the axis.
+  const helix = sketchHelix(pitchMm, heightMm, coilRadiusMm, center, dir, lefthand)
+  const startVec = helix.wire.startPoint
+  const fromAxis = sub([startVec.x, startVec.y, startVec.z], center)
+  const startUnit = unit(sub(fromAxis, dir.map(c => c * dot(fromAxis, dir))))
+  const turnDeg = Math.atan2(dot(dir, cross(startUnit, radialUnit)), dot(startUnit, radialUnit)) * 180 / Math.PI
+  const spine = helix.wire.rotate(turnDeg, center, dir)   // also frees the unturned wire
+
+  let shape
+  try {
+    shape = genericSweep(profile.wire, spine, { frenet: true, forceProfileSpineOthogonality: false })
+  } catch {
+    throw new Error('Spring failed: the coil couldn\'t be built — try a thinner wire or a larger pitch')
+  }
+  const oc = getOC()
+  const analyzer = new oc.BRepCheck_Analyzer(shape.wrapped, true, false)
+  const valid = analyzer.IsValid_2()
+  analyzer.delete()
+  if (!valid) throw new Error('Spring failed: could not build a valid solid — try a thinner wire or a larger pitch')
+  return shape
 }
 
 function buildExtrude({ pts, depthMm, planeId, direction='both',

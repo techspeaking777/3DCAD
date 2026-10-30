@@ -488,6 +488,62 @@ function softenCandidates(shape, table, { keepFacePoints, picks }) {
   return { list, dropped }
 }
 
+// ── Fillet: which edges one click means ──────────────────────────────────────
+// A Fillet pick on an edge also takes the edges that flow smoothly into it (a
+// rounded rectangle's whole rim is one click), the way OpenCascade itself rounds
+// along such a chain. Two edges meeting at a shared vertex are one chain when
+// their exact tangents there are opposite (they run on into each other), and they
+// border a common face — that stops a pick hopping across an unrelated junction.
+const CHAIN_JOIN_TOL = 0.05      // mm — two edge ends this close are the same vertex
+const CHAIN_TANGENT_COS = 0.9986 // ~3° — closer than this counts as running straight on
+
+function vec3(v) {
+  const out = [v.x, v.y, v.z]
+  v.delete?.()
+  return out
+}
+
+// Both ends of an edge: where it is, and the direction it heads INTO the edge from there.
+function edgeEnds(edge) {
+  const norm = v => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l] }
+  const ts = norm(vec3(edge.tangentAt(0)))
+  const te = norm(vec3(edge.tangentAt(1))).map(c => -c)
+  return [{ p: vec3(edge.startPoint), into: ts }, { p: vec3(edge.endPoint), into: te }]
+}
+
+function tangentChain(table, startRec) {
+  const ends = new Map()
+  const endsOf = rec => { if (!ends.has(rec.id)) ends.set(rec.id, edgeEnds(rec.edge)); return ends.get(rec.id) }
+  const seen = new Set([startRec.id]), out = [startRec], queue = [startRec]
+  while (queue.length) {
+    const rec = queue.pop()
+    for (const a of endsOf(rec)) {
+      for (const other of table.values()) {
+        if (seen.has(other.id) || !other.faces.some(f => rec.faces.includes(f))) continue
+        for (const b of endsOf(other)) {
+          if (Math.hypot(a.p[0] - b.p[0], a.p[1] - b.p[1], a.p[2] - b.p[2]) > CHAIN_JOIN_TOL) continue
+          const dot = a.into[0] * b.into[0] + a.into[1] * b.into[1] + a.into[2] * b.into[2]
+          if (dot < -CHAIN_TANGENT_COS) { seen.add(other.id); out.push(other); queue.push(other); break }
+        }
+      }
+    }
+  }
+  return out
+}
+
+// Rounds `base` at `radius` (or bevels it) on the edges near `edgePoints`; null when it fails or comes out invalid.
+function tryFilletOrChamfer(base, edgePoints, radius, isChamfer) {
+  try {
+    const filter = edgeFilterForPoints(edgePoints)
+    const out = isChamfer ? base.chamfer(radius, filter) : base.fillet(radius, filter)
+    const ok = shapeIsValid(out)
+    out.delete?.()
+    return ok
+  } catch (_) {
+    return false
+  }
+}
+
 // One radius round: rounds as many of `cands` as will go together at `radius`.
 // Tries the whole group at once, and when that fails splits it in half and tries
 // each half on top of what's already accepted — a few bad edges cost a handful of
@@ -1047,6 +1103,53 @@ self.onmessage = async function(e) {
       }
       const { list } = softenCandidates(base, softenEdgeTable(base), { keepFacePoints: params.keepFacePoints })
       self.postMessage({ type:'result', id, softenEdges: list.map(c => ({ edgeId: c.id, point: c.pt })) })
+      return
+    }
+
+    if (type==='filletEdges') {
+      // The edges a Fillet click means: a face pick → that face's roundable
+      // edges; an edge pick → that edge plus its smooth chain (unless chain:false).
+      let base = shapeStore.get(params.solidId)
+      if (!base) {
+        if (!params.base) throw new Error('Fillet-MISS: base not in store and no fallback params')
+        base = await buildBase(params.base)
+      }
+      const table = softenEdgeTable(base)
+      const recs = []
+      if (params.facePoint) {
+        let faces = new FaceFinder().withinDistance(0.2, params.facePoint).find(base)
+        if (!faces.length) faces = new FaceFinder().withinDistance(EDGE_PICK_TOL, params.facePoint).find(base)
+        for (const edge of (faces[0]?.edges || [])) {
+          const rec = table.get(edge.hashCode)
+          if (rec && !recs.includes(rec)) recs.push(rec)
+        }
+      } else {
+        const rec = softenFindEdge(table, { edgeId: params.edgeId, point: params.point })
+        if (rec) recs.push(...(params.chain === false ? [rec] : tangentChain(table, rec)))
+      }
+      const list = recs.map(softenCandidate).filter(Boolean)
+      self.postMessage({ type:'result', id, filletEdges: list.map(c => ({ edgeId: c.id, point: c.pt })) })
+      return
+    }
+
+    if (type==='filletMaxRadius') {
+      // After a fillet/chamfer failed at params.radius: bisect for the biggest
+      // size that works, trying each on a throwaway copy (nothing is stored).
+      let base = shapeStore.get(params.solidId)
+      if (!base) {
+        if (!params.base) throw new Error('Fillet-MISS: base not in store and no fallback params')
+        base = await buildBase(params.base)
+      }
+      const isChamfer = params.operation === 'chamfer'
+      let lo = 0, hi = params.radius
+      for (let i = 0; i < 9; i++) {
+        const mid = (lo + hi) / 2
+        if (tryFilletOrChamfer(base, params.edgePoints, mid, isChamfer)) lo = mid
+        else hi = mid
+      }
+      const best = Math.floor(lo * 10) / 10
+      const fits = best >= 0.1 && tryFilletOrChamfer(base, params.edgePoints, best, isChamfer)
+      self.postMessage({ type:'result', id, filletMax: fits ? best : 0 })
       return
     }
 

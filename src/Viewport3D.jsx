@@ -788,18 +788,20 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
             ctx3.moveTo(p1.x, p1.y)
             ctx3.lineTo(p2.x, p2.y)
           }
+          // Dark casing under the colour so the edge stays visible on a blue body.
+          ctx3.lineCap = 'round'
+          ctx3.strokeStyle = 'rgba(0,0,0,0.45)'
+          ctx3.lineWidth = 7
+          ctx3.stroke()
           ctx3.strokeStyle = color
           ctx3.lineWidth = 4
-          ctx3.lineCap = 'round'
           ctx3.stroke()
         }
 
-        // Measure gets its own cyan pair instead of fillet's orange/yellow —
-        // the two tools are never active at once, but a distinct color keeps
-        // "picked an edge to measure" visually different from "picked an
-        // edge to fillet" if a screenshot/memory of one is compared later.
-        const selColor = measureActiveRef.current ? '#4FC3F7' : softenActiveRef.current ? '#ffe14d' : '#ff9800'
-        const hovColor = measureActiveRef.current ? '#84FFFF' : softenActiveRef.current ? '#ff9800' : '#ffe14d'
+        // Measure gets its own cyan pair; Fillet and Soften share yellow for
+        // "picked" and orange for "under the cursor".
+        const selColor = measureActiveRef.current ? '#4FC3F7' : '#ffe14d'
+        const hovColor = measureActiveRef.current ? '#84FFFF' : '#ff9800'
         for (const sel of selectedEdgeHighlightsRef.current) drawEdge(sel, selColor)
 
         // Skip drawing the hover highlight if it's the same edge already in

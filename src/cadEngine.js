@@ -30,7 +30,7 @@ class CadEngine {
       )
 
       this._worker.onmessage = (e) => {
-        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, planeData, soften, softenEdges, message } = e.data
+        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, planeData, soften, softenEdges, filletEdges, filletMax, message } = e.data
 
         if (type === 'ready') {
           this._ready = true
@@ -62,6 +62,8 @@ class CadEngine {
             orthoViews ? { orthoViews } :
             planeData ? { planeData } :
             softenEdges ? { softenEdges } :
+            filletEdges ? { filletEdges } :
+            filletMax !== undefined ? { filletMax } :
             { faces, edges, ...(soften ? { soften } : {}) }
           )
         } else if (type === 'error') {
@@ -102,6 +104,16 @@ class CadEngine {
   /** Round (or bevel) one or more edges of an existing solid — params: {solidId, edgePoints:[[x,y,z],...] (mm), radius, operation:'fillet'|'chamfer' (defaults to 'fillet'), base?}. */
   async fillet3d(params) {
     return this._send('fillet3d', params)
+  }
+
+  /** Which edges one Fillet click means — params: {solidId, edgeId?, point:[x,y,z]? (an edge pick; chain:false keeps just that edge, otherwise the smooth edges flowing into it come too), facePoint:[x,y,z]? (a face pick: all that face's roundable edges), base?}. Resolves {filletEdges:[{edgeId, point:[x,y,z]}]}. */
+  async filletEdges(params) {
+    return this._send('filletEdges', params)
+  }
+
+  /** After a failed fillet/chamfer: the largest radius (rounded down to 0.1 mm) that does work on those edges, 0 if none. Nothing is changed. params: {solidId, edgePoints, radius (the one that failed), operation, base?}. Resolves {filletMax}. */
+  async filletMaxRadius(params) {
+    return this._send('filletMaxRadius', params)
   }
 
   /** Round edges of a solid as much as each will take — params: {solidId, radius (mm, the target), minRadius?, edges?:[{edgeId, point:[x,y,z]},...] (just these; default every edge), keepFacePoints?:[[x,y,z],...] (faces whose outline edges stay sharp), base?}. Resolves {faces, edges, soften:{rounds:[{radius, edgePoints}], total, skipped, leftover:[{edgeId, point}], timedOut}}. */

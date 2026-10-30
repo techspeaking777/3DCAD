@@ -7661,7 +7661,8 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [springBuildError, setSpringBuildError] = useState(null)
   useEffect(() => {
     const vp = viewport3dRef.current
-    if (!vp || !springSpec || springProblem) { vp?.hideExtrudeSolidPreview?.(); setSpringBuildError(null); return }
+    if (!vp || !springState) return   // not a spring session: the shared preview belongs to another tool
+    if (!springSpec || springProblem) { vp.hideExtrudeSolidPreview?.(); setSpringBuildError(null); return }
     const seq = ++springPreviewSeqRef.current
     const timer = setTimeout(async () => {
       try {
@@ -7678,6 +7679,12 @@ const App3D = forwardRef(function App3D(props, ref) {
     return () => { clearTimeout(timer); springPreviewSeqRef.current++ }
   }, [springState?.armed, springState?.profile, springState?.springAxis, springState?.springReverse, springState?.lefthand,
       springState?.specBy, springState?.pitchInput, springState?.lengthInput, springState?.coilsInput, springTool, extrudeColor])
+
+  // Gone with the spring session (finished, cancelled, or a new tool picked).
+  useEffect(() => {
+    if (!springState) { setSpringBuildError(null); return }
+    return () => viewport3dRef.current?.hideExtrudeSolidPreview?.()
+  }, [!!springState])
 
   // Spring Cut: glow the bodies the coil will cut (the same boxes the commit uses).
   useEffect(() => {
@@ -9386,7 +9393,10 @@ const App3D = forwardRef(function App3D(props, ref) {
   useEffect(() => {
     const vp = viewport3dRef.current
     const st = loftState
-    if (!vp || !st || sketchMode) { vp?.hideExtrudeSolidPreview?.(); return }
+    // No loft session: leave the shared preview alone (Revolve/Extrude/Spring own it then;
+    // the effect below clears it when a loft ends).
+    if (!vp || !st) return
+    if (sketchMode) { vp.hideExtrudeSolidPreview?.(); return }
     const list = loftPreviewProfiles(st, isLoftDragArmed())
     if (list.length < 2) { vp.hideExtrudeSolidPreview?.(); return }
     const seq = ++loftPreviewSeqRef.current

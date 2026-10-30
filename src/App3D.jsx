@@ -170,13 +170,22 @@ function extrudeNormal(planeId, facePlane) {
   return new THREE.Vector3(nx, ny, nz)
 }
 
-// The translucent "what you'll get" prism for Extrude's live preview, in world
-// units (px). Straight walls only (a draft angle isn't shown). `pts` may carry
-// `.holes`, which are punched through the caps and given their own walls.
-function buildExtrudePrismGeometry(pts, planeId, facePlane, depthMm, direction) {
+// Where along the normal (mm, relative to the sketch plane) the preview prism
+// sits — the volume the commit will add (extrude) or remove (cutout). A cut
+// matches cadWorker's buildExtrude without its 1 mm entry overhang: 'front' on
+// a body's face cuts INWARD (so does 'back'), on a work plane 'front' is +normal.
+function previewRangeMm(isCut, depthMm, direction, planeId) {
+  if (direction === 'both') return [-depthMm / 2, depthMm / 2]
+  if (direction === 'back') return [-depthMm, 0]
+  return isCut && planeId === 'face' ? [-depthMm, 0] : [0, depthMm]
+}
+
+// The translucent "what you'll get" prism for Extrude/Cutout's live preview, in
+// world units (px). Straight walls only (a draft angle isn't shown). `pts` may
+// carry `.holes`, which are punched through the caps and given their own walls.
+function buildExtrudePrismGeometry(pts, planeId, facePlane, [loMm, hiMm]) {
   const n = extrudeNormal(planeId, facePlane)
-  const d = mmToPx(depthMm)
-  const [z0, z1] = direction === 'back' ? [-d, 0] : direction === 'both' ? [-d/2, d/2] : [0, d]
+  const [z0, z1] = [mmToPx(loMm), mmToPx(hiMm)]
   // A closing duplicate of the first point would shift the triangulation's indices.
   const open = loop => {
     const last = loop[loop.length - 1], first = loop[0]
@@ -8749,6 +8758,15 @@ const App3D = forwardRef(function App3D(props, ref) {
     return (x-o[0])*n[0] + (y-o[1])*n[1] + (z-o[2])*n[2]
   }
 
+  // Whether a To Face target at signed depth `s` makes sense. A cut sketched on a
+  // body's face only ever goes INTO that body (front and back both mean inward),
+  // so a face out in the open air on the outward side can't be cut up to.
+  function toFaceOk(s, both) {
+    const st = extrudeStateRef.current || extrudeState
+    const faceCut = extrudeTool === 'cutout' && st?.planeId === 'face'
+    return !(faceCut && !both && s > -0.05)
+  }
+
   // "To Face" mode: the spot under the cursor on any body's surface, as the same
   // {s, point} the corner snap returns, so the extrude's end face lands on the
   // face being pointed at (at that spot, for a tilted face). Null off the bodies.
@@ -8812,7 +8830,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     // typed value or not (and holds its last value while the cursor is off the bodies).
     const toFace = !!extrudeState.toFace
     const snap = toFace ? extrudeFaceSnap(e, vp, p) : (extrudeState.depthLocked ? null : extrudeDepthSnap(e, vp, p))
-    if (toFace && !snap) { extrudeSnapRef.current = null; return }
+    if (toFace && (!snap || !toFaceOk(snap.s, extrudeState.direction === 'both'))) { extrudeSnapRef.current = null; return }
     let mm, signed = proj
     if (snap) {
       // 'both' extends the same distance each way, so total depth is double.
@@ -9089,7 +9107,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     // computeExtrudeDirScreen — see that function's comment for why.
     extrudeAnimParamsRef.current = {
       vp, profilePts: prof, planeId, facePlane, centroid: st.centroid, depthMm,
-      direction: st.direction || 'front', opType: extrudeTool,
+      // A cut sketched on a body's face only ever goes INTO the body, whichever
+      // side is picked (cadWorker's buildExtrude), so the ghost must point inward too.
+      direction: (isCutout && planeId === 'face' && st.direction !== 'both') ? 'back' : (st.direction || 'front'),
+      opType: extrudeTool,
       color: isCutout ? '#e05a4e' : extrudeColor,
     }
   }, [extrudeState?.armed, extrudeState?.revolveAxis, extrudeState?.planeId, extrudeState?.facePlane,
@@ -9099,20 +9120,24 @@ const App3D = forwardRef(function App3D(props, ref) {
   // The real-looking preview: a translucent solid of the chosen depth, rebuilt on
   // every depth / direction change (cheap — a few hundred triangles). The canvas
   // ghost above still supplies the arrow and the "20mm" label.
+  // Cutout gets the same, in red: the volume that will be removed (an old
+  // Through All cut has no finite volume, so it shows none).
   useEffect(() => {
     const vp = viewport3dRef.current
     const st = extrudeState
-    if (extrudeTool !== 'extrude' || !st?.armed || st.revolveAxis || !vp) return
+    const isCut = extrudeTool === 'cutout'
+    if ((extrudeTool !== 'extrude' && !isCut) || !st?.armed || st.revolveAxis || !vp) return
     const pts = st.profiles?.[st.pickedIdx]
     const depthMm = parseFloat(st.depthInput)
-    if (!pts || !(depthMm > 0)) { vp.hideExtrudeSolidPreview(); return }
+    if (!pts || !(depthMm > 0) || (isCut && st.extentMode === 'through')) { vp.hideExtrudeSolidPreview(); return }
     vp.showExtrudeSolidPreview(
-      buildExtrudePrismGeometry(pts, st.planeId, st.facePlane || null, depthMm, st.direction || 'front'),
-      extrudeColor)
+      buildExtrudePrismGeometry(pts, st.planeId, st.facePlane || null,
+        previewRangeMm(isCut, depthMm, st.direction || 'front', st.planeId)),
+      isCut ? '#e05a4e' : extrudeColor)
     return () => vp.hideExtrudeSolidPreview()
   }, [extrudeState?.armed, extrudeState?.revolveAxis, extrudeState?.planeId, extrudeState?.facePlane,
       extrudeState?.profiles, extrudeState?.pickedIdx, extrudeState?.depthInput, extrudeState?.direction,
-      extrudeTool, extrudeColor])
+      extrudeState?.extentMode, extrudeTool, extrudeColor])
 
   // Loft's own parallel version of the extrude anim-loop pair above — kept
   // fully separate rather than folded into extrudeState's machinery, since
@@ -9391,8 +9416,8 @@ const App3D = forwardRef(function App3D(props, ref) {
         const vp = viewport3dRef.current, p = extrudeAnimParamsRef.current
         const click = lastClickClientRef.current
         const snap = vp && p ? extrudeFaceSnap({ clientX: click.x, clientY: click.y }, vp, p) : null
-        if (!snap) return true
         const both = (extrudeStateRef.current || extrudeState).direction === 'both'
+        if (!snap || !toFaceOk(snap.s, both)) return true
         const next = {
           ...(extrudeStateRef.current || extrudeState), toFace: false, preToFace: null, depthLocked: true,
           depthInput: String(Math.round(Math.max(0.1, Math.abs(snap.s) * (both ? 2 : 1)) * 100) / 100),
@@ -9519,6 +9544,8 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
   function directionToggle(color, { compact = false } = {}) {
     const oneWay = extrudeState.direction !== 'both'
+    // A cut sketched on a body's face always goes into that body — there is no other side to flip to.
+    const faceCut = extrudeTool === 'cutout' && extrudeState.planeId === 'face'
     const btn = (key, label, active, enabled, onClick, title) => (
       <button key={key} onClick={onClick} title={title} disabled={!enabled}
         style={{
@@ -9537,9 +9564,9 @@ const App3D = forwardRef(function App3D(props, ref) {
         {btn('both', 'Both ways', !oneWay, true,
           () => updateExtrudeState(() => ({ direction: 'both' })),
           'Both ways — grows equally on both sides of the sketch')}
-        {btn('flip', '⇄ Flip', false, oneWay,
+        {btn('flip', '⇄ Flip', false, oneWay && !faceCut,
           () => updateExtrudeState(prev => ({ direction: prev.direction === 'back' ? 'front' : 'back', directionLocked: true })),
-          'Flip to the other side of the sketch')}
+          faceCut ? 'A cut on a face always goes into the body' : 'Flip to the other side of the sketch')}
       </div>
     )
   }
@@ -13312,7 +13339,7 @@ const App3D = forwardRef(function App3D(props, ref) {
               const isCut = extrudeTool === 'cutout' || extrudeTool === 'revolvecut'
               if (extrudeState) {
                 if (isRev) return 'Choose how far to spin it. 360° makes a full solid.'
-                if (extrudeState.toFace) return 'Point at a face and click to extrude up to it. Esc goes back.'
+                if (extrudeState.toFace) return `Point at a face and click to ${isCut ? 'cut down' : 'extrude up'} to it. Esc goes back.`
                 return isCut ? 'Type a depth, then press Enter. Red bodies will be cut. Hover a corner, midpoint or centre to snap to it.'
                              : 'Drag or type how far to extrude, then press Enter. Hover a corner, midpoint or centre to snap to it.'
               }
@@ -14469,12 +14496,27 @@ const App3D = forwardRef(function App3D(props, ref) {
                 >↵</button>
               </div>
 
+              {/* To Face — cut exactly down to a face: the depth follows the surface
+                  under the cursor and a click on it accepts (see handleExtrudeClick). */}
+              {extrudeState.extentMode!=='through' && (
+                <button
+                  onClick={toggleToFace}
+                  title="Cut exactly down to another face: point at it and click"
+                  style={{
+                    width:'100%', padding:'4px 0', fontSize:11, cursor:'pointer', fontFamily:'monospace', fontWeight:'bold',
+                    background: extrudeState.toFace ? '#FF3B5C' : '#050505', color: extrudeState.toFace ? '#000' : '#FF3B5C',
+                    border:'1px solid #FF3B5C', borderRadius:2,
+                    textShadow: extrudeState.toFace ? 'none' : '0 0 4px #FF3B5C',
+                  }}>⇥ To face</button>
+              )}
             </div>
           </div>
           <div style={{color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em'}}>
             {extrudeState.extentMode==='through'
-              ? 'Cuts through entire solid'
-              : `Move mouse to set depth${gridSnap ? ` (snap ${gridSizeMm}mm)` : ''} · type or ↵ to accept · hidden bodies aren't cut`} · Esc to cancel
+              ? 'Cuts through entire solid · Esc to cancel'
+              : extrudeState.toFace
+                ? 'Click a face to cut down to it · Esc to go back'
+                : `Move mouse to set depth${gridSnap ? ` (snap ${gridSizeMm}mm)` : ''} · type or ↵ to accept · hidden bodies aren't cut · Esc to cancel`}
           </div>
         </div>
         </div>

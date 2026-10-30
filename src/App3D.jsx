@@ -292,7 +292,7 @@ function buildCutWorkerParamsBase(cutFeat) {
   if (cutFeat.profiles) {
     return {
       profiles: cutFeat.profiles.map(p => ({ pts: p.pts, circle: p.circle, offsetMm: p.offsetMm })),
-      normal: cutFeat.normal, origin: cutFeat.origin, uAxis: cutFeat.uAxis, ruled: !!cutFeat.ruled,
+      normal: cutFeat.normal, viewNormal: cutFeat.viewNormal, origin: cutFeat.origin, uAxis: cutFeat.uAxis, ruled: !!cutFeat.ruled,
     }
   }
   if (cutFeat.revolveAxis) {
@@ -7982,7 +7982,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       const editingFeat = editingId ? features.find(f => f.id === editingId) : null
       const cutParams = {
         profiles: profiles.map(p => ({ pts: p.pts, circle: p.circle, offsetMm: p.offsetMm })),
-        normal, origin, uAxis, ruled,
+        normal, viewNormal, origin, uAxis, ruled,
       }
       try {
         let targets, oldMembers = []
@@ -9391,6 +9391,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       try {
         const meshData = await cadEngine.loft({
           normal: [basis.normal.x, basis.normal.y, basis.normal.z],
+          viewNormal: [basis.viewNormal.x, basis.viewNormal.y, basis.viewNormal.z],
           origin: [pxToMm(basis.origin.x), pxToMm(basis.origin.y), pxToMm(basis.origin.z)],
           uAxis: [basis.uAxis.x, basis.uAxis.y, basis.uAxis.z],
           ruled: !!st.ruled,
@@ -12444,7 +12445,8 @@ const App3D = forwardRef(function App3D(props, ref) {
       // a second Escape (nothing picked yet) leaves the tool. Escape while
       // actively sketching a profile is handled by the sketchMode branch
       // above, which reuses handleFinishSketch — same as clicking Finish Sketch.
-      if (loftState) { resetLoft3D(); return }
+      // cancelFeature (not just resetLoft3D) so the profile's sketch geometry doesn't linger as a ghost.
+      if (loftState) { cancelFeature(); return }
       resetLoft3D(); setTool('select'); return
     }
 
@@ -15024,7 +15026,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                       <input
                         value={loftState.scaleInput ?? '100'}
                         onChange={e=>setLoftState(prev=>({...prev, scaleInput:e.target.value}))}
-                        onKeyDown={e=>{ e.stopPropagation(); if (e.key==='Enter') loftAddCopy(); else if (e.key==='Escape') resetLoft3D() }}
+                        onKeyDown={e=>{ e.stopPropagation(); if (e.key==='Enter') loftAddCopy(); else if (e.key==='Escape') cancelFeature() }}
                         style={{background:'none', border:'none', outline:'none', color:accent, fontFamily:'monospace', fontSize:14, fontWeight:'bold', flex:1, minWidth:0}}
                       />
                       <span style={{color:'#556', fontSize:12}}>%</span>
@@ -15066,7 +15068,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                     onKeyDown={e=>{
                       e.stopPropagation()
                       if (e.key==='Enter') loftAcceptNext()
-                      else if (e.key==='Escape') resetLoft3D()
+                      else if (e.key==='Escape') cancelFeature()
                     }}
                     style={{
                       background:'none', border:'none', outline:'none',

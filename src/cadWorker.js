@@ -1881,7 +1881,7 @@ function buildRevolve({ pts, planeId, normal, origin, uAxis, circle=null, axis, 
  * transition within each segment instead — passed through unchanged to
  * every pairwise loftWith() call.
  */
-function buildLoft({ profiles, normal, origin, uAxis, ruled=false }) {
+function buildLoft({ profiles, normal, viewNormal, origin, uAxis, ruled=false }) {
   if (!profiles || profiles.length < 2) throw new Error('Loft needs at least 2 profiles')
   // A fresh Sketch per (segment, side) rather than one Sketch array reused
   // across segments — every middle profile participates in TWO loftWith()
@@ -1891,7 +1891,15 @@ function buildLoft({ profiles, normal, origin, uAxis, ruled=false }) {
   // second use. Rebuilding is cheap (makeProfile is pure geometry, no OCC
   // solve) and keeps every loftWith() call working with an object nobody
   // else has touched.
-  const buildSketch = p => makeProfile(p.pts, 'face', p.offsetMm, normal, origin, uAxis, p.circle)
+  // `normal` is the SWEEP direction — a Loft Cutout started on a face negates it so the
+  // profiles step into the material. A Plane's up axis is normal × uAxis, so building the
+  // plane from that negated normal mirrors every profile across the sketch's up axis (a
+  // cutter ends up on the wrong side of the face). `viewNormal` is the true outward normal
+  // the profiles were sketched against: it orients the plane, and the step along `normal`
+  // is applied to the origin here instead. Older files have no viewNormal: unchanged.
+  const buildSketch = viewNormal
+    ? p => makeProfile(p.pts, 'face', 0, viewNormal, origin.map((o, i) => o + (normal[i] || 0) * p.offsetMm), uAxis, p.circle)
+    : p => makeProfile(p.pts, 'face', p.offsetMm, normal, origin, uAxis, p.circle)
   const segments = []
   for (let i = 0; i < profiles.length - 1; i++) {
     segments.push(buildSketch(profiles[i]).loftWith([buildSketch(profiles[i + 1])], { ruled }))

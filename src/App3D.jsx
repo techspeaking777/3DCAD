@@ -247,6 +247,20 @@ function cutTargetSolids(solids, profileBoxes) {
   })
 }
 
+// What the worker needs to build a Sweep (preview and commit send the same
+// thing): the path (flat or projected), the path's sketch plane, and the profile.
+function sweepWorkerFields(st) {
+  const { basis, projected, path, profile } = st
+  return {
+    ...(projected ? { pathPts3d: projected.pathPts3d, projDir: projected.projDir } : { pathPts: path.pts }),
+    planeId: basis.id,
+    normal: [basis.normal.x, basis.normal.y, basis.normal.z],
+    origin: [pxToMm(basis.origin.x), pxToMm(basis.origin.y), pxToMm(basis.origin.z)],
+    uAxis: [basis.uAxis.x, basis.uAxis.y, basis.uAxis.z],
+    profilePts: profile.pts, profileCircle: profile.circle,
+  }
+}
+
 // A revolve profile must stay entirely on one side of its axis — crossing it
 // produces self-intersecting geometry in the CAD kernel. Uses a signed
 // cross-product test against the (infinite) axis line; points essentially ON
@@ -1774,6 +1788,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   const cutoutPanelDrag = useDraggablePanel()
   const loftPanelDrag = useDraggablePanel()
   const springPanelDrag = useDraggablePanel()
+  const sweepPanelDrag = useDraggablePanel()
   const includeEdgePanelDrag = useDraggablePanel()
 
   const hiddenEditSolidRef=useRef(null)   // solid parked here while its sketch is being edited
@@ -4972,8 +4987,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (sweepState) {
       // ── Sweep flow: 2 fixed steps, no repeating N-round loop like Loft —
       //    finishing the PATH auto-advances straight into sketching the
-      //    PROFILE (no extra click), and finishing the PROFILE commits
-      //    immediately (nothing left to configure once it closes). Checked
+      //    PROFILE (no extra click), and finishing the PROFILE opens the
+      //    confirm popup with a live preview (Done commits). Checked
       //    the same way loftState is below — tool alone isn't reliable here
       //    (enterSketch always resets it to the active drawing tool).
       if (!sweepState.path) {
@@ -5008,8 +5023,15 @@ const App3D = forwardRef(function App3D(props, ref) {
         setTimeout(() => setCadError(null), 5000)
         return
       }
+      // Profile done: open the confirm popup with the live 3D preview (see
+      // sweepState.armed). Done there commits; "✎ Sketch" comes back here with the
+      // drawing as it was (ghost path lines included).
       const best = allProfiles[0]
-      commitSweep(sweepState.path, { pts: best.pts, circle: best.pts.circleMeta || null })
+      viewport3dRef.current?.snapToIsometric()
+      setSweepState(prev => ({
+        ...prev, armed: true, profile: { pts: best.pts, circle: best.pts.circleMeta || null }, profileBasis: plane,
+        sketchLines: [...lines], sketchCircles: [...circles], sketchArcs: [...arcs], sketchSplines: [...splines],
+      }))
       return
     }
 
@@ -7697,6 +7719,64 @@ const App3D = forwardRef(function App3D(props, ref) {
   }, [springState?.armed, springState?.profile, springState?.springAxis, springState?.springReverse,
       springState?.specBy, springState?.pitchInput, springState?.lengthInput, springState?.coilsInput, springTool, solids])
 
+  // ── Sweep confirm popup (sweepState.armed: path + profile are sketched) ──
+  // Back to the profile sketch with the drawing as it was (ghost path included).
+  async function sweepEditSketch() {
+    const st = sweepState
+    if (!st?.armed) return
+    setSweepState(prev => ({ ...prev, armed: false }))
+    await viewport3dRef.current?.snapToFace(st.profileBasis)
+    enterSketch(st.profileBasis, null, { lines: st.sketchLines, circles: st.sketchCircles, arcs: st.sketchArcs, splines: st.sketchSplines })
+  }
+
+  // The bodies a Sweep Cut will cut: every visible one the swept box touches (as in
+  // Cutout) — null when this isn't an armed Sweep Cut.
+  const sweepCutTargets = (() => {
+    const st = sweepState
+    if (!st?.armed || sweepTool !== 'sweepcut') return null
+    const box = st.projected ? sweepPathBoxPx3d(st.projected.pathPts3d, st.profile) : sweepPathBoxPx(st.path, st.profile, st.basis)
+    return cutTargetSolids(solids, [box])
+  })()
+
+  // Live translucent preview of the swept solid (red for a Sweep Cut). Needs the
+  // CAD worker, so it is rebuilt ~150 ms after the last change; a failure shows in
+  // the popup instead of costing the user both sketches.
+  const sweepPreviewSeqRef = useRef(0)
+  const [sweepBuildError, setSweepBuildError] = useState(null)
+  useEffect(() => {
+    const vp = viewport3dRef.current
+    const st = sweepState
+    if (!vp || !st?.armed) return
+    const seq = ++sweepPreviewSeqRef.current
+    const timer = setTimeout(async () => {
+      try {
+        const meshData = await cadEngine.sweep(sweepWorkerFields(st))
+        if (seq !== sweepPreviewSeqRef.current) return
+        setSweepBuildError(null)
+        vp.showExtrudeSolidPreview(meshDataToPreviewGeometry(meshData), sweepTool === 'sweepcut' ? '#e05a4e' : extrudeColor)
+      } catch (err) {
+        if (seq !== sweepPreviewSeqRef.current) return
+        setSweepBuildError(err.message || String(err))
+        vp.hideExtrudeSolidPreview?.()
+      }
+    }, 150)
+    return () => { clearTimeout(timer); sweepPreviewSeqRef.current++ }
+  }, [sweepState?.armed, sweepState?.profile, sweepTool, extrudeColor])
+
+  // Gone with the popup (back to the sketch, finished, cancelled, or a new tool picked).
+  useEffect(() => {
+    if (!sweepState?.armed) { setSweepBuildError(null); return }
+    return () => viewport3dRef.current?.hideExtrudeSolidPreview?.()
+  }, [!!sweepState?.armed])
+
+  // Sweep Cut: glow the bodies it will cut (the same ones the commit uses).
+  useEffect(() => {
+    const vp = viewport3dRef.current
+    if (!vp || !sweepCutTargets) return
+    vp.highlightJoinMembers(sweepCutTargets.map(s => ({ solidId: s.id, color: 0xe5484d })))
+    return () => vp.clearJoinHighlight()
+  }, [sweepState?.armed, sweepTool, solids])
+
   // True while the user is between "Finish Sketch" on one profile and
   // starting the next one's sketch — the window where the drag-to-position
   // ghost preview is shown. Excludes re-visiting an already-sketched later
@@ -8142,8 +8222,8 @@ const App3D = forwardRef(function App3D(props, ref) {
       }
       try {
         const sweepBox = projected ? sweepPathBoxPx3d(projected.pathPts3d, profile) : sweepPathBoxPx(path, profile, basis)
-        const candidates = solids.filter(s => s.operation !== 'cutout' && s.group)
-        const targets = candidates.filter(s => sweepBox.intersectsBox(new THREE.Box3().setFromObject(s.group)))
+        // Visible bodies only — hiding one protects it, as for Cutout (the popup glows these).
+        const targets = cutTargetSolids(solids, [sweepBox])
         if (targets.length === 0) throw new Error('No base solid to cut from')
 
         const newFeats = []
@@ -12453,6 +12533,13 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
     // Spring coil popup open (the sketch is finished): Esc abandons the spring.
     if (e.key==='Escape'&&!sketchMode&&springState?.armed){ cancelFeature(); return }
+    // Sweep confirm popup open: Enter makes it, Esc abandons it.
+    if (e.key==='Escape'&&!sketchMode&&sweepState?.armed){ cancelFeature(); return }
+    if (e.key==='Enter'&&!sketchMode&&sweepState?.armed){
+      e.preventDefault()
+      if (!sweepBuildError && !(sweepCutTargets && sweepCutTargets.length === 0)) commitSweep(sweepState.path, sweepState.profile)
+      return
+    }
     if (e.key==='Escape'&&!sketchMode&&(tool==='loft3d'||loftState)){
       // enterSketch() always resets `tool` to 'line' (the default 2D drawing
       // tool) once a profile sketch starts, so tool==='loft3d' only holds at
@@ -13988,11 +14075,11 @@ const App3D = forwardRef(function App3D(props, ref) {
           <SmartStepBar
             op={(tool==='sweep3d' || sweepState) ? (sweepTool==='sweepcut' ? 'SWEEP CUT' : 'SWEEP') : null}
             steps={(sweepProjectOn || sweepState?.awaitProject || sweepState?.projected)
-              ? [{ id:1, label:'Sketch Path' }, { id:2, label:'Project' }, { id:3, label:'Sketch Profile' }]
-              : [{ id:1, label:'Sketch Path' }, { id:2, label:'Sketch Profile' }]}
+              ? [{ id:1, label:'Sketch Path' }, { id:2, label:'Project' }, { id:3, label:'Sketch Profile' }, { id:4, label:'Check' }]
+              : [{ id:1, label:'Sketch Path' }, { id:2, label:'Sketch Profile' }, { id:3, label:'Check' }]}
             currentStep={(sweepProjectOn || sweepState?.awaitProject || sweepState?.projected)
-              ? (!sweepState?.path ? 1 : sweepState.awaitProject ? 2 : 3)
-              : (sweepState?.path ? 2 : 1)}
+              ? (!sweepState?.path ? 1 : sweepState.awaitProject ? 2 : sweepState.armed ? 4 : 3)
+              : (sweepState?.armed ? 3 : sweepState?.path ? 2 : 1)}
             color={sweepTool==='sweepcut' ? '#53D3E4' : '#7ED957'}
             hint={sweepState?.awaitProject
               ? 'Click the body to wrap your path onto, or Skip.'
@@ -14004,7 +14091,9 @@ const App3D = forwardRef(function App3D(props, ref) {
                     : 'Click the plane your path will be drawn on.')
               : !sweepState.path
                 ? 'Draw the line your shape will travel along, then press Finish.'
-                : 'Draw the shape that follows the path (a circle makes a tube), then press Finish.'}
+                : sweepState.armed
+                  ? 'Check the preview, then press Done.'
+                  : 'Draw the shape that follows the path (a circle makes a tube), then press Finish.'}
             action={
               !sweepState
                 ? [
@@ -15840,6 +15929,47 @@ const App3D = forwardRef(function App3D(props, ref) {
                            background: springProblem ? '#1e1e38' : accent, color: springProblem ? '#334455' : '#000',
                            border:'none', borderRadius:2, cursor: springProblem ? 'default' : 'pointer',
                            boxShadow: springProblem ? 'none' : `0 0 6px ${accent}` }}>Done ↵</button>
+              </div>
+              <div style={{ color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em' }}>
+                {isCut ? 'Red bodies will be cut · ' : ''}Esc to cancel
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+      {/* ── Sweep confirm popup: shown once the path and profile are sketched, with
+          the live translucent result (red for a cut) behind it. ── */}
+      {sweepState?.armed && (() => {
+        const isCut = sweepTool === 'sweepcut'
+        const accent = isCut ? '#53D3E4' : '#7ED957'
+        const nothingToCut = isCut && sweepCutTargets && sweepCutTargets.length === 0
+        const problem = sweepBuildError
+          ? sweepBuildError
+          : nothingToCut ? 'This cut does not reach any visible body — go back and move the path or shape onto one.' : null
+        const blocked = !!problem
+        return (
+          <div style={{ position:'fixed', bottom:24, left:'50%', transform:'translateX(-50%)', zIndex:1000 }}>
+            <div ref={sweepPanelDrag.panelRef} style={{
+              background:'#000', border:`1.5px solid ${accent}`, borderRadius:2, padding:'10px 14px', minWidth:250,
+              boxShadow:`0 0 14px ${accent}77, 0 0 3px ${accent} inset`, fontFamily:'monospace',
+              ...sweepPanelDrag.panelStyle,
+            }}>
+              <DragHandle {...sweepPanelDrag.handleProps}>{isCut ? 'Sweep Cut' : 'Sweep'}</DragHandle>
+              <div style={{ color:'#889', fontSize:11, marginBottom:8, lineHeight:1.4, maxWidth:260 }}>
+                {isCut ? 'The red shape is what will be cut away.' : 'The shape travelling along your path.'}
+              </div>
+              {problem && (
+                <div style={{ color:'#ff6b6b', fontSize:10, marginBottom:8, lineHeight:1.3, maxWidth:260 }}>{problem}</div>
+              )}
+              <div style={{ display:'flex', gap:6 }}>
+                <button onClick={sweepEditSketch} title="Go back to the profile sketch"
+                  style={{ padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold', background:'#1e1e38', color:'#6688aa',
+                           border:'1px solid #2a3a5a', borderRadius:4, cursor:'pointer' }}>✎ Sketch</button>
+                <button onClick={() => commitSweep(sweepState.path, sweepState.profile)} disabled={blocked} title={isCut ? 'Make the cut' : 'Make the sweep'}
+                  style={{ flex:1, padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold',
+                           background: blocked ? '#1e1e38' : accent, color: blocked ? '#334455' : '#000',
+                           border:'none', borderRadius:2, cursor: blocked ? 'default' : 'pointer',
+                           boxShadow: blocked ? 'none' : `0 0 6px ${accent}` }}>Done ↵</button>
               </div>
               <div style={{ color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em' }}>
                 {isCut ? 'Red bodies will be cut · ' : ''}Esc to cancel

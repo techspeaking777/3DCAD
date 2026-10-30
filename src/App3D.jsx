@@ -12,7 +12,7 @@ import { nearestMirrorEntity, buildMirror } from './tools/mirrorMath.js'
 import { nearestMoveCopyEntity, buildCopies, removeSelected } from './tools/moveCopyMath.js'
 import { nearestRotateCopyEntity, buildRotatedCopies } from './tools/rotateCopyMath.js'
 import { buildRectangularOffsets, buildCircularAngles, circularStepAngleDeg } from './tools/patternMath.js'
-import { nearestScaleEntity, buildScaled } from './tools/scaleMath.js'
+import { nearestScaleEntity, buildScaled, scaleSketchAbout } from './tools/scaleMath.js'
 import { nearestFilletLine, computeFillet } from './tools/filletMath.js'
 import { computeExtendPreview } from './tools/extendMath.js'
 import { fitSplineToPoints } from './tools/splineFit.js'
@@ -480,6 +480,73 @@ function buildLoftFacePlane(basis, offsetMm) {
   const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(offsetMm))
   return new FacePlane(origin, basis.viewNormal || basis.normal, basis.uAxis, basis.vAxis,
     basis.viewCenter ? basis.viewCenter.clone().addScaledVector(basis.normal, mmToPx(offsetMm)) : undefined)
+}
+
+// ── Loft: copied / pointed next profiles + live preview ─────────────────────
+// A copy of a stored loft profile scaled about its own centroid and placed at
+// `offsetMm`. The outline (`pts`) is scaled directly — vertex order and start point
+// are kept, so the loft doesn't twist, and it still works at tip sizes where
+// detectProfiles' joining tolerance would throw the shape away. The sketch entities
+// are scaled too so the copy can be re-opened and edited like a drawn profile.
+function scalePtsAbout(pts, ax, ay, s) {
+  const k = Math.abs(s)
+  const pt = p => ({ x: ax + (p.x - ax) * s, y: ay + (p.y - ay) * s })
+  const out = pts.map(pt)
+  if (pts.circleMeta) {
+    const c = pt({ x: pts.circleMeta.cx, y: pts.circleMeta.cy })
+    out.circleMeta = { cx: c.x, cy: c.y, r: pts.circleMeta.r * k }
+  }
+  if (pts.curveSegments) {
+    out.curveSegments = pts.curveSegments.map(seg => {
+      const c = { ...seg }
+      if (seg.controlPoints) c.controlPoints = seg.controlPoints.map(pt)
+      if (seg.type === 'arc') Object.assign(c, { cx: ax + (seg.cx - ax) * s, cy: ay + (seg.cy - ay) * s, r: seg.r * k })
+      return c
+    })
+  }
+  if (pts.holes) out.holes = pts.holes.map(h => scalePtsAbout(h, ax, ay, s))
+  return out
+}
+
+function scaledLoftProfile(src, s, offsetMm) {
+  const { x: ax, y: ay } = src.centroid
+  const sk = scaleSketchAbout(
+    { lines: src.sketchLines, circles: src.sketchCircles, arcs: src.sketchArcs, splines: src.sketchSplines }, ax, ay, s)
+  const pts = scalePtsAbout(src.pts, ax, ay, s)
+  return {
+    sketchLines: sk.lines, sketchCircles: sk.circles, sketchArcs: sk.arcs, sketchSplines: sk.splines,
+    pts, circle: pts.circleMeta || null, offsetMm, centroid: { x: ax, y: ay },
+  }
+}
+
+// "To a point": the last profile shrinks to a tip about 0.2 mm across — a true
+// single point can't be lofted to, and this reads as one.
+function loftTipScale(src) {
+  const xs = src.pts.map(p => p.x), ys = src.pts.map(p => p.y)
+  const sizeMm = pxToMm(Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)))
+  return Math.min(0.5, Math.max(0.0005, 0.2 / Math.max(sizeMm, 0.4)))
+}
+
+// The profile list the loft preview should show: everything sketched so far, plus —
+// while the next-shape popup is open on Copy or Point — the shape that would be added.
+function loftPreviewProfiles(st, armed) {
+  const list = st.profiles.filter(Boolean)
+  const mode = st.nextMode || 'draw'
+  const cur = st.profiles[st.currentIdx]
+  if (armed && cur && mode !== 'draw') {
+    const s = mode === 'point' ? loftTipScale(cur) : Math.min(500, Math.max(1, parseFloat(st.scaleInput) || 100)) / 100
+    list.push(scaledLoftProfile(cur, s, st.currentOffsetMm + (parseFloat(st.distanceInput) || 20)))
+  }
+  return list
+}
+
+// Worker mesh data (mm) → one BufferGeometry in scene px, for the translucent preview.
+function meshDataToPreviewGeometry({ faces }) {
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.BufferAttribute(Float32Array.from(faces.vertices, v => mmToPx(v)), 3))
+  if (faces.normals?.length) geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(faces.normals), 3))
+  geo.setIndex(new THREE.BufferAttribute(new Uint32Array(faces.triangles), 1))
+  return geo
 }
 
 // Sweep's profile plane has no user pick at all — it's derived purely from
@@ -7222,6 +7289,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
     setTool('loft3d')
     setLoftTool(op)
+    setHideWorkPlanesManual(false)
     setExtrudeTool(null)
     setExtrudeState(null)
     setEditingFeatureId(null)
@@ -7650,7 +7718,10 @@ const App3D = forwardRef(function App3D(props, ref) {
           const wb = workPlaneToFacePlaneBasisPx(pick.planeId)
           return { ...wb, viewNormal: wb.normal.clone() }
         })()
-    setLoftState({ basis, ruled: false, profiles: [], currentIdx: 0, currentOffsetMm: 0, distanceInput: '20' })
+    // solidId: the body a face-started loft can be fused into ("Join to body").
+    setLoftState({ basis: { ...basis, solidId: pick.kind === 'face' ? (pick.facePlane.solidId ?? null) : null },
+      ruled: false, profiles: [], currentIdx: 0, currentOffsetMm: 0, distanceInput: '20',
+      nextMode: 'draw', scaleInput: '100', joinBody: false })
     const plane = buildLoftFacePlane(basis, 0)
     // Await the camera tween BEFORE opening the sketch — snapToFace's Promise
     // resolves when the ~420ms animation finishes. The camera position itself
@@ -7778,6 +7849,41 @@ const App3D = forwardRef(function App3D(props, ref) {
     injectLoftGhost(ghostProfile)
   }
 
+  // "Copy" next shape: the current profile, scaled about its centre by the % in the
+  // popup, placed `distanceInput` mm further along. Stays in the popup (no sketch
+  // step) so copies can be chained, then Finish.
+  function loftAddCopy() {
+    const st = loftState
+    const cur = st?.profiles[st.currentIdx]
+    if (!cur) return
+    const pct = Math.min(500, Math.max(1, parseFloat(st.scaleInput) || 100))
+    const next = scaledLoftProfile(cur, pct / 100, st.currentOffsetMm + (parseFloat(st.distanceInput) || 20))
+    setLoftState(prev => {
+      const profiles = [...prev.profiles]
+      profiles[prev.currentIdx + 1] = next
+      return { ...prev, profiles, currentIdx: prev.currentIdx + 1, currentOffsetMm: next.offsetMm }
+    })
+  }
+
+  // ↵ / Enter on the distance box: does whichever NEXT SHAPE is chosen.
+  function loftAcceptNext() {
+    const mode = loftState?.nextMode || 'draw'
+    if (mode === 'copy') loftAddCopy()
+    else if (mode === 'point') loftFinishToPoint()
+    else loftNextProfile()
+  }
+
+  // "To a point": adds a tiny last profile (loftTipScale) and finishes the loft.
+  function loftFinishToPoint() {
+    const st = loftState
+    const cur = st?.profiles[st.currentIdx]
+    if (!cur) return
+    const tip = scaledLoftProfile(cur, loftTipScale(cur), st.currentOffsetMm + (parseFloat(st.distanceInput) || 20))
+    const profiles = [...st.profiles]
+    profiles[st.currentIdx + 1] = tip
+    commitLoft({ ...st, profiles, currentIdx: st.currentIdx + 1 })
+  }
+
   // Rebuilds a loft feature's shared plane basis (THREE.Vector3, scene px)
   // from its stored plain-array fields (mm) — shared by handleEditLoft and
   // startLoftFromProfile so there's one source of truth for this conversion.
@@ -7833,8 +7939,8 @@ const App3D = forwardRef(function App3D(props, ref) {
   // against fewer than 2 (OCC's loftWith needs at least 2 sections, same
   // guard cadWorker.js's buildLoft itself has, mirrored here so the error
   // surfaces immediately instead of round-tripping to the worker first).
-  async function commitLoft() {
-    const st = loftState
+  async function commitLoft(stOverride = null) {
+    const st = stOverride || loftState
     if (!st) return
     const profiles = st.profiles.filter(Boolean)
     if (profiles.length < 2) {
@@ -7942,10 +8048,25 @@ const App3D = forwardRef(function App3D(props, ref) {
         setFeatures(prev => prev.map(f => f.id === editingId ? { ...f, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled } : f))
       } else {
         const loftName = nextLoftName()   // outside the updater — see nextSketchName's comment
-        setFeatures(prev => [...prev, {
+        const loftFeat = {
           id: `loft-${solidId}`, type: 'extrude', operation: 'loft', name: loftName,
           solidId, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled, color,
-        }])
+        }
+        setFeatures(prev => [...prev, loftFeat])
+        // "Join to body": fuse the loft into the body whose face it started on. If the
+        // union fails the loft stays as its own body — say so.
+        const joinTargetId = st.joinBody ? (basis.solidId ?? null) : null
+        const target = joinTargetId != null ? solids.find(s => s.id === joinTargetId) : null
+        const targetFeat = target ? baseFeatureForSolid(joinTargetId) : null
+        if (target && targetFeat) {
+          try {
+            await joinMembers([targetFeat, loftFeat], [target, solidData], [...features, loftFeat])
+          } catch (err) {
+            console.error('Join to body failed:', err)
+            setCadError(`The loft was made, but joining it to the body failed: ${err.message || String(err)}`)
+            setTimeout(() => setCadError(null), 8000)
+          }
+        }
       }
       await rebuildDependentMirrors(solidData)
     } catch (err) {
@@ -9249,6 +9370,68 @@ const App3D = forwardRef(function App3D(props, ref) {
   }, [extrudeState?.armed, extrudeState?.revolveAxis, extrudeState?.planeId, extrudeState?.facePlane,
       extrudeState?.profiles, extrudeState?.pickedIdx, extrudeState?.depthInput, extrudeState?.direction,
       extrudeState?.extentMode, extrudeTool, extrudeColor])
+
+  // Loft's live 3D preview: the real loft through the profiles so far (plus the
+  // Copy / Point shape being set up), translucent — red for a Loft Cutout. It needs
+  // the CAD worker, so it is rebuilt ~250 ms after the last change and the old
+  // preview stays up until the new one arrives. Hidden while a profile is sketched.
+  const loftPreviewSeqRef = useRef(0)
+  // The distance only changes the preview in Copy / Point mode (Draw mode shows just the profiles so far),
+  // so mouse-driven distance changes in Draw mode don't re-run the worker.
+  const loftPreviewDist = (loftState?.nextMode || 'draw') !== 'draw' ? loftState?.distanceInput : ''
+  useEffect(() => {
+    const vp = viewport3dRef.current
+    const st = loftState
+    if (!vp || !st || sketchMode) { vp?.hideExtrudeSolidPreview?.(); return }
+    const list = loftPreviewProfiles(st, isLoftDragArmed())
+    if (list.length < 2) { vp.hideExtrudeSolidPreview?.(); return }
+    const seq = ++loftPreviewSeqRef.current
+    const { basis } = st
+    const timer = setTimeout(async () => {
+      try {
+        const meshData = await cadEngine.loft({
+          normal: [basis.normal.x, basis.normal.y, basis.normal.z],
+          origin: [pxToMm(basis.origin.x), pxToMm(basis.origin.y), pxToMm(basis.origin.z)],
+          uAxis: [basis.uAxis.x, basis.uAxis.y, basis.uAxis.z],
+          ruled: !!st.ruled,
+          profiles: list.map(p => ({ pts: p.pts, circle: p.circle, offsetMm: p.offsetMm })),
+        })
+        if (seq !== loftPreviewSeqRef.current) return
+        vp.showExtrudeSolidPreview(meshDataToPreviewGeometry(meshData), loftTool === 'loftcutout' ? '#e05a4e' : extrudeColor)
+      } catch {
+        if (seq === loftPreviewSeqRef.current) vp.hideExtrudeSolidPreview?.()
+      }
+    }, 250)
+    return () => { clearTimeout(timer); loftPreviewSeqRef.current++ }
+  }, [loftState?.profiles, loftState?.ruled, loftState?.nextMode, loftState?.scaleInput, loftPreviewDist,
+      loftState?.currentIdx, loftState?.currentOffsetMm, !!loftState, sketchMode, loftTool, extrudeColor])
+
+  // Gone with the loft session (finished, cancelled, or a new tool picked).
+  useEffect(() => {
+    if (!loftState) viewport3dRef.current?.hideExtrudeSolidPreview?.()
+  }, [!!loftState])
+
+  // Loft Cutout: glow the bodies the cut volume will reach (the same boxes the commit uses).
+  useEffect(() => {
+    const vp = viewport3dRef.current
+    if (!vp || !loftState || sketchMode || loftTool !== 'loftcutout' || loftEditingFeatureId) return
+    const list = loftPreviewProfiles(loftState, isLoftDragArmed())
+    if (list.length < 2) return
+    const box = loftSweepBoxPx(list, loftState.basis)
+    const hits = solids.filter(s => s.operation !== 'cutout' && s.group && box.intersectsBox(new THREE.Box3().setFromObject(s.group)))
+    vp.highlightJoinMembers(hits.map(s => ({ solidId: s.id, color: 0xe5484d })))
+    return () => vp.clearJoinHighlight()
+  }, [loftState?.profiles, loftState?.nextMode, loftState?.scaleInput, loftPreviewDist, loftState?.currentIdx,
+      loftState?.currentOffsetMm, !!loftState, sketchMode, loftTool, loftEditingFeatureId, solids])
+
+  // The body a face-started loft can be fused into ("Join to body"): still visible,
+  // with a feature to lock. Not offered for a cutout or when re-editing a loft.
+  const loftJoinableId = (() => {
+    const id = loftState?.basis?.solidId
+    if (id == null || loftTool !== 'loft' || loftEditingFeatureId) return null
+    const s = solids.find(x => x.id === id)
+    return s && s.group && !s.hidden && baseFeatureForSolid(id) ? id : null
+  })()
 
   // Loft's own parallel version of the extrude anim-loop pair above — kept
   // fully separate rather than folded into extrudeState's machinery, since
@@ -11084,7 +11267,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     // Enter in the banner's distance field. Checked before the extrude
     // branch below since both can never be armed at the same time. ──
     if (isLoftDragArmed()) {
-      loftNextProfile()
+      // To a point finishes the loft, so it needs the ↵ button / Enter, not a stray click.
+      if ((loftState.nextMode || 'draw') !== 'point') loftAcceptNext()
       return
     }
 
@@ -13458,7 +13642,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : tool==='shell3d' ? shell3dSel : tool==='soften3d' ? soften3dKeepFaces : []}
             facePickLabel={tool==='shell3d' ? 'click to remove' : tool==='soften3d' ? 'click to keep flat' : null}
             extrudeArmed={!!extrudeState || (!!loftState && !sketchMode)}
-            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='shell3d' && tool!=='soften3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && tool!=='subtract3d' && tool!=='movecopy3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hideWorkPlanesManual && (tool==='extrude' || tool==='cutout' || tool==='revolve' || tool==='revolvecut' || tool==='sweep3d'))}
+            showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='shell3d' && tool!=='soften3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && tool!=='subtract3d' && tool!=='movecopy3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hideWorkPlanesManual && (tool==='extrude' || tool==='cutout' || tool==='revolve' || tool==='revolvecut' || tool==='sweep3d' || tool==='loft3d'))}
             activePlane={activePlane}
             sketchMode={sketchMode}
             gridVisible={gridVisible}
@@ -13771,7 +13955,11 @@ const App3D = forwardRef(function App3D(props, ref) {
             color={loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}
             hint={loftState
               ? `Draw a shape, then Next to add another further along. (Profile ${loftState.currentIdx+1} of ${Math.max(loftState.profiles.length, loftState.currentIdx+1)})`
-              : 'Click the plane for your first shape.'}
+              : 'Click the plane or a face for your first shape.'}
+            action={!loftState ? [
+              { label: hideWorkPlanesManual ? '◻ Show Planes' : '◻ Hide Planes', enabled:true,
+                onClick: () => setHideWorkPlanesManual(p => !p) },
+            ] : null}
             onStepBack={step => {
               if (step === 1) resetLoft3D()
             }}
@@ -14784,6 +14972,73 @@ const App3D = forwardRef(function App3D(props, ref) {
             Ruled
           </label>
 
+          {/* New body | Join to body — only for a loft started on a body's face. */}
+          {loftJoinableId != null && (
+            <div style={{display:'flex', gap:4, marginBottom:8}}>
+              {[
+                {k:false, label:'New body',     title:'Keep the loft as its own body'},
+                {k:true,  label:'Join to body', title:'Fuse the loft into the body you started on'},
+              ].map(({k,label,title}) => {
+                const active = !!loftState.joinBody === k
+                return (
+                  <button key={label} title={title}
+                    onClick={()=>setLoftState(prev=>({...prev, joinBody:k}))}
+                    style={{
+                      flex:1, padding:'4px 0', fontSize:11, cursor:'pointer', fontFamily:'monospace', fontWeight:'bold',
+                      background: active ? '#FBDA2D' : '#050505', color: active ? '#000' : '#FBDA2D',
+                      border:'1px solid #FBDA2D', borderRadius:2, textShadow: active ? 'none' : '0 0 4px #FBDA2D',
+                    }}>{label}</button>
+                )
+              })}
+            </div>
+          )}
+
+          {/* Next shape — Draw it (sketch as before), Copy this one (optionally
+              scaled, for a taper), or finish To a point (cone / pyramid). */}
+          {isLoftDragArmed() && (() => {
+            const accent = loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'
+            const mode = loftState.nextMode || 'draw'
+            const chip = active => ({
+              flex:1, padding:'4px 2px', fontSize:11, cursor:'pointer', fontFamily:'monospace', fontWeight:'bold',
+              background: active ? accent : '#050505', color: active ? '#000' : accent,
+              border:`1px solid ${accent}`, borderRadius:2, textShadow: active ? 'none' : `0 0 4px ${accent}`,
+            })
+            return (
+              <div style={{marginBottom:8}}>
+                <div style={{color:'#889', fontSize:10, marginBottom:3, letterSpacing:'0.05em'}}>NEXT SHAPE</div>
+                <div style={{display:'flex', gap:4, alignItems:'center'}}>
+                  <button style={chip(mode==='draw')} title="Sketch the next profile yourself"
+                    onClick={()=>setLoftState(prev=>({...prev, nextMode:'draw'}))}>✏ Draw it</button>
+                  <button style={chip(mode==='copy')} title="Add a copy of this shape, optionally scaled — no sketching"
+                    onClick={()=>setLoftState(prev=>({...prev, nextMode:'copy'}))}>⧉ Copy</button>
+                  <button style={chip(mode==='point')} title="End in a point — a cone or pyramid"
+                    onClick={()=>setLoftState(prev=>({...prev, nextMode:'point'}))}>▲ Point</button>
+                </div>
+                {mode==='copy' && (
+                  <div style={{display:'flex', alignItems:'center', gap:6, marginTop:6}}>
+                    <span style={{color:'#889', fontSize:10, letterSpacing:'0.05em'}}>SIZE</span>
+                    <div style={{
+                      flex:1, background:'#000', border:`1px solid ${accent}55`, borderRadius:2, padding:'3px 8px',
+                      display:'flex', alignItems:'center', justifyContent:'space-between',
+                    }}>
+                      <input
+                        value={loftState.scaleInput ?? '100'}
+                        onChange={e=>setLoftState(prev=>({...prev, scaleInput:e.target.value}))}
+                        onKeyDown={e=>{ e.stopPropagation(); if (e.key==='Enter') loftAddCopy(); else if (e.key==='Escape') resetLoft3D() }}
+                        style={{background:'none', border:'none', outline:'none', color:accent, fontFamily:'monospace', fontSize:14, fontWeight:'bold', flex:1, minWidth:0}}
+                      />
+                      <span style={{color:'#556', fontSize:12}}>%</span>
+                    </div>
+                    {[100, 50].map(p => (
+                      <button key={p} style={{...chip(false), flex:'none', padding:'3px 6px'}}
+                        onClick={()=>setLoftState(prev=>({...prev, scaleInput:String(p)}))}>{p}%</button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })()}
+
           <div style={{display:'flex', alignItems:'center', gap:6}}>
             <button
               onClick={loftPreviousProfile}
@@ -14810,7 +15065,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                     onChange={e=>setLoftState(prev=>({...prev, distanceInput:e.target.value}))}
                     onKeyDown={e=>{
                       e.stopPropagation()
-                      if (e.key==='Enter') loftNextProfile()
+                      if (e.key==='Enter') loftAcceptNext()
                       else if (e.key==='Escape') resetLoft3D()
                     }}
                     style={{
@@ -14823,8 +15078,8 @@ const App3D = forwardRef(function App3D(props, ref) {
                   <span style={{color:'#556', fontSize:12}}>mm</span>
                 </div>
                 <button
-                  onClick={loftNextProfile}
-                  title="Accept distance, sketch next profile"
+                  onClick={loftAcceptNext}
+                  title={{draw:'Accept distance, sketch next profile', copy:'Add a copy of this shape', point:'Add a point and finish the loft'}[loftState.nextMode || 'draw']}
                   style={{
                     padding:'4px 10px', background: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D', color:'#000',
                     border:'none', borderRadius:2, cursor:'pointer',
@@ -14848,7 +15103,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             )}
 
             <button
-              onClick={commitLoft}
+              onClick={()=>commitLoft()}
               disabled={loftState.profiles.filter(Boolean).length < 2}
               title="Finish loft"
               style={{

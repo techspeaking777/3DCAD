@@ -67,3 +67,26 @@ export function buildScaled(sel, lines, circles, arcs, splines = [], ax, ay, s) 
   }
   return { newLines, newCircles, newArcs, newSplines }
 }
+
+// Scales a whole stored sketch ({lines, circles, arcs, splines}) about (ax, ay),
+// keeping every other field on each entity (plane, facePlane, style…) — unlike
+// buildScaled, whose output is only the bare geometry. Used by Loft's "Copy"
+// and "Point" next-profile options.
+export function scaleSketchAbout({ lines = [], circles = [], arcs = [], splines = [] }, ax, ay, s) {
+  const k = Math.abs(s)
+  return {
+    lines: lines.map(l => {
+      const p1 = scalePoint(l.x1, l.y1, ax, ay, s), p2 = scalePoint(l.x2, l.y2, ax, ay, s)
+      return { ...l, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y }
+    }),
+    circles: circles.map(c => {
+      const p = scalePoint(c.cx, c.cy, ax, ay, s)
+      return { ...c, cx: p.x, cy: p.y, r: c.r * k }
+    }),
+    arcs: arcs.map(a => {
+      const p = scalePoint(a.cx, a.cy, ax, ay, s)
+      return { ...a, cx: p.x, cy: p.y, r: a.r * k }
+    }),
+    splines: splines.map(sp => ({ ...sp, points: sp.points.map(p => ({ ...p, ...scalePoint(p.x, p.y, ax, ay, s) })) })),
+  }
+}

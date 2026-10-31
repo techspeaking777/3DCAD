@@ -22,6 +22,8 @@ import PageSetupPanel from './tools/PageSetupPanel.jsx'
 import GuidePanel from './tools/GuidePanel.jsx'
 import OrthoViewsPanel from './tools/OrthoViewsPanel.jsx'
 import { pageAreaMm } from './tools/orthoViewsMath.js'
+import { DEFAULT_DIM_STYLE, dimPrimitives, distToDim, angleDimFromLines, orthoDimFromPoints } from './tools/dimGeometry.js'
+import DimPanel from './tools/DimPanel.jsx'
 import LineSnapPanel from './tools/LineSnapPanel.jsx'
 import CircleSnapPanel from './tools/CircleSnapPanel.jsx'
 import SplineSnapPanel from './tools/SplineSnapPanel.jsx'
@@ -124,6 +126,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   const [orthoWizardOpen,setOrthoWizardOpen]=useState(false)
   const [saveAsOpen,setSaveAsOpen]=useState(false)
   const [pageConfig,setPageConfig]=useState({size:'A4',orientation:'landscape',margin:10,showPage:false})
+  // How every dimension's number is written — saved with the sheet.
+  const [dimStyle,setDimStyle]=useState(DEFAULT_DIM_STYLE)
 
   // Minimal surface exposed to AppShell so the 3D tab's Save/Open can fold
   // this sheet's contents into the same .trc as the 3D feature tree —
@@ -131,7 +135,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   // pattern). Plain data in, plain data out; App.jsx keeps owning this state.
   useImperativeHandle(ref, () => ({
     getSheetData() {
-      return { lines, circles, arcs, splines, dims, pageConfig }
+      return { lines, circles, arcs, splines, dims, pageConfig, dimStyle }
     },
     restoreSheetData(sheet) {
       if (!sheet) return
@@ -141,8 +145,11 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       setSplines(sheet.splines || [])
       setDims(sheet.dims || [])
       if (sheet.pageConfig) setPageConfig(sheet.pageConfig)
+      // Sheets saved before dimension styles keep the look they were made
+      // with (2 decimals + "mm"); new sheets use DEFAULT_DIM_STYLE.
+      setDimStyle(sheet.dimStyle || (sheet.dims?.length ? { ...DEFAULT_DIM_STYLE, decimals: 2, units: true } : DEFAULT_DIM_STYLE))
     },
-  }), [lines, circles, arcs, splines, dims, pageConfig])
+  }), [lines, circles, arcs, splines, dims, pageConfig, dimStyle])
   const [guideOpen,setGuideOpen]=useState(false)
   const [gridVisible,setGridVisible]=useState(false)
   const [gridSnap,setGridSnap]=useState(false)
@@ -155,6 +162,13 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   const [dimToolStep,setDimToolStep]=useState(0)    // 0=idle, 1=got p1, 2=got p2
   const [dimToolPts,setDimToolPts]=useState([])     // clicked points so far
   const [dimToolPreview,setDimToolPreview]=useState(null)  // live preview
+  // Which dimension the flyout is set to: 'hv' horizontal/vertical, 'aligned',
+  // 'circle' diameter/radius, 'angle' between two lines.
+  const [dimMode,setDimMode]=useState('hv')
+  const [dimOrientLock,setDimOrientLock]=useState(null)      // null (follow the mouse) | 'h' | 'v'
+  const [dimCircleKind,setDimCircleKind]=useState('auto')    // 'auto' (⌀ circle, R arc) | 'diameter' | 'radius'
+  const [dimAngleLines,setDimAngleLines]=useState([])        // line indices picked for an angle dim
+  const [dimLineHover,setDimLineHover]=useState(null)        // line index under the mouse (angle mode)
 
   // Join tool state
   const [joinFirstPt,setJoinFirstPt]=useState(null)   // {lineIdx, end:'x1y1'|'x2y2', x, y} or spline equiv
@@ -547,7 +561,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     setTraceOpen(false);setTraceInsertPt(null)
   }
   function resetDim(){
-    setDimToolStep(0);setDimToolPts([]);setDimToolPreview(null)
+    setDimToolStep(0);setDimToolPts([]);setDimToolPreview(null);setDimAngleLines([]);setDimLineHover(null)
   }
   function resetJoin(){
     setJoinFirstPt(null);setJoinHover(null)
@@ -802,28 +816,12 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       const sd=(SELECT_DIST*1.5)/zoomRef.scale
       let bestDim=null,bestDist=sd+1
       dims.forEach((dim,idx)=>{
-        let d=sd+1
-        if (dim.kind==='linear'&&dim.x1!=null&&dim.x2!=null){
-          const len=Math.hypot(dim.x2-dim.x1,dim.y2-dim.y1)||1
-          const perpX=-(dim.y2-dim.y1)/len,perpY=(dim.x2-dim.x1)/len
-          const off=dim.offset||0
-          const d1x=dim.x1+perpX*off,d1y=dim.y1+perpY*off
-          const d2x=dim.x2+perpX*off,d2y=dim.y2+perpY*off
-          d=Math.min(distToSeg(mousePos.x,mousePos.y,d1x,d1y,d2x,d2y),
-                     distToSeg(mousePos.x,mousePos.y,dim.x1,dim.y1,d1x,d1y),
-                     distToSeg(mousePos.x,mousePos.y,dim.x2,dim.y2,d2x,d2y))
-        } else if ((dim.kind==='diameter'||dim.kind==='radius')&&dim.cx!=null){
-          const ex=dim.cx+Math.cos(dim.angle)*(dim.kind==='diameter'?dim.r*2:dim.r)
-          const ey=dim.cy+Math.sin(dim.angle)*(dim.kind==='diameter'?dim.r*2:dim.r)
-          const sx=dim.kind==='diameter'?dim.cx-Math.cos(dim.angle)*dim.r:dim.cx
-          const sy=dim.kind==='diameter'?dim.cy-Math.sin(dim.angle)*dim.r:dim.cy
-          d=distToSeg(mousePos.x,mousePos.y,sx,sy,ex,ey)
-        }
+        const d=distToDim(mousePos.x,mousePos.y,dim,dimStyle)
         if (d<bestDist){bestDist=d;bestDim={kind:'dim',idx}}
       })
       setDeletePreview(bestDim||null)
     } else setDeletePreview(null)
-  },[tool,mousePos,lines,circles,arcs,splines,dims])
+  },[tool,mousePos,lines,circles,arcs,splines,dims,dimStyle])
 
   useEffect(()=>{
     if (tool==='extend'&&mousePos) setExtendPreview(computeExtendPreview(mousePos,lines,circles,arcs,splines))
@@ -898,52 +896,78 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     return null
   }
 
-  // Dim tool — live preview while placing
+  // Nearest straight line to pt (angle dimensions pick lines), or null.
+  function nearestLineIdx(pt){
+    let best=null,bestD=SELECT_DIST*1.5/zoomRef.scale
+    lines.forEach((l,i)=>{
+      if (l.text) return
+      const d=distToSeg(pt.x,pt.y,l.x1,l.y1,l.x2,l.y2)
+      if (d<bestD){bestD=d;best=i}
+    })
+    return best
+  }
+
+  // Dim tool — live preview while placing, per flyout mode
   useEffect(()=>{
-    if (tool!=='dim'||!mousePos){setDimToolPreview(null);return}
-    if (dimToolStep===0){
-      // Hover: detect if near circle or arc for one-click dim
-      let bestCircle=null,bestArc=null,bestDist=SELECT_DIST*2/zoomRef.scale
-      circles.forEach((c,idx)=>{
+    if (tool!=='dim'||!mousePos){setDimToolPreview(null);setDimLineHover(null);return}
+    const withScale=(d,s)=>s?{...d,scale:s}:d
+    if (dimMode==='circle'){
+      // Hover a circle or arc: one click places it, the mouse side sets the leader.
+      let best=null,bestDist=SELECT_DIST*2/zoomRef.scale
+      circles.forEach(c=>{
         const d=Math.abs(Math.hypot(mousePos.x-c.cx,mousePos.y-c.cy)-c.r)
-        if(d<bestDist){bestDist=d;bestCircle={kind:'circle',idx}}
+        if(d<bestDist){bestDist=d;best={e:c,arc:false}}
       })
-      if (!bestCircle) arcs.forEach((a,idx)=>{
+      arcs.forEach(a=>{
         const angle=norm2pi(Math.atan2(mousePos.y-a.cy,mousePos.x-a.cx))
         if(!angleOnArc(angle,a.startAngle,a.endAngle)) return
         const d=Math.abs(Math.hypot(mousePos.x-a.cx,mousePos.y-a.cy)-a.r)
-        if(d<bestDist){bestDist=d;bestArc={kind:'arc',idx}}
+        if(d<bestDist){bestDist=d;best={e:a,arc:true}}
       })
-      if (bestCircle){
-        const c=circles[bestCircle.idx]
-        const ang=Math.atan2(mousePos.y-c.cy,mousePos.x-c.cx)
-        setDimToolPreview({kind:'diameter',cx:c.cx,cy:c.cy,r:c.r,angle:ang,...(c.viewScale?{scale:c.viewScale}:{})})
-      } else if (bestArc){
-        const a=arcs[bestArc.idx]
-        const ang=Math.atan2(mousePos.y-a.cy,mousePos.x-a.cx)
-        setDimToolPreview({kind:'radius',cx:a.cx,cy:a.cy,r:a.r,angle:ang,...(a.viewScale?{scale:a.viewScale}:{})})
-      } else {
+      if (!best){setDimToolPreview(null);return}
+      const e=best.e
+      const kind=dimCircleKind==='auto'?(best.arc?'radius':'diameter'):dimCircleKind
+      setDimToolPreview(withScale({kind,cx:e.cx,cy:e.cy,r:e.r,angle:Math.atan2(mousePos.y-e.cy,mousePos.x-e.cx)},e.viewScale))
+      return
+    }
+    if (dimMode==='angle'){
+      if (dimAngleLines.length<2){
+        setDimLineHover(nearestLineIdx(mousePos))
         setDimToolPreview(null)
+        return
       }
-    } else if (dimToolStep===1){
-      // Got p1, show linear dim to mouse
+      setDimLineHover(null)
+      const d=angleDimFromLines(lines[dimAngleLines[0]],lines[dimAngleLines[1]],mousePos)
+      setDimToolPreview(d)
+      return
+    }
+    // Horizontal/vertical and aligned: two points, then where the line sits.
+    if (dimToolStep===0){setDimToolPreview(null);return}
+    const snap=getGeoSnap(mousePos,lines,circles,arcs,null,false,splines,intersectionPts)
+    const cur=snap?{x:snap.x,y:snap.y}:mousePos
+    if (dimToolStep===1){
       const p1=dimToolPts[0]
-      const dx=mousePos.x-p1.x,dy=mousePos.y-p1.y
-      const len=Math.hypot(dx,dy)
-      const s=viewScaleNear(p1)||viewScaleNear(mousePos)
-      if(len>1) setDimToolPreview({kind:'linear',x1:p1.x,y1:p1.y,x2:mousePos.x,y2:mousePos.y,offset:0,...(s?{scale:s}:{})})
+      if (Math.hypot(cur.x-p1.x,cur.y-p1.y)<=1){setDimToolPreview(null);return}
+      const s=viewScaleNear(p1)||viewScaleNear(cur)
+      const d=dimMode==='hv'
+        ? orthoDimFromPoints(p1,cur,{x:cur.x,y:cur.y},dimOrientLock||(Math.abs(cur.x-p1.x)>=Math.abs(cur.y-p1.y)?'h':'v'))
+        : {kind:'linear',x1:p1.x,y1:p1.y,x2:cur.x,y2:cur.y,offset:0}
+      setDimToolPreview(withScale(d,s))
     } else if (dimToolStep===2){
-      // Got p1+p2, set offset distance
       const [p1,p2]=dimToolPts
+      const s=viewScaleNear(p1)||viewScaleNear(p2)
+      if (dimMode==='hv'){
+        setDimToolPreview(withScale(orthoDimFromPoints(p1,p2,mousePos,dimOrientLock),s))
+        return
+      }
       const dx=p2.x-p1.x,dy=p2.y-p1.y,len=Math.hypot(dx,dy)
       if(len<1) return
       // Perpendicular offset = signed distance from mouse to line p1-p2
       const nx=-dy/len,ny=dx/len
       const offset=(mousePos.x-p1.x)*nx+(mousePos.y-p1.y)*ny
-      const s=viewScaleNear(p1)||viewScaleNear(p2)
-      setDimToolPreview({kind:'linear',x1:p1.x,y1:p1.y,x2:p2.x,y2:p2.y,offset,...(s?{scale:s}:{})})
+      setDimToolPreview(withScale({kind:'linear',x1:p1.x,y1:p1.y,x2:p2.x,y2:p2.y,offset},s))
     }
-  },[tool,mousePos,dimToolStep,dimToolPts,circles,arcs,lines])
+  },[tool,mousePos,dimToolStep,dimToolPts,dimMode,dimOrientLock,dimCircleKind,dimAngleLines,circles,arcs,lines,splines,intersectionPts])
 
   // Join tool hover — find nearest line/spline endpoint within snap distance
   useEffect(()=>{
@@ -998,27 +1022,11 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     })
     // Hit-test dimensions — check proximity to dim line and extension lines
     dims.forEach((dim,idx)=>{
-      let d=sd+1
-      if (dim.kind==='linear'&&dim.x1!=null&&dim.x2!=null){
-        const len=Math.hypot(dim.x2-dim.x1,dim.y2-dim.y1)||1
-        const perpX=-(dim.y2-dim.y1)/len,perpY=(dim.x2-dim.x1)/len
-        const off=dim.offset||0
-        const d1x=dim.x1+perpX*off,d1y=dim.y1+perpY*off
-        const d2x=dim.x2+perpX*off,d2y=dim.y2+perpY*off
-        d=Math.min(distToSeg(mousePos.x,mousePos.y,d1x,d1y,d2x,d2y),
-                   distToSeg(mousePos.x,mousePos.y,dim.x1,dim.y1,d1x,d1y),
-                   distToSeg(mousePos.x,mousePos.y,dim.x2,dim.y2,d2x,d2y))
-      } else if ((dim.kind==='diameter'||dim.kind==='radius')&&dim.cx!=null){
-        const ex=dim.cx+Math.cos(dim.angle)*(dim.kind==='diameter'?dim.r*2:dim.r)
-        const ey=dim.cy+Math.sin(dim.angle)*(dim.kind==='diameter'?dim.r*2:dim.r)
-        const sx=dim.kind==='diameter'?dim.cx-Math.cos(dim.angle)*dim.r:dim.cx
-        const sy=dim.kind==='diameter'?dim.cy-Math.sin(dim.angle)*dim.r:dim.cy
-        d=distToSeg(mousePos.x,mousePos.y,sx,sy,ex,ey)
-      }
+      const d=distToDim(mousePos.x,mousePos.y,dim,dimStyle)
       if (d<bestDist){bestDist=d;best={kind:'dim',idx}}
     })
     setSelectHover(best)
-  },[tool,mousePos,lines,circles,arcs,splines,dims,selection,selectLiveGeom,viewTransform.scale])
+  },[tool,mousePos,lines,circles,arcs,splines,dims,dimStyle,selection,selectLiveGeom,viewTransform.scale])
 
   // The one spline (if any) whose points can be edited right now: Select tool,
   // exactly one entity selected, and it's a hand-drawn spline. Reads the live
@@ -1564,133 +1572,41 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       }
     }
 
-    // Draw committed dimensions
+    // Draw committed dimensions — the shared primitives (dimGeometry.js), the
+    // same ones the PDF and DXF exports draw.
+    const drawDimPrims=(pr,color,lw)=>{
+      ctx.save();ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=lw;ctx.setLineDash([])
+      ctx.beginPath()
+      pr.lines.forEach(l=>{ctx.moveTo(l.x1,l.y1);ctx.lineTo(l.x2,l.y2)})
+      pr.arcs.forEach(a=>{ctx.moveTo(a.cx+a.r*Math.cos(a.start),a.cy+a.r*Math.sin(a.start));ctx.arc(a.cx,a.cy,a.r,a.start,a.end,false)})
+      ctx.stroke()
+      pr.arrows.forEach(t=>{ctx.beginPath();ctx.moveTo(t[0][0],t[0][1]);ctx.lineTo(t[1][0],t[1][1]);ctx.lineTo(t[2][0],t[2][1]);ctx.closePath();ctx.fill()})
+      ctx.restore()
+    }
     dims.forEach((dim,di)=>{
       const isDelTarget=deletePreview?.kind==='dim'&&deletePreview.idx===di
-      const dimColor=isDelTarget?'#F44336':'#222'
-      ctx.save()
-      ctx.strokeStyle=dimColor;ctx.fillStyle=dimColor
-      const LW=(isDelTarget?2:0.8)/sc, ARR=6/sc, FS=11/sc
-      ctx.lineWidth=LW
-      if (dim.kind==='linear'){
-        const dx=dim.x2-dim.x1,dy=dim.y2-dim.y1,len=Math.hypot(dx,dy)
-        if(len<1){ctx.restore();return}
-        const ux=dx/len,uy=dy/len,nx=-uy,ny=ux
-        const off=dim.offset
-        // Extension lines from endpoints to dim line
-        const ext=ARR*1.5
-        ctx.beginPath()
-        ctx.moveTo(dim.x1,dim.y1)
-        ctx.lineTo(dim.x1+nx*(off+Math.sign(off)*ext),dim.y1+ny*(off+Math.sign(off)*ext))
-        ctx.moveTo(dim.x2,dim.y2)
-        ctx.lineTo(dim.x2+nx*(off+Math.sign(off)*ext),dim.y2+ny*(off+Math.sign(off)*ext))
-        ctx.stroke()
-        // Dimension line with arrows
-        const d1x=dim.x1+nx*off,d1y=dim.y1+ny*off
-        const d2x=dim.x2+nx*off,d2y=dim.y2+ny*off
-        ctx.beginPath();ctx.moveTo(d1x,d1y);ctx.lineTo(d2x,d2y);ctx.stroke()
-        // Arrow heads
-        ;[[d1x,d1y,ux,uy],[d2x,d2y,-ux,-uy]].forEach(([ax,ay,ax2,ay2])=>{
-          ctx.beginPath()
-          ctx.moveTo(ax,ay)
-          ctx.lineTo(ax+ax2*ARR-ay2*ARR*0.35,ay+ay2*ARR+ax2*ARR*0.35)
-          ctx.lineTo(ax+ax2*ARR+ay2*ARR*0.35,ay+ay2*ARR-ax2*ARR*0.35)
-          ctx.closePath();ctx.fill()
-        })
-        // Text
-        const txt=dim.text||(pxToMm(len)/(dim.scale||1)).toFixed(2)+' mm'
-        const mx=(d1x+d2x)/2,my=(d1y+d2y)/2
-        ctx.save();ctx.translate(mx,my);ctx.scale(1/sc,1/sc)
-        let ang=Math.atan2(uy,ux)
-        if(ang>Math.PI/2||ang<-Math.PI/2) ang+=Math.PI
-        ctx.rotate(ang)
-        ctx.font=`${FS*sc}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='bottom'
-        ctx.fillStyle=dimColor;ctx.fillText(txt,0,-3)
-        ctx.restore()
-      } else if (dim.kind==='diameter'){
-        const {cx,cy,r,angle}=dim
-        const cos=Math.cos(angle),sin=Math.sin(angle)
-        const p1x=cx-r*cos,p1y=cy-r*sin
-        const p2x=cx+r*cos,p2y=cy+r*sin
-        ctx.beginPath();ctx.moveTo(p1x,p1y);ctx.lineTo(p2x,p2y);ctx.stroke()
-        ;[[p1x,p1y,cos,sin],[p2x,p2y,-cos,-sin]].forEach(([ax,ay,ax2,ay2])=>{
-          ctx.beginPath()
-          ctx.moveTo(ax,ay)
-          ctx.lineTo(ax+ax2*ARR-ay2*ARR*0.35,ay+ay2*ARR+ax2*ARR*0.35)
-          ctx.lineTo(ax+ax2*ARR+ay2*ARR*0.35,ay+ay2*ARR-ax2*ARR*0.35)
-          ctx.closePath();ctx.fill()
-        })
-        const txt=dim.text||'⌀'+(pxToMm(r*2)/(dim.scale||1)).toFixed(2)+' mm'
-        ctx.save();ctx.translate(cx,cy);ctx.scale(1/sc,1/sc)
-        let a=angle;if(a>Math.PI/2||a<-Math.PI/2) a+=Math.PI
-        ctx.rotate(a);ctx.font=`${FS*sc}px sans-serif`
-        ctx.textAlign='center';ctx.textBaseline='bottom';ctx.fillText(txt,0,-3)
-        ctx.restore()
-      } else if (dim.kind==='radius'){
-        const {cx,cy,r,angle}=dim
-        const ex=cx+r*Math.cos(angle),ey=cy+r*Math.sin(angle)
-        ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(ex,ey);ctx.stroke()
-        const cos=Math.cos(angle),sin=Math.sin(angle)
-        ctx.beginPath()
-        ctx.moveTo(ex,ey)
-        ctx.lineTo(ex-cos*ARR-sin*ARR*0.35,ey-sin*ARR+cos*ARR*0.35)
-        ctx.lineTo(ex-cos*ARR+sin*ARR*0.35,ey-sin*ARR-cos*ARR*0.35)
-        ctx.closePath();ctx.fill()
-        const txt=dim.text||'R'+(pxToMm(r)/(dim.scale||1)).toFixed(2)+' mm'
-        ctx.save();ctx.translate(cx,cy);ctx.scale(1/sc,1/sc)
-        let a=angle;if(a>Math.PI/2||a<-Math.PI/2) a+=Math.PI
-        ctx.rotate(a);ctx.font=`${FS*sc}px sans-serif`
-        ctx.textAlign='center';ctx.textBaseline='bottom'
-        ctx.fillText(txt,(r/2*sc/sc)*(a===angle?1:-1),-3)
-        ctx.restore()
-      }
-      ctx.restore()
+      const isSel=selection.some(s=>s.kind==='dim'&&s.idx===di)
+      const isHov=tool==='select'&&selectHover?.kind==='dim'&&selectHover.idx===di
+      const color=isDelTarget?'#F44336':isSel?'#1E88E5':isHov?'#64B5F6':'#222'
+      drawDimPrims(dimPrimitives(dim,dimStyle),color,(isDelTarget||isSel?1.6:0.8)/sc)
     })
+
+    // Dim tool: highlight the line(s) picked / hovered for an angle dimension
+    if (tool==='dim'&&dimMode==='angle'){
+      ctx.save();ctx.strokeStyle='#E91E63';ctx.lineWidth=3/sc;ctx.setLineDash([])
+      ;[...dimAngleLines,...(dimLineHover!=null&&!dimAngleLines.includes(dimLineHover)?[dimLineHover]:[])].forEach(i=>{
+        const l=lines[i];if(!l)return
+        ctx.globalAlpha=dimAngleLines.includes(i)?0.9:0.45
+        ctx.beginPath();ctx.moveTo(l.x1,l.y1);ctx.lineTo(l.x2,l.y2);ctx.stroke()
+      })
+      ctx.restore()
+    }
 
     // Draw dim tool preview
     if (tool==='dim'&&dimToolPreview&&mousePos){
-      ctx.save();ctx.strokeStyle='#E91E63';ctx.fillStyle='#E91E63';ctx.lineWidth=0.8/sc;ctx.setLineDash([4/sc,2/sc])
-      const ARR=6/sc,FS=11/sc
-      const p=dimToolPreview
-      if (p.kind==='linear'){
-        const dx=p.x2-p.x1,dy=p.y2-p.y1,len=Math.hypot(dx,dy)
-        if(len>1){
-          const ux=dx/len,uy=dy/len,nx=-uy,ny=ux,off=p.offset
-          ctx.beginPath()
-          ctx.moveTo(p.x1,p.y1);ctx.lineTo(p.x1+nx*(off+Math.sign(off||1)*ARR*1.5),p.y1+ny*(off+Math.sign(off||1)*ARR*1.5))
-          ctx.moveTo(p.x2,p.y2);ctx.lineTo(p.x2+nx*(off+Math.sign(off||1)*ARR*1.5),p.y2+ny*(off+Math.sign(off||1)*ARR*1.5))
-          ctx.moveTo(p.x1+nx*off,p.y1+ny*off);ctx.lineTo(p.x2+nx*off,p.y2+ny*off)
-          ctx.stroke()
-          const txt=(pxToMm(len)/(p.scale||1)).toFixed(2)+' mm'
-          const mx=(p.x1+p.x2)/2+nx*off,my=(p.y1+p.y2)/2+ny*off
-          ctx.save();ctx.translate(mx,my);ctx.scale(1/sc,1/sc)
-          let a=Math.atan2(uy,ux);if(a>Math.PI/2||a<-Math.PI/2) a+=Math.PI
-          ctx.rotate(a);ctx.setLineDash([]);ctx.font=`${FS*sc}px sans-serif`
-          ctx.textAlign='center';ctx.textBaseline='bottom';ctx.fillText(txt,0,-3)
-          ctx.restore()
-        }
-      } else if (p.kind==='diameter'){
-        const cos=Math.cos(p.angle),sin=Math.sin(p.angle)
-        ctx.beginPath();ctx.moveTo(p.cx-p.r*cos,p.cy-p.r*sin);ctx.lineTo(p.cx+p.r*cos,p.cy+p.r*sin);ctx.stroke()
-        ctx.setLineDash([]);ctx.save();ctx.translate(p.cx,p.cy);ctx.scale(1/sc,1/sc)
-        ctx.font=`${FS*sc}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='bottom'
-        ctx.fillText('⌀'+(pxToMm(p.r*2)/(p.scale||1)).toFixed(2)+' mm',0,-3)
-        ctx.restore()
-      } else if (p.kind==='radius'){
-        const ex=p.cx+p.r*Math.cos(p.angle),ey=p.cy+p.r*Math.sin(p.angle)
-        ctx.beginPath();ctx.moveTo(p.cx,p.cy);ctx.lineTo(ex,ey);ctx.stroke()
-        ctx.setLineDash([]);ctx.save();ctx.translate(ex,ey);ctx.scale(1/sc,1/sc)
-        ctx.font=`${FS*sc}px sans-serif`;ctx.textAlign='left';ctx.textBaseline='bottom'
-        ctx.fillText('R'+(pxToMm(p.r)/(p.scale||1)).toFixed(2)+' mm',4,-3)
-        ctx.restore()
-      }
-      // First point dot
-      if (dimToolPts.length>0){
-        ctx.setLineDash([]);ctx.beginPath();ctx.arc(dimToolPts[0].x,dimToolPts[0].y,4/sc,0,Math.PI*2);ctx.fill()
-      }
-      if (dimToolPts.length>1){
-        ctx.beginPath();ctx.arc(dimToolPts[1].x,dimToolPts[1].y,4/sc,0,Math.PI*2);ctx.fill()
-      }
+      drawDimPrims(dimPrimitives(dimToolPreview,dimStyle),'#E91E63',1/sc)
+      ctx.save();ctx.fillStyle='#E91E63'
+      dimToolPts.forEach(p=>{ctx.beginPath();ctx.arc(p.x,p.y,4/sc,0,Math.PI*2);ctx.fill()})
       ctx.restore()
     }
 
@@ -2153,7 +2069,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       if (geo) drawLineIndicator(ctx,geo.x,geo.y,geo.type,sc)
     }
 
-  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,deferredTangent,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,canvasSize,tKeyDown,pKeyDown,perpSourceLineIdx,drawStyle,intersectionPts,joinHover,joinFirstPt,pageConfig,dims,dimToolPreview,dimToolPts,gridVisible,gridSizeMm])
+  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,deferredTangent,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,canvasSize,tKeyDown,pKeyDown,perpSourceLineIdx,drawStyle,intersectionPts,joinHover,joinFirstPt,pageConfig,dims,dimToolPreview,dimToolPts,dimStyle,dimMode,dimAngleLines,dimLineHover,gridVisible,gridSizeMm])
 
   function handleMouseDown(e){
     if (e.button===1){e.preventDefault();isPanningRef.current=true;lastPanPosRef.current={x:e.clientX,y:e.clientY}}
@@ -2363,20 +2279,26 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       const snap=getGeoSnap(raw,lines,circles,arcs,null,false,splines,intersectionPts)
       const pt=snap?{x:snap.x,y:snap.y}:raw
 
-      // Circle / arc: one click places dim
-      if (dimToolPreview?.kind==='diameter'){
-        const p=dimToolPreview
-        commit(snapshot())
-        setDims(d=>[...d,{kind:'diameter',cx:p.cx,cy:p.cy,r:p.r,angle:p.angle,text:'',...(p.scale?{scale:p.scale}:{})}])
+      // Circle mode: one click places the hovered diameter/radius
+      if (dimMode==='circle'){
+        if (dimToolPreview){commit(snapshot());setDims(d=>[...d,{...dimToolPreview,text:''}])}
         resetDim();return
       }
-      if (dimToolPreview?.kind==='radius'){
-        const p=dimToolPreview
-        commit(snapshot())
-        setDims(d=>[...d,{kind:'radius',cx:p.cx,cy:p.cy,r:p.r,angle:p.angle,text:'',...(p.scale?{scale:p.scale}:{})}])
+      // Angle mode: click line 1, line 2, then where the arc goes
+      if (dimMode==='angle'){
+        if (dimAngleLines.length<2){
+          const idx=nearestLineIdx(raw)
+          if (idx==null||dimAngleLines.includes(idx)) return
+          const next=[...dimAngleLines,idx]
+          // Parallel lines have no angle — keep only the first pick
+          if (next.length===2&&!angleDimFromLines(lines[next[0]],lines[next[1]],raw)) return
+          setDimAngleLines(next)
+          return
+        }
+        if (dimToolPreview){commit(snapshot());setDims(d=>[...d,{...dimToolPreview,text:''}])}
         resetDim();return
       }
-      // Linear: click 1=p1, 2=p2, 3=offset
+      // Horizontal/vertical and aligned: click 1=p1, 2=p2, 3=where the line sits
       if (dimToolStep===0){
         setDimToolPts([pt]);setDimToolStep(1)
       } else if (dimToolStep===1){
@@ -2893,6 +2815,11 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     }
     if ((e.key==='t'||e.key==='T')&&!e.ctrlKey&&!e.shiftKey&&(tool==='line'||tool==='circle')){setTKeyDown(p=>!p);return}
     if ((e.key==='p'||e.key==='P')&&!e.ctrlKey&&!e.shiftKey&&tool==='line'){setPKeyDown(p=>!p);return}
+    // Dimension tool, horizontal/vertical mode: H / V lock the direction
+    // (press again to release) — ahead of H's dashed-line toggle below.
+    if (tool==='dim'&&dimMode==='hv'&&!e.ctrlKey&&!e.shiftKey&&/^[hv]$/i.test(e.key)){
+      const o=e.key.toLowerCase();setDimOrientLock(p=>p===o?null:o);return
+    }
     if ((e.key==='h'||e.key==='H')&&!e.ctrlKey&&!e.shiftKey){
       if (tool==='select'&&selection.length>0){
         applySelectionStyle(getSelectionStyle(selection)==='dashed'?null:'dashed')
@@ -3252,15 +3179,24 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     }
 
     if (tool==='dim') {
+      if (dimMode==='circle') return { step:1, total:1, color:c,
+        action:'Click a circle or arc',
+        hints:[K('Esc')] }
+      if (dimMode==='angle') {
+        if (dimAngleLines.length===0) return { step:1, total:3, color:c, action:'Click the first line', hints:[K('Esc')] }
+        if (dimAngleLines.length===1) return { step:2, total:3, color:c, action:'Click the second line', hints:[K('Esc')] }
+        return { step:3, total:3, color:c, action:'Click where the angle goes', hints:[K('Esc')] }
+      }
+      const hv=dimMode==='hv'?[K('H','horizontal'),K('V','vertical')]:[]
       if (dimToolStep===0) return { step:1, total:3, color:c,
-        action:'Hover arc/circle or click pt 1',
-        hints:[] }
+        action:'Click the first point',
+        hints:[...hv] }
       if (dimToolStep===1) return { step:2, total:3, color:c,
-        action:'Click second point',
-        hints:[K('Esc')] }
+        action:'Click the second point',
+        hints:[...hv,K('Esc')] }
       return { step:3, total:3, color:c,
-        action:'Click to place dim line',
-        hints:[K('Esc')] }
+        action:'Click where the dimension goes',
+        hints:[...hv,K('Esc')] }
     }
 
     if (tool==='mirror') {
@@ -3557,6 +3493,17 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
                 liveRadiusMm={circleLiveRadiusMm}
               />
             )}
+            {t==='dim'&&tool==='dim'&&(
+              <DimPanel
+                toolColor={activeColor}
+                mode={dimMode}
+                onMode={m=>{setDimMode(m);resetDim()}}
+                orientLock={dimOrientLock} onOrientLock={setDimOrientLock}
+                circleKind={dimCircleKind} onCircleKind={setDimCircleKind}
+                style={dimStyle} onStyle={setDimStyle}
+                anglePicked={dimAngleLines.length}
+              />
+            )}
             {t==='spline'&&tool==='spline'&&(
               <SplineSnapPanel
                 toolColor={activeColor}
@@ -3762,7 +3709,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
               e.target.value=''
             }}/>
           </label>
-          <button onClick={()=>exportDXF(lines,circles,arcs,splines)} title="Export DXF" style={{...btnBase,background:'transparent',border:'none'}}>
+          <button onClick={()=>exportDXF(lines,circles,arcs,splines,undefined,{dims,dimStyle})} title="Export DXF" style={{...btnBase,background:'transparent',border:'none'}}>
             <IconDXF/>
           </button>
           <button onClick={()=>setOrthoWizardOpen(true)} title="Generate Orthogonal Views from the open 3D project" style={{...btnBase,background:'transparent',border:'none'}}>
@@ -3957,7 +3904,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
 
       {pageSetupOpen&&(
         <PageSetupPanel
-          lines={lines} circles={circles} arcs={arcs} splines={splines} dims={dims}
+          lines={lines} circles={circles} arcs={arcs} splines={splines} dims={dims} dimStyle={dimStyle}
           pxToMm={pxToMm} mmToPx={mmToPx}
           pageConfig={pageConfig} setPageConfig={setPageConfig}
           onClose={()=>setPageSetupOpen(false)}

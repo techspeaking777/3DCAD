@@ -47,6 +47,10 @@ const GLYPHS = {
   '.': [[[2, 0], [2, 0.6]]],
   '-': [[[1, 3], [3, 3]]],
   '/': [[[0, 0], [4, 6]]],
+  '⌀': [[[4, 2.5], [3.4, 3.9], [2, 4.5], [0.6, 3.9], [0, 2.5], [0.6, 1.1], [2, 0.5], [3.4, 1.1], [4, 2.5]], [[0, 0], [4, 5]]],
+  '°': [[[1.8, 5.2], [1.4, 6], [0.6, 6], [0.2, 5.2], [0.6, 4.4], [1.4, 4.4], [1.8, 5.2]]],
+  '×': [[[0.5, 1], [3.5, 4]], [[0.5, 4], [3.5, 1]]],
+  m: [[[0, 0], [0, 4]], [[0, 3], [1, 4], [2, 3], [2, 0]], [[2, 3], [3, 4], [4, 3], [4, 0]]],
 }
 
 const ADVANCE = 6   // grid units per character (4 wide + 2 spacing)
@@ -59,7 +63,8 @@ export function strokeTextWidth(text, heightMm) {
 /**
  * `text` as line segments in mm, y up. (x, y) is the baseline point the
  * `align` ('left' | 'center' | 'right') refers to. Unknown characters
- * become spaces; lower case is drawn as capitals. Each segment carries
+ * become spaces; lower case is drawn as capitals (except the few lower-case
+ * glyphs defined, e.g. "m" for units). Each segment carries
  * `text: true` so the Drawing tab can draw it without end-point dots.
  */
 export function strokeTextLines(text, x, y, heightMm, align = 'left') {
@@ -67,8 +72,8 @@ export function strokeTextLines(text, x, y, heightMm, align = 'left') {
   const w = strokeTextWidth(text, heightMm)
   const x0 = align === 'center' ? x - w / 2 : align === 'right' ? x - w : x
   const out = []
-  ;[...text.toUpperCase()].forEach((ch, i) => {
-    const strokes = GLYPHS[ch]
+  ;[...text].forEach((ch, i) => {
+    const strokes = GLYPHS[ch] || GLYPHS[ch.toUpperCase()]
     if (!strokes) return
     const ox = x0 + i * ADVANCE * k
     for (const s of strokes) {

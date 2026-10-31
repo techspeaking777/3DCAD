@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { pxToMm, norm2pi } from '../constants.js'
 import { splineToPolyline } from './splineMath.js'
+import { dimPrimitives } from './dimGeometry.js'
 import { FacePlane } from '../FacePlane.js'
 
 function dlText(filename, content, mime) {
@@ -423,7 +424,17 @@ function isFullSweepArc(a) {
   return Math.min(diff, 2*Math.PI-diff) < 1e-4
 }
 
-export function exportDXF(lines, circles, arcs, splines=[], filename='drawing.dxf') {
+// A filled triangle (dimension arrowhead) as a DXF SOLID — corners 3 and 4
+// are the same point for a triangle.
+function dxfSolid(p, layer) {
+  const [a, b, c] = p
+  return `0\nSOLID\n8\n${layer}\n10\n${a[0].toFixed(4)}\n20\n${a[1].toFixed(4)}\n30\n0.0\n11\n${b[0].toFixed(4)}\n21\n${b[1].toFixed(4)}\n31\n0.0\n12\n${c[0].toFixed(4)}\n22\n${c[1].toFixed(4)}\n32\n0.0\n13\n${c[0].toFixed(4)}\n23\n${c[1].toFixed(4)}\n33\n0.0\n`
+}
+
+// `opts.dims` / `opts.dimStyle`: the Drawing tab's dimensions, written as
+// plain lines, arcs and filled arrows on a DIMENSIONS layer (from the same
+// dimGeometry primitives the canvas and PDF draw).
+export function exportDXF(lines, circles, arcs, splines=[], filename='drawing.dxf', opts={}) {
   const mm   = px => pxToMm(px)
   const fy   = y  => -mm(y)
   const mmPt = p  => ({x:mm(p.x), y:fy(p.y)})
@@ -463,6 +474,18 @@ export function exportDXF(lines, circles, arcs, splines=[], filename='drawing.dx
       entities += dxfLine(a.x, a.y, b.x, b.y, sp.style)
     }
   })
+
+  // ── Dimensions ────────────────────────────────────────────────────────────
+  for (const d of opts.dims || []) {
+    const pr = dimPrimitives(d, opts.dimStyle)
+    pr.lines.forEach(l => {
+      entities += `0\nLINE\n8\nDIMENSIONS\n10\n${mm(l.x1).toFixed(4)}\n20\n${fy(l.y1).toFixed(4)}\n30\n0.0\n11\n${mm(l.x2).toFixed(4)}\n21\n${fy(l.y2).toFixed(4)}\n31\n0.0\n`
+    })
+    pr.arcs.forEach(a => {
+      entities += `0\nARC\n8\nDIMENSIONS\n10\n${mm(a.cx).toFixed(4)}\n20\n${fy(a.cy).toFixed(4)}\n30\n0.0\n40\n${mm(a.r).toFixed(4)}\n50\n${toDXFdeg(a.end).toFixed(6)}\n51\n${toDXFdeg(a.start).toFixed(6)}\n`
+    })
+    pr.arrows.forEach(t => { entities += dxfSolid(t.map(([x, y]) => [mm(x), fy(y)]), 'DIMENSIONS') })
+  }
   const dxf =
     '0\nSECTION\n2\nHEADER\n' +
     '9\n$INSUNITS\n70\n4\n' +

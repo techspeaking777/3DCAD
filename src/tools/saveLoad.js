@@ -220,12 +220,41 @@ const PROJECT_FORMAT_VERSION = 1
 // cloudSave.js's account-save path can produce the exact same payload
 // shape — a saved project should be identical whether it lands in a local
 // .trc file or a cad_projects row.
-export function serializeProject(features, solids, drawingSheet) {
+//
+// `snapshots` (optional, [{solidId, data}] from cadEngine.snapshotShapes) are the
+// finished shapes of the bodies, saved NEXT TO the feature recipe so opening the
+// project can skip replaying every feature. They are only a cache: the features stay
+// the source of truth, and the block carries a fingerprint of them so a snapshot that
+// no longer matches (file edited by hand, features changed) is ignored on load.
+const SNAPSHOT_FORMAT_VERSION = 1
+
+// A hash of the features that decide the geometry — not their name, colour or hidden
+// flag (those change without touching a shape). Works on the plain objects as saved,
+// so it comes out the same when recomputed from a parsed file.
+export function featuresFingerprint(featureObjs) {
+  const text = JSON.stringify(featureObjs.map(f => { const rest = { ...f }; delete rest.hidden; delete rest.color; delete rest.name; return rest }))
+  // cyrb53 — a fast 53-bit string hash; plenty to tell "same recipe" from "different".
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charCodeAt(i)
+    h1 = Math.imul(h1 ^ ch, 2654435761)
+    h2 = Math.imul(h2 ^ ch, 1597334677)
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36) + ':' + text.length
+}
+
+export function serializeProject(features, solids, drawingSheet, snapshots = null) {
   const hiddenById = new Map(solids.map(s => [s.id, !!s.hidden]))
+  const featureObjs = features.map(f => serializeFeature(f, hiddenById.get(f.solidId) || false))
   return JSON.stringify({
     formatVersion: PROJECT_FORMAT_VERSION,
     app: '3d-retro-cad',
-    features: features.map(f => serializeFeature(f, hiddenById.get(f.solidId) || false)),
+    features: featureObjs,
+    ...(snapshots?.length ? {
+      snapshots: { version: SNAPSHOT_FORMAT_VERSION, fingerprint: featuresFingerprint(featureObjs), shapes: snapshots },
+    } : {}),
     ...(drawingSheet ? { sheet: drawingSheet } : {}),
   }, null, 2)
 }
@@ -248,10 +277,13 @@ export function serializeProject(features, solids, drawingSheet) {
 // noticeable blocked-main-thread delay.
 //
 // Returns {status: 'saved'|'cancelled'|'downloaded', handle: FileSystemFileHandle|null}.
-export async function saveProjectFileAs(features, solids, suggestedName = 'drawing.trc', existingHandle = null, drawingSheet = null) {
+// `getSnapshots` (optional async fn → [{solidId, data}] | null) supplies the body snapshots;
+// it is awaited AFTER the picker so a slow worker never eats the click's permission to open it,
+// and a failure there only costs the cache, never the save.
+export async function saveProjectFileAs(features, solids, suggestedName = 'drawing.trc', existingHandle = null, drawingSheet = null, getSnapshots = null) {
   if (existingHandle) {
     try {
-      const data = serializeProject(features, solids, drawingSheet)
+      const data = serializeProject(features, solids, drawingSheet, await safeSnapshots(getSnapshots))
       const writable = await existingHandle.createWritable()
       await writable.write(data)
       await writable.close()
@@ -269,15 +301,20 @@ export async function saveProjectFileAs(features, solids, suggestedName = 'drawi
       if (err && err.name === 'AbortError') return { status: 'cancelled', handle: null }
       throw err
     }
-    const data = serializeProject(features, solids, drawingSheet)
+    const data = serializeProject(features, solids, drawingSheet, await safeSnapshots(getSnapshots))
     const writable = await handle.createWritable()
     await writable.write(data)
     await writable.close()
     return { status: 'saved', handle }
   }
-  const data = serializeProject(features, solids, drawingSheet)
+  const data = serializeProject(features, solids, drawingSheet, await safeSnapshots(getSnapshots))
   dlText(suggestedName, data, 'application/json')
   return { status: 'downloaded', handle: null }
+}
+
+async function safeSnapshots(getSnapshots) {
+  if (!getSnapshots) return null
+  try { return await getSnapshots() } catch { return null }
 }
 
 // Validates and unpacks an already-parsed project object (the same shape
@@ -288,7 +325,12 @@ export async function saveProjectFileAs(features, solids, suggestedName = 'drawi
 // duplicating it. Throws if `features` isn't present/an array.
 export function parseProjectData(data) {
   if (!data || !Array.isArray(data.features)) throw new Error('Not a project file (no feature tree)')
-  return { features: data.features.map(deserializeFeature), formatVersion: data.formatVersion, sheet: data.sheet || null }
+  // Snapshots are used only when they were written for exactly these features.
+  const snap = data.snapshots
+  const snapshots = snap && snap.version === SNAPSHOT_FORMAT_VERSION && Array.isArray(snap.shapes) && snap.shapes.length
+    && snap.fingerprint === featuresFingerprint(data.features)
+    ? snap.shapes : null
+  return { features: data.features.map(deserializeFeature), formatVersion: data.formatVersion, sheet: data.sheet || null, snapshots }
 }
 
 // Parses a .trc (or legacy-incompatible) file. Throws if `features` isn't

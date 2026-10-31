@@ -1,6 +1,6 @@
 import opencascade from 'replicad-opencascadejs/src/replicad_single.js'
 import opencascadeWasm from 'replicad-opencascadejs/src/replicad_single.wasm?url'
-import { setOC, Sketcher, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, Vector, importSTEP, makeBSplineApproximation, assembleWire, genericSweep } from 'replicad'
+import { setOC, Sketcher, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, Vector, importSTEP, deserializeShape, makeBSplineApproximation, assembleWire, genericSweep } from 'replicad'
 import { projectedProfilePlane, dedupePoints3d } from './tools/sweepProject.js'
 import { springFrame } from './tools/springMath.js'
 
@@ -954,6 +954,22 @@ initOC().catch(err =>
 // Stateful shape store — keyed by solidId so cutouts can subtract directly
 const shapeStore = new Map()
 
+// gzip + base64 for the project snapshots (a B-rep is large, repetitive text).
+async function gzipToBase64(text) {
+  const stream = new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'))
+  const bytes = new Uint8Array(await new Response(stream).arrayBuffer())
+  let bin = ''
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
+  return btoa(bin)
+}
+async function gunzipFromBase64(b64) {
+  const bin = atob(b64)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))
+  return new Response(stream).text()
+}
+
 self.onmessage = async function(e) {
   if (!ocReady) {
     self.postMessage({ type:'error', id:e.data.id, message:'OCC not ready' })
@@ -962,6 +978,40 @@ self.onmessage = async function(e) {
   const { type, id, params } = e.data
   let softenInfo = null
   try {
+    // Project snapshots — the finished B-rep of each body, saved next to the feature
+    // recipe so a reopened project skips replaying every feature (see saveLoad.js).
+    // The recipe stays the source of truth; a body that is missing here, or fails to
+    // restore, is simply rebuilt from it by the app.
+    if (type==='snapshotShapes') {
+      const items = []
+      for (const solidId of params.solidIds) {
+        const shape = shapeStore.get(solidId)
+        if (!shape || shape.isNull) continue
+        try { items.push({ solidId, data: await gzipToBase64(shape.serialize()) }) }
+        catch (err) { console.warn('[cadWorker] snapshot failed for', solidId, err) }
+      }
+      self.postMessage({ type:'result', id, snapshots: items })
+      return
+    }
+    if (type==='restoreShapes') {
+      const meshes = [], failed = []
+      for (const { solidId, data } of params.items) {
+        try {
+          const shape = deserializeShape(await gunzipFromBase64(data))
+          if (!shape || shape.isNull) throw new Error('empty shape')
+          const faces = shape.mesh({ tolerance:0.05, angularTolerance:30 })
+          const edges = stripSeamEdges(shape, shape.meshEdges({ keepMesh:true }))
+          shapeStore.set(solidId, shape)
+          meshes.push({ solidId, faces, edges })
+        } catch (err) {
+          console.warn('[cadWorker] restore failed for', solidId, err)
+          failed.push(solidId)
+        }
+      }
+      self.postMessage({ type:'result', id, restored: { meshes, failed } })
+      return
+    }
+
     if (type==='exportSTL' || type==='exportSTEP') {
       // Shared by both export formats — see gatherAndFuseExportSolids below.
       // Deliberately NOT using replicad's makeCompound (which would keep

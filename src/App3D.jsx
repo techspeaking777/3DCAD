@@ -2377,6 +2377,40 @@ const App3D = forwardRef(function App3D(props, ref) {
     else setSaveAsOpen('sketch')
   }
 
+  // The finished shape of every body, saved beside the feature recipe so reopening
+  // the project can skip replaying every feature (see serializeProject). Cached per
+  // solid.group: a body's group is replaced whenever the worker rebuilds it, so the same
+  // group means the same shape, and an autosave only re-serializes what changed.
+  // Returns null (recipe only) while the worker is mid-operation — its shapes could
+  // then be a step ahead of `features`. `budgetBytes` caps the total (cloud saves go
+  // through a request-size limit); bodies that don't fit are left out and just rebuild.
+  const snapshotCacheRef = useRef(new WeakMap())
+  async function collectShapeSnapshots(budgetBytes = Infinity) {
+    if (cadEngine.pendingCount > 0) return null
+    const topIds = new Set(features
+      .filter(f => f.type !== 'sketch' && f.type !== 'fillet' && f.type !== 'shell' && f.operation !== 'cutout' && !f.joinedInto)
+      .map(f => f.solidId))
+    const wanted = solids.filter(s => s.group && topIds.has(s.id))
+    const cache = snapshotCacheRef.current
+    const missing = wanted.filter(s => !cache.has(s.group))
+    if (missing.length) {
+      const { snapshots } = await cadEngine.snapshotShapes({ solidIds: missing.map(s => s.id) })
+      const dataById = new Map(snapshots.map(x => [x.solidId, x.data]))
+      for (const s of missing) if (dataById.has(s.id)) cache.set(s.group, { solidId: s.id, data: dataById.get(s.id) })
+    }
+    const out = []
+    let used = 0
+    for (const s of wanted) {
+      const hit = cache.get(s.group)
+      if (!hit || used + hit.data.length > budgetBytes) continue
+      used += hit.data.length
+      out.push(hit)
+    }
+    return out
+  }
+  // Cloud saves go through the website's request-size limit: keep the snapshots well under it.
+  const CLOUD_SNAPSHOT_BUDGET = 1_500_000
+
   // Whole-PROJECT save — the feature tree, not just whatever sketch happens
   // to be open (see handleSave/loadFileRef above, which stay scoped to a
   // single sketch's buffer and are only shown while sketching). This is what
@@ -2385,7 +2419,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   async function handleSaveProject(){
     if (canPickSaveLocation()) {
       try {
-        const { status, handle } = await saveProjectFileAs(features, solids, projectName || 'drawing.trc', projectFileHandleRef.current, props.getSheetData?.())
+        const { status, handle } = await saveProjectFileAs(features, solids, projectName || 'drawing.trc', projectFileHandleRef.current, props.getSheetData?.(), () => collectShapeSnapshots())
         if (handle) { projectFileHandleRef.current = handle; updateProjectName(handle.name); markSaved('local') }
         if (status==='saved'||status==='downloaded') flashSaved()
       } catch (err) {
@@ -2406,7 +2440,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   async function handleSaveProjectAs(){
     if (canPickSaveLocation()) {
       try {
-        const { status, handle } = await saveProjectFileAs(features, solids, projectName || 'drawing.trc', null, props.getSheetData?.())
+        const { status, handle } = await saveProjectFileAs(features, solids, projectName || 'drawing.trc', null, props.getSheetData?.(), () => collectShapeSnapshots())
         if (handle) { projectFileHandleRef.current = handle; updateProjectName(handle.name); markSaved('local') }
         if (status==='saved'||status==='downloaded') flashSaved()
       } catch (err) {
@@ -2456,11 +2490,11 @@ const App3D = forwardRef(function App3D(props, ref) {
   // this sequence. Callers are responsible for resetAllToolState() and
   // clearing whichever file-handle/cloud-id ref no longer applies BEFORE
   // calling this, same as handleOpenProject already did inline.
-  async function applyLoadedProject({ features: newFeatures, sheet }) {
+  async function applyLoadedProject({ features: newFeatures, sheet, snapshots }) {
     setFeatures(newFeatures)
     props.onSheetLoaded?.(sheet)
     try {
-      const newSolids = await rebuildProjectFromFeatures(newFeatures)
+      const newSolids = await rebuildProjectFromFeatures(newFeatures, snapshots)
       setSolids(newSolids)
       setLoadError(null)
     } catch (err) {
@@ -2520,7 +2554,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (!cloudLoggedIn) { window.open('/login', '_blank'); return }
     if (cloudProjectIdRef.current) {
       try {
-        const dataObj = JSON.parse(serializeProject(features, solids, props.getSheetData?.()))
+        const dataObj = JSON.parse(serializeProject(features, solids, props.getSheetData?.(), await collectShapeSnapshots(CLOUD_SNAPSHOT_BUDGET).catch(() => null)))
         await updateCloudProject(cloudProjectIdRef.current, undefined, dataObj)
         markSaved('cloud')
         flashSaved('Saved to your account')
@@ -2538,7 +2572,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   async function handleCloudSaveSubmit(name, classId) {
     setCloudSaveOpen(false)
     try {
-      const dataObj = JSON.parse(serializeProject(features, solids, props.getSheetData?.()))
+      const dataObj = JSON.parse(serializeProject(features, solids, props.getSheetData?.(), await collectShapeSnapshots(CLOUD_SNAPSHOT_BUDGET).catch(() => null)))
       const saved = await saveNewCloudProject(name, classId, dataObj)
       cloudProjectIdRef.current = saved.id
       markSaved('cloud')
@@ -2608,12 +2642,19 @@ const App3D = forwardRef(function App3D(props, ref) {
     // still in flight.
     const run = (kind, write) => {
       autosaveChainRef.current = autosaveChainRef.current.then(async () => {
-        let data
-        try { data = serializeProject(features, solids, props.getSheetData?.()) } catch { return }
-        if (data === autosaveBaseRef.current[kind]) return
+        // Unchanged-ness is judged on the recipe alone (what markSaved records);
+        // the body snapshots are attached only when something is actually written.
+        let recipe
+        try { recipe = serializeProject(features, solids, props.getSheetData?.()) } catch { return }
+        if (recipe === autosaveBaseRef.current[kind]) return
         try {
+          let data = recipe
+          try {
+            const snaps = await collectShapeSnapshots(kind === 'cloud' ? CLOUD_SNAPSHOT_BUDGET : Infinity)
+            if (snaps?.length) data = serializeProject(features, solids, props.getSheetData?.(), snaps)
+          } catch { /* snapshots are only a cache — save the recipe without them */ }
           await write(data)
-          autosaveBaseRef.current[kind] = data
+          autosaveBaseRef.current[kind] = recipe
           setAutosaveMsg({ text: 'Autosaved ' + clock(), error: false })
         } catch {
           setAutosaveMsg({ text: 'Autosave paused — press Save', error: true })
@@ -10077,14 +10118,38 @@ const App3D = forwardRef(function App3D(props, ref) {
   // it is skipped (anything that depends on it fails and is skipped too), the
   // rest still loads, and the failures are reported together so the user can
   // fix or delete just those features instead of seeing an empty scene.
-  async function rebuildProjectFromFeatures(loadedFeatures) {
+  //
+  // `snapshots` ([{solidId, data}], only present when they were saved for exactly
+  // these features — see parseProjectData) are the bodies' finished shapes: they are
+  // loaded straight into the worker, and only a body with no usable snapshot is
+  // replayed from its features. Snapshots are a cache, never the source of truth.
+  async function rebuildProjectFromFeatures(loadedFeatures, snapshots = null) {
     const newSolids = []
     const failed = []
+    const t0 = performance.now()
+    const restored = new Map()   // solidId → mesh data, for bodies loaded from a snapshot
+    if (snapshots?.length) {
+      try {
+        const res = await cadEngine.restoreShapes({ items: snapshots })
+        for (const m of res.restored.meshes) restored.set(m.solidId, { faces: m.faces, edges: m.edges })
+        if (res.restored.failed.length) console.warn('[load] snapshots that would not load, rebuilding from features:', res.restored.failed)
+      } catch (err) {
+        console.warn('[load] snapshots could not be used, rebuilding every body from its features:', err)
+      }
+    }
+    const tRestored = performance.now()
+    let rebuiltCount = 0
     for (const feat of loadedFeatures) {
       if (feat.type === 'sketch' || feat.type === 'fillet' || feat.type === 'shell' || feat.operation === 'cutout') continue
       if (feat.joinedInto) continue
       try {
-        const meshData = await rebuildFeatureSolid(feat, loadedFeatures, newSolids)
+        let meshData = restored.get(feat.solidId)
+        if (!meshData) {
+          const tFeat = performance.now()
+          meshData = await rebuildFeatureSolid(feat, loadedFeatures, newSolids)
+          rebuiltCount++
+          console.info(`[load] rebuilt "${feat.name || feat.id}" from its features in ${Math.round(performance.now() - tFeat)} ms`)
+        }
         const group = replicadMeshToThree(meshData, feat.color, feat.solidId)
         newSolids.push({
           ...featureToTempSolid(feat),
@@ -10100,6 +10165,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       setCadError(`${failed.length} feature${failed.length > 1 ? 's' : ''} could not be rebuilt and ${failed.length > 1 ? 'are' : 'is'} missing. ${failed[0]}`)
       setTimeout(() => setCadError(null), 12000)
     }
+    console.info(`[load] ${restored.size} bodies from snapshots in ${Math.round(tRestored - t0)} ms, ${rebuiltCount} rebuilt from features; total ${Math.round(performance.now() - t0)} ms`)
     return newSolids
   }
 
@@ -15781,7 +15847,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           extension={saveAsOpen==='project' ? '.trc' : '.json'}
           onSave={async filename=>{
             setSaveAsOpen(false)
-            if (saveAsOpen==='project') { await saveProjectFileAs(features, solids, filename, null, props.getSheetData?.()); updateProjectName(filename) }
+            if (saveAsOpen==='project') { await saveProjectFileAs(features, solids, filename, null, props.getSheetData?.(), () => collectShapeSnapshots()); updateProjectName(filename) }
             else await saveProjectAs(lines,circles,arcs,splines,dims,filename)
           }}
           onClose={()=>setSaveAsOpen(false)}

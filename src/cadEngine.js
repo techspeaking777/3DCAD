@@ -30,7 +30,7 @@ class CadEngine {
       )
 
       this._worker.onmessage = (e) => {
-        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, soften, softenEdges, filletEdges, filletMax, message } = e.data
+        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, soften, softenEdges, filletEdges, filletMax, snapshots, restored, message } = e.data
 
         if (type === 'ready') {
           this._ready = true
@@ -63,6 +63,8 @@ class CadEngine {
             softenEdges ? { softenEdges } :
             filletEdges ? { filletEdges } :
             filletMax !== undefined ? { filletMax } :
+            snapshots ? { snapshots } :
+            restored ? { restored } :
             { faces, edges, ...(soften ? { soften } : {}) }
           )
         } else if (type === 'error') {
@@ -269,6 +271,19 @@ class CadEngine {
   async computeOrthoViews(params) {
     return this._send('computeOrthoViews', params)
   }
+
+  /** Each listed body's finished shape as compressed text, for saving next to the feature recipe — params: {solidIds:[id,...]}. Resolves {snapshots:[{solidId, data}]}; a body the worker doesn't hold is left out. */
+  async snapshotShapes(params) {
+    return this._send('snapshotShapes', params)
+  }
+
+  /** Loads saved snapshots back into the worker's shape store and meshes them — params: {items:[{solidId, data}]}. Resolves {restored:{meshes:[{solidId, faces, edges}], failed:[solidId]}}; a failed body must be rebuilt from its features. */
+  async restoreShapes(params) {
+    return this._send('restoreShapes', params)
+  }
+
+  /** How many requests the worker is still working on — a snapshot taken while this is above 0 could be out of step with the app's own state. */
+  get pendingCount() { return this._pending.size }
 
   /** True once OpenCascade has finished loading. */
   get isReady() { return this._ready }

@@ -389,7 +389,7 @@ function dxfLayer(style) {
 }
 
 function dxfLtype(style) {
-  return style==='dashed' ? '\n6\nDASHED' : ''
+  return style==='dashed' ? '\n6\nDASHED' : style==='center' ? '\n6\nCENTER' : ''
 }
 
 function dxfLine(x1,y1,x2,y2,style) {

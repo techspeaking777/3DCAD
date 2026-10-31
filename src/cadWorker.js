@@ -352,6 +352,60 @@ function hlrViewEdges(shapes, normal, uAxis, withHidden) {
   return { visible, hidden }
 }
 
+// The axes that deserve centre lines on a drawing: holes, bosses and
+// round-ended slots. Every cylindrical face is grouped by its axis line and
+// radius; a group that wraps at least half way round (a slot end is 180°, a
+// hole 360° — often as two half faces) counts, a fillet (90°) doesn't.
+// Returns [{p0, p1, dir, r}] — the axis from end to end of the round part.
+function roundAxes(shapes) {
+  const groups = []
+  for (const shape of shapes) {
+    for (const face of shape.faces) {
+      if (face.geomType !== 'CYLINDRE') continue
+      const cyl = face.surface.wrapped.Cylinder()
+      const ax = cyl.Axis(), d = ax.Direction(), l = ax.Location()
+      const dir = new Vector([d.X(), d.Y(), d.Z()]).normalize()
+      const loc = new Vector([l.X(), l.Y(), l.Z()])
+      const r = cyl.Radius()
+      const { uMin, uMax, vMin, vMax } = face.UVBounds
+      const a = loc.add(dir.multiply(vMin)), b = loc.add(dir.multiply(vMax))
+      const g = groups.find(g =>
+        Math.abs(Math.abs(g.dir.dot(dir)) - 1) < 1e-6 && Math.abs(g.r - r) < 0.01 &&
+        a.sub(g.p0).cross(g.dir).Length < 0.01)
+      // Extent of the round part measured along the group's own axis.
+      if (!g) { groups.push({ dir, p0: a, r, span: uMax - uMin, tMin: Math.min(0, b.sub(a).dot(dir)), tMax: Math.max(0, b.sub(a).dot(dir)) }); continue }
+      g.span += uMax - uMin
+      for (const p of [a, b]) {
+        const t = p.sub(g.p0).dot(g.dir)
+        g.tMin = Math.min(g.tMin, t); g.tMax = Math.max(g.tMax, t)
+      }
+    }
+  }
+  return groups
+    .filter(g => g.span >= Math.PI - 0.01)
+    .map(g => ({ dir: g.dir, r: g.r, p0: g.p0.add(g.dir.multiply(g.tMin)), p1: g.p0.add(g.dir.multiply(g.tMax)) }))
+}
+
+// One view's centre-line data (mm, view frame): an axis pointing at the
+// viewer becomes a centre mark {kind:'mark', cx, cy, r}; one lying across
+// the view becomes an axis line {kind:'axis', x1,y1,x2,y2, r}. Tilted axes
+// are left out. The drawn length/overhang is decided at paper scale later.
+function centresForView(axes, normal, uAxis, vAxis) {
+  const project = v => ({ x: v.dot(uAxis), y: v.dot(vAxis) })
+  const out = []
+  for (const a of axes) {
+    const along = Math.abs(a.dir.dot(normal))
+    if (along > 0.999) {
+      const c = project(a.p0)
+      out.push({ kind: 'mark', cx: c.x, cy: c.y, r: a.r })
+    } else if (along < 0.001) {
+      const p = project(a.p0), q = project(a.p1)
+      if (Math.hypot(q.x - p.x, q.y - p.y) > 0.01) out.push({ kind: 'axis', x1: p.x, y1: p.y, x2: q.x, y2: q.y, r: a.r })
+    }
+  }
+  return out
+}
+
 // If every point lies within 0.01 mm of one straight line, the segment
 // spanning them; otherwise null.
 function straightRun(points) {
@@ -1167,10 +1221,11 @@ self.onmessage = async function(e) {
         bottom: { uAxis: new Vector([1,0,0]),  vAxis: new Vector([0,-1,0]), normal: new Vector([0,0,-1]) },
       }
       const views = {}
+      const axes = params.centres === false ? [] : roundAxes(params.solidIds.map(sid => shapeStore.get(sid)).filter(Boolean))
       for (const viewName of params.views) {
         const basis = VIEW_BASES[viewName]
         if (!basis) throw new Error(`computeOrthoViews: unknown view "${viewName}"`)
-        const { uAxis, normal } = basis
+        const { uAxis, vAxis, normal } = basis
         // The camera sits at the world origin (not a per-face center like
         // exportFaceDXF) so every solid's edges land in ONE shared frame per
         // view — required for the client-side layout step to bbox solids
@@ -1184,6 +1239,7 @@ self.onmessage = async function(e) {
         const { visible, hidden } = hlrViewEdges(shapes, normal, uAxis, params.hidden !== false)
         hlrEdgesToEntities(visible, out, null)
         hlrEdgesToEntities(hidden, out, 'dashed')
+        out.centres = centresForView(axes, normal, uAxis, vAxis)
         views[viewName] = out
       }
       self.postMessage({ type:'result', id, orthoViews: { views } })

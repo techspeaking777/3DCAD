@@ -1,0 +1,81 @@
+// A tiny single-stroke capital font for drawing annotations (view labels,
+// scale notes). Pure JS, no font download: every glyph is a few straight
+// strokes on a 4-wide × 6-high grid (baseline y=0, y up), so text comes out
+// as ordinary line entities that export to DXF/PDF like any other geometry.
+
+const O = [[1, 0], [0, 1], [0, 5], [1, 6], [3, 6], [4, 5], [4, 1], [3, 0], [1, 0]]
+const P = [[0, 0], [0, 6], [3, 6], [4, 5], [4, 4], [3, 3], [0, 3]]
+
+const GLYPHS = {
+  A: [[[0, 0], [0, 4], [2, 6], [4, 4], [4, 0]], [[0, 3], [4, 3]]],
+  B: [[[0, 0], [0, 6], [3, 6], [4, 5], [4, 4], [3, 3], [0, 3]], [[3, 3], [4, 2], [4, 1], [3, 0], [0, 0]]],
+  C: [[[4, 5], [3, 6], [1, 6], [0, 5], [0, 1], [1, 0], [3, 0], [4, 1]]],
+  D: [[[0, 0], [0, 6], [2, 6], [4, 4], [4, 2], [2, 0], [0, 0]]],
+  E: [[[4, 6], [0, 6], [0, 0], [4, 0]], [[0, 3], [3, 3]]],
+  F: [[[4, 6], [0, 6], [0, 0]], [[0, 3], [3, 3]]],
+  G: [[[4, 5], [3, 6], [1, 6], [0, 5], [0, 1], [1, 0], [3, 0], [4, 1], [4, 3], [2, 3]]],
+  H: [[[0, 0], [0, 6]], [[4, 0], [4, 6]], [[0, 3], [4, 3]]],
+  I: [[[1, 6], [3, 6]], [[2, 6], [2, 0]], [[1, 0], [3, 0]]],
+  J: [[[4, 6], [4, 1], [3, 0], [1, 0], [0, 1]]],
+  K: [[[0, 0], [0, 6]], [[4, 6], [0, 2]], [[1, 3], [4, 0]]],
+  L: [[[0, 6], [0, 0], [4, 0]]],
+  M: [[[0, 0], [0, 6], [2, 3], [4, 6], [4, 0]]],
+  N: [[[0, 0], [0, 6], [4, 0], [4, 6]]],
+  O: [O],
+  P: [P],
+  Q: [O, [[2, 2], [4, 0]]],
+  R: [P, [[2, 3], [4, 0]]],
+  S: [[[4, 5], [3, 6], [1, 6], [0, 5], [0, 4], [1, 3], [3, 3], [4, 2], [4, 1], [3, 0], [1, 0], [0, 1]]],
+  T: [[[0, 6], [4, 6]], [[2, 6], [2, 0]]],
+  U: [[[0, 6], [0, 1], [1, 0], [3, 0], [4, 1], [4, 6]]],
+  V: [[[0, 6], [2, 0], [4, 6]]],
+  W: [[[0, 6], [1, 0], [2, 4], [3, 0], [4, 6]]],
+  X: [[[0, 0], [4, 6]], [[0, 6], [4, 0]]],
+  Y: [[[0, 6], [2, 3], [4, 6]], [[2, 3], [2, 0]]],
+  Z: [[[0, 6], [4, 6], [0, 0], [4, 0]]],
+  0: [O, [[0.5, 1], [3.5, 5]]],
+  1: [[[1, 5], [2, 6], [2, 0]], [[1, 0], [3, 0]]],
+  2: [[[0, 5], [1, 6], [3, 6], [4, 5], [4, 4], [0, 0], [4, 0]]],
+  3: [[[0, 5], [1, 6], [3, 6], [4, 5], [4, 4], [3, 3], [2, 3]], [[3, 3], [4, 2], [4, 1], [3, 0], [1, 0], [0, 1]]],
+  4: [[[3, 0], [3, 6], [0, 2], [4, 2]]],
+  5: [[[4, 6], [0, 6], [0, 3], [3, 3], [4, 2], [4, 1], [3, 0], [1, 0], [0, 1]]],
+  6: [[[4, 5], [3, 6], [1, 6], [0, 5], [0, 1], [1, 0], [3, 0], [4, 1], [4, 2], [3, 3], [0, 3]]],
+  7: [[[0, 6], [4, 6], [1, 0]]],
+  8: [[[1, 3], [0, 4], [0, 5], [1, 6], [3, 6], [4, 5], [4, 4], [3, 3], [1, 3], [0, 2], [0, 1], [1, 0], [3, 0], [4, 1], [4, 2], [3, 3]]],
+  9: [[[4, 3], [1, 3], [0, 4], [0, 5], [1, 6], [3, 6], [4, 5], [4, 1], [3, 0], [1, 0], [0, 1]]],
+  ':': [[[2, 1], [2, 1.6]], [[2, 4], [2, 4.6]]],
+  '.': [[[2, 0], [2, 0.6]]],
+  '-': [[[1, 3], [3, 3]]],
+  '/': [[[0, 0], [4, 6]]],
+}
+
+const ADVANCE = 6   // grid units per character (4 wide + 2 spacing)
+
+/** Width in mm of `text` at cap height `heightMm`. */
+export function strokeTextWidth(text, heightMm) {
+  return Math.max(0, text.length * ADVANCE - 2) * heightMm / 6
+}
+
+/**
+ * `text` as line segments in mm, y up. (x, y) is the baseline point the
+ * `align` ('left' | 'center' | 'right') refers to. Unknown characters
+ * become spaces; lower case is drawn as capitals. Each segment carries
+ * `text: true` so the Drawing tab can draw it without end-point dots.
+ */
+export function strokeTextLines(text, x, y, heightMm, align = 'left') {
+  const k = heightMm / 6
+  const w = strokeTextWidth(text, heightMm)
+  const x0 = align === 'center' ? x - w / 2 : align === 'right' ? x - w : x
+  const out = []
+  ;[...text.toUpperCase()].forEach((ch, i) => {
+    const strokes = GLYPHS[ch]
+    if (!strokes) return
+    const ox = x0 + i * ADVANCE * k
+    for (const s of strokes) {
+      for (let j = 1; j < s.length; j++) {
+        out.push({ x1: ox + s[j - 1][0] * k, y1: y + s[j - 1][1] * k, x2: ox + s[j][0] * k, y2: y + s[j][1] * k, text: true })
+      }
+    }
+  })
+  return out
+}

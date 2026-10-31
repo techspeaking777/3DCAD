@@ -13,6 +13,8 @@ export default function OrthoViewsPanel({ getSolidIds, pageConfig, onGenerate, o
   const [selectedSolids, setSelectedSolids] = useState([])
   const [selectedViews, setSelectedViews] = useState(DEFAULT_VIEWS)
   const [showHidden, setShowHidden] = useState(true)
+  const [centreLines, setCentreLines] = useState(true)
+  const [labels, setLabels] = useState(true)
   const [scaleChoice, setScaleChoice] = useState('auto')   // 'auto' or one of DRAWING_SCALES
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -38,11 +40,11 @@ export default function OrthoViewsPanel({ getSolidIds, pageConfig, onGenerate, o
     setBusy(true)
     setError(null)
     try {
-      const res = await cadEngine.computeOrthoViews({ solidIds: selectedSolids, views: selectedViews, hidden: showHidden })
+      const res = await cadEngine.computeOrthoViews({ solidIds: selectedSolids, views: selectedViews, hidden: showHidden, centres: centreLines })
       const views = {}
       for (const [name, v] of Object.entries(res.orthoViews.views)) views[name] = tidyView(v)
-      const scale = scaleChoice === 'auto' ? autoScale(views, pageConfig) : scaleChoice
-      const { geo, w, h } = layoutOnSheet(views, scale)
+      const scale = scaleChoice === 'auto' ? autoScale(views, pageConfig, { labels }) : scaleChoice
+      const { geo, w, h } = layoutOnSheet(views, scale, { centreLines, labels, pageConfig })
       onGenerate(mmViewToPx(geo), { scale, wMm: w, hMm: h })
     } catch (err) {
       setError(err.message || 'Failed to generate views')
@@ -128,10 +130,19 @@ export default function OrthoViewsPanel({ getSolidIds, pageConfig, onGenerate, o
               : 'Views are centred on the page at this scale.'}
           </div>
 
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12, color: '#ddd', marginBottom: 18 }}>
-            <input type="checkbox" checked={showHidden} onChange={() => setShowHidden(v => !v)} />
-            <span>Show hidden edges as dashed lines</span>
-          </label>
+          <div style={{ fontSize: 10, letterSpacing: '0.08em', color: '#888', marginBottom: 8 }}>SHOW</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 18 }}>
+            {[
+              [showHidden, setShowHidden, 'Hidden edges as dashed lines'],
+              [centreLines, setCentreLines, 'Centre lines on holes and round parts'],
+              [labels, setLabels, 'View names and the scale'],
+            ].map(([on, set, text]) => (
+              <label key={text} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12, color: '#ddd' }}>
+                <input type="checkbox" checked={on} onChange={() => set(v => !v)} />
+                <span>{text}</span>
+              </label>
+            ))}
+          </div>
 
           {error && (
             <div style={{ fontSize: 11, color: '#ff6b6b', marginBottom: 12, wordBreak: 'break-word' }}>

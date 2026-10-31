@@ -7,6 +7,7 @@
 // same mm/CCW/Y-up convention (proven already by exportFaceDXF).
 
 import { mmToPx } from '../constants.js'
+import { strokeTextLines } from './strokeFont.js'
 
 const GAP_MM = 20
 const VIEW_PRIORITY = ['front', 'top', 'right', 'left', 'back', 'bottom']
@@ -33,6 +34,9 @@ function translateView(view, dx, dy) {
     circles: view.circles.map(c => ({ ...c, cx: c.cx + dx, cy: c.cy + dy })),
     arcs: view.arcs.map(a => ({ ...a, cx: a.cx + dx, cy: a.cy + dy })),
     splines: (view.splines || []).map(s => ({ ...s, points: s.points.map(p => ({ x: p.x + dx, y: p.y + dy })) })),
+    centres: (view.centres || []).map(c => c.kind === 'mark'
+      ? { ...c, cx: c.cx + dx, cy: c.cy + dy }
+      : { ...c, x1: c.x1 + dx, y1: c.y1 + dy, x2: c.x2 + dx, y2: c.y2 + dy }),
   }
 }
 
@@ -50,11 +54,12 @@ function translateView(view, dx, dy) {
  * left-aligned — a deliberately unsophisticated fallback for the case where
  * there's no shared axis to align against, not a textbook-correct standard.
  *
- * Returns flat {lines,circles,arcs,splines} in mm, still untranslated to px.
+ * Returns flat {lines,circles,arcs,splines,centres} in mm, still untranslated
+ * to px, plus `boxes`: each view's {minX,minY,maxX,maxY} on the sheet.
  */
 export function layoutViews(viewsData, gapMm = GAP_MM) {
   const present = VIEW_PRIORITY.filter(v => viewsData[v])
-  if (present.length === 0) return { lines: [], circles: [], arcs: [], splines: [] }
+  if (present.length === 0) return { lines: [], circles: [], arcs: [], splines: [], centres: [], boxes: {} }
 
   const boxes = {}
   for (const v of present) boxes[v] = bboxOf(viewsData[v])
@@ -81,7 +86,7 @@ export function layoutViews(viewsData, gapMm = GAP_MM) {
     }
   }
 
-  const merged = { lines: [], circles: [], arcs: [], splines: [] }
+  const merged = { lines: [], circles: [], arcs: [], splines: [], centres: [], boxes: {} }
   for (const v of present) {
     const dx = pagePos[v].x - boxes[v].minX
     const dy = pagePos[v].y - boxes[v].minY
@@ -90,6 +95,9 @@ export function layoutViews(viewsData, gapMm = GAP_MM) {
     merged.circles.push(...translated.circles)
     merged.arcs.push(...translated.arcs)
     merged.splines.push(...translated.splines)
+    merged.centres.push(...translated.centres)
+    const b = boxes[v]
+    merged.boxes[v] = { minX: b.minX + dx, minY: b.minY + dy, maxX: b.maxX + dx, maxY: b.maxY + dy }
   }
   return merged
 }
@@ -170,7 +178,7 @@ export function tidyView(view) {
       keptArcs.push(a)
     }
   }
-  return { lines: keptLines, circles: keptCircles, arcs: keptArcs, splines: view.splines || [] }
+  return { lines: keptLines, circles: keptCircles, arcs: keptArcs, splines: view.splines || [], centres: view.centres || [] }
 }
 
 // Standard drawing scales, biggest first. 2 means 2:1 (twice real size).
@@ -190,16 +198,65 @@ export function pageAreaMm(pageConfig) {
   return { w: w - 2 * m, h: h - 2 * m }
 }
 
+const VIEW_TITLES = { front: 'FRONT VIEW', back: 'BACK VIEW', left: 'LEFT VIEW', right: 'RIGHT VIEW', top: 'TOP VIEW', bottom: 'BOTTOM VIEW' }
+const LABEL_H = 3.5    // mm on paper — standard annotation height
+const LABEL_GAP = 4    // mm between a view and its label
+const CL_OVERHANG = 3  // mm a centre line runs past the round part it marks
+
+// Centre-line entities (style 'center') in paper mm from the worker's
+// per-view axes, already moved to paper coordinates by `toPaper`. A mark is
+// a cross through the centre; an axis is a line along the round part.
+// Each runs CL_OVERHANG past the edge. Coincident ones are drawn once.
+function centreLineEntities(centres, toPaper, scale) {
+  const out = []
+  const seen = new Set()
+  const key = l => [l.x1, l.y1, l.x2, l.y2].map(v => v.toFixed(2)).join(',')
+  const push = l => {
+    const k = key(l), k2 = key({ x1: l.x2, y1: l.y2, x2: l.x1, y2: l.y1 })
+    if (seen.has(k) || seen.has(k2)) return
+    seen.add(k)
+    out.push({ ...l, style: 'center' })
+  }
+  // Biggest round part per centre wins (a counterbore's two radii share one mark).
+  const marks = new Map()
+  for (const c of centres) {
+    if (c.kind !== 'mark') continue
+    const p = toPaper({ x: c.cx, y: c.cy })
+    const k = `${p.x.toFixed(2)},${p.y.toFixed(2)}`
+    const r = c.r * scale
+    if (!marks.has(k) || marks.get(k).r < r) marks.set(k, { ...p, r })
+  }
+  for (const m of marks.values()) {
+    if (m.r < 0.5) continue
+    const h = m.r + CL_OVERHANG
+    push({ x1: m.x - h, y1: m.y, x2: m.x + h, y2: m.y })
+    push({ x1: m.x, y1: m.y - h, x2: m.x, y2: m.y + h })
+  }
+  for (const c of centres) {
+    if (c.kind !== 'axis' || c.r * scale < 0.5) continue
+    const a = toPaper({ x: c.x1, y: c.y1 }), b = toPaper({ x: c.x2, y: c.y2 })
+    const len = Math.hypot(b.x - a.x, b.y - a.y)
+    const ux = (b.x - a.x) / len, uy = (b.y - a.y) / len
+    push({ x1: a.x - ux * CL_OVERHANG, y1: a.y - uy * CL_OVERHANG, x2: b.x + ux * CL_OVERHANG, y2: b.y + uy * CL_OVERHANG })
+  }
+  return out
+}
+
 /**
  * Lays the views out at drawing scale `scale` and centres the block on the
  * sheet origin (the Drawing tab's page is centred there too). The gap between
- * views stays GAP_MM on paper whatever the scale. Returns mm geometry plus
- * the block's paper size.
+ * views stays GAP_MM on paper whatever the scale. Options: `centreLines`
+ * adds chain-line centre marks/axes, `labels` writes "FRONT VIEW" etc. under
+ * each view, and with `labels` plus `pageConfig` a "SCALE 2:1" note goes in
+ * the page's bottom-right corner. Returns mm geometry plus the block's paper
+ * size (labels included).
  */
-export function layoutOnSheet(viewsData, scale) {
+export function layoutOnSheet(viewsData, scale, { centreLines = false, labels = false, pageConfig = null } = {}) {
   const laid = layoutViews(viewsData, GAP_MM / scale)
   const box = bboxOf(laid)
-  const cx = (box.minX + box.maxX) / 2, cy = (box.minY + box.maxY) / 2
+  // Room for the labels under the lowest views, so the block stays centred.
+  const below = labels ? (LABEL_GAP + LABEL_H) / scale : 0
+  const cx = (box.minX + box.maxX) / 2, cy = (box.minY - below + box.maxY) / 2
   const s = p => ({ x: (p.x - cx) * scale, y: (p.y - cy) * scale })
   const geo = {
     lines: laid.lines.map(l => {
@@ -210,15 +267,26 @@ export function layoutOnSheet(viewsData, scale) {
     arcs: laid.arcs.map(a => { const p = s({ x: a.cx, y: a.cy }); return { ...a, cx: p.x, cy: p.y, r: a.r * scale } }),
     splines: laid.splines.map(sp => ({ ...sp, points: sp.points.map(s) })),
   }
-  return { geo, w: box.w * scale, h: box.h * scale }
+  if (centreLines) geo.lines.push(...centreLineEntities(laid.centres, s, scale))
+  if (labels) {
+    for (const [v, b] of Object.entries(laid.boxes)) {
+      const lo = s({ x: (b.minX + b.maxX) / 2, y: b.minY })
+      geo.lines.push(...strokeTextLines(VIEW_TITLES[v], lo.x, lo.y - LABEL_GAP - LABEL_H, LABEL_H, 'center'))
+    }
+    if (pageConfig) {
+      const area = pageAreaMm(pageConfig)
+      geo.lines.push(...strokeTextLines(`SCALE ${scaleLabel(scale)}`, area.w / 2 - 3, -area.h / 2 + 3, LABEL_H, 'right'))
+    }
+  }
+  return { geo, w: box.w * scale, h: box.h * scale + (labels ? LABEL_GAP + LABEL_H : 0) }
 }
 
 // The biggest standard scale at which the views fit the page's drawing area
 // (with a little breathing room); the smallest scale if nothing fits.
-export function autoScale(viewsData, pageConfig) {
+export function autoScale(viewsData, pageConfig, opts = {}) {
   const area = pageAreaMm(pageConfig)
   for (const s of DRAWING_SCALES) {
-    const { w, h } = layoutOnSheet(viewsData, s)
+    const { w, h } = layoutOnSheet(viewsData, s, { labels: opts.labels })
     if (w <= area.w * 0.9 && h <= area.h * 0.9) return s
   }
   return DRAWING_SCALES[DRAWING_SCALES.length - 1]
@@ -235,8 +303,9 @@ export function autoScale(viewsData, pageConfig) {
  * parseDXF converts LWPOLYLINE vertices.
  */
 export function mmViewToPx({ lines, circles, arcs, splines }) {
-  // Hidden edges arrive with style:'dashed' — keep it.
-  const st = e => (e.style ? { style: e.style } : {})
+  // Keep style ('dashed' hidden edges, 'center' centre lines) and the
+  // lettering flag.
+  const st = e => ({ ...(e.style ? { style: e.style } : {}), ...(e.text ? { text: true } : {}) })
   return {
     lines: lines.map(l => ({
       x1: mmToPx(l.x1), y1: -mmToPx(l.y1), x2: mmToPx(l.x2), y2: -mmToPx(l.y2), ...st(l),

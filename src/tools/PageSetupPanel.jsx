@@ -116,6 +116,11 @@ export default function PageSetupPanel({ lines, circles, arcs, splines, dims=[],
           doc.setDrawColor(30, 30, 30)
           doc.setLineWidth(defaultLW)
           doc.setLineDashPattern([1.5, 1], 0)
+        } else if (entity?.style === 'center') {
+          // Chain line (long dash, short dash) — centre lines, thin
+          doc.setDrawColor(30, 30, 30)
+          doc.setLineWidth(defaultLW * 0.6)
+          doc.setLineDashPattern([4, 1, 0.8, 1], 0)
         } else {
           doc.setDrawColor(30, 30, 30)
           doc.setLineWidth(defaultLW)

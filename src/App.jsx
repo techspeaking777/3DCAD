@@ -1116,6 +1116,11 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       ctx.strokeStyle = baseColor
       ctx.lineWidth = baseLineWidth
       ctx.setLineDash([8/sc, 4/sc])
+    } else if (s==='center') {
+      // Chain line for centre lines: long dash, gap, short dash, gap — thin
+      ctx.strokeStyle = baseColor
+      ctx.lineWidth = Math.min(baseLineWidth, 0.9/sc)
+      ctx.setLineDash([14/sc, 3/sc, 3/sc, 3/sc])
     } else {
       ctx.strokeStyle = baseColor
       ctx.lineWidth = baseLineWidth
@@ -1203,7 +1208,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       const baseLW=(isDelTarget||isOffSel||isMirSel||isMCSel||isRCSel||isRzSel||isFiSel?3:isOffHov||isMirHov||isMCHov||isRCHov||isRzHov||isFiHov?2:1.5)/sc
       applyEntityStyle(ctx,line,sc,color,baseLW)
       ctx.beginPath();ctx.moveTo(line.x1,line.y1);ctx.lineTo(line.x2,line.y2);ctx.stroke();ctx.setLineDash([])
-      ;[{x:line.x1,y:line.y1},{x:line.x2,y:line.y2}].forEach(p=>{
+      // No end dots on lettering (strokeFont text) or centre lines — they'd blot them out
+      if (!line.text&&line.style!=='center') [{x:line.x1,y:line.y1},{x:line.x2,y:line.y2}].forEach(p=>{
         ctx.beginPath();ctx.arc(p.x,p.y,2/sc,0,Math.PI*2);ctx.fillStyle=color;ctx.fill()
       })
     })

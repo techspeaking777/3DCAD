@@ -17,6 +17,9 @@
 //            `sweep` radians (canvas angles, increasing = clockwise on screen);
 //            reach = how far each bounding line runs out from the vertex, so
 //            extension lines can bridge the gap to the arc.
+//   hole     {cx,cy,r, angle, count}         hole callout: "4× ⌀10" on a leader
+//   leader   {x1,y1, x2,y2, text}            note: arrow at (x1,y1), bend at
+//            (x2,y2), then a short shoulder with the typed text
 // Any kind may carry `scale` (the drawing scale of the view it measures —
 // the shown value is divided by it) and `text` (typed override).
 
@@ -34,7 +37,12 @@ export function dimValueText(dim, style = DEFAULT_DIM_STYLE) {
     return Number(s) === 0 ? (0).toFixed(d) : s   // never "-0"
   }
   if (dim.kind === 'angle') return fmt(dim.sweep * 180 / Math.PI) + '°'
+  if (dim.kind === 'leader') return ''
   const sc = dim.scale || 1
+  if (dim.kind === 'hole') {
+    const n = dim.count > 1 ? `${dim.count}× ` : ''
+    return n + '⌀' + fmt(pxToMm(dim.r * 2) / sc) + (style.units ? ' mm' : '')
+  }
   let mm
   if (dim.kind === 'diameter') mm = pxToMm(dim.r * 2) / sc
   else if (dim.kind === 'radius') mm = pxToMm(dim.r) / sc
@@ -177,6 +185,18 @@ export function dimPrimitives(dim, style = DEFAULT_DIM_STYLE) {
     } else {
       leader(out, dim, text, S)
     }
+  } else if (dim.kind === 'hole') {
+    leader(out, dim, text, S)
+  } else if (dim.kind === 'leader') {
+    // Note: arrow at the tip, a line to the bend, a shoulder carrying the text.
+    const note = dim.text || ''
+    const dx = dim.x1 - dim.x2, dy = dim.y1 - dim.y2, len = Math.hypot(dx, dy)
+    if (len > 1e-6) out.arrows.push(arrow(dim.x1, dim.y1, dx / len, dy / len, S.arr))
+    out.lines.push({ x1: dim.x1, y1: dim.y1, x2: dim.x2, y2: dim.y2 })
+    const side = dim.x2 >= dim.x1 ? 1 : -1
+    const shoulder = strokeTextWidth(note, S.h) + mmToPx(2)
+    out.lines.push({ x1: dim.x2, y1: dim.y2, x2: dim.x2 + side * shoulder, y2: dim.y2 })
+    out.lines.push(...textLines(note, dim.x2 + side * shoulder / 2, dim.y2, 0, S.h, 'center', S.lift))
   } else if (dim.kind === 'angle') {
     const { cx, cy, start, sweep, r } = dim
     const end = start + sweep
@@ -263,6 +283,71 @@ export function angleDimFromLines(l1, l2, mouse) {
   }
   const r = Math.max(mmToPx(4), Math.hypot(mouse.x - cx, mouse.y - cy))
   return { kind: 'angle', cx, cy, start, sweep, r, reach: [reach(la, start), reach(lb, endRaw)] }
+}
+
+// Gap from a view's edge to an automatic dimension line (paper mm). Below a
+// view the dimension also clears its "FRONT VIEW" label.
+const AUTO_SIDE_MM = 8
+const AUTO_BELOW_MM = 15
+
+/**
+ * Overall-size dimensions for generated orthographic views — entities tagged
+ * with `view` (front/top/…), as layoutOnSheet makes them. With a front view:
+ * its width (below) and height (left), plus the depth once — on the top view
+ * (left), else on the right view (below) — so no size is shown twice. With
+ * no front view every view gets its width and height. Lettering and centre
+ * lines are ignored. Returns new `ortho` dims (world px), each carrying the
+ * view's `scale`.
+ */
+export function overallDimsForViews({ lines = [], circles = [], arcs = [], splines = [] }) {
+  const byView = {}
+  const add = (e, pts) => {
+    if (!e.view || e.text || e.style === 'center') return
+    const v = byView[e.view] ||= { pts: [], scale: e.viewScale || 1 }
+    v.pts.push(...pts)
+  }
+  for (const l of lines) add(l, [{ x: l.x1, y: l.y1 }, { x: l.x2, y: l.y2 }])
+  for (const c of circles) add(c, [{ x: c.cx - c.r, y: c.cy }, { x: c.cx + c.r, y: c.cy }, { x: c.cx, y: c.cy - c.r }, { x: c.cx, y: c.cy + c.r }])
+  for (const a of arcs) {
+    const pts = [a.startAngle, a.endAngle].map(t => ({ x: a.cx + a.r * Math.cos(t), y: a.cy + a.r * Math.sin(t) }))
+    const TWO = 2 * Math.PI, span = ((a.endAngle - a.startAngle) % TWO + TWO) % TWO
+    for (let q = 0; q < 4; q++) {
+      const t = q * Math.PI / 2
+      if (((t - a.startAngle) % TWO + TWO) % TWO <= span) pts.push({ x: a.cx + a.r * Math.cos(t), y: a.cy + a.r * Math.sin(t) })
+    }
+    add(a, pts)
+  }
+  for (const s of splines) add(s, s.points)
+
+  const tol = mmToPx(0.05)
+  const width = (v, below) => {
+    const p = byView[v].pts
+    const minX = Math.min(...p.map(q => q.x)), maxX = Math.max(...p.map(q => q.x)), maxY = Math.max(...p.map(q => q.y)), minY = Math.min(...p.map(q => q.y))
+    // The lowest point on each side, so the extension lines are short.
+    const pick = (onSide) => p.filter(onSide).reduce((b, q) => (below ? q.y > b.y : q.y < b.y) ? q : b)
+    const a = pick(q => q.x <= minX + tol), b = pick(q => q.x >= maxX - tol)
+    if (maxX - minX < tol) return null
+    return { kind: 'ortho', orient: 'h', x1: a.x, y1: a.y, x2: b.x, y2: b.y, pos: below ? maxY + mmToPx(AUTO_BELOW_MM) : minY - mmToPx(AUTO_SIDE_MM), scale: byView[v].scale }
+  }
+  const height = v => {
+    const p = byView[v].pts
+    const minX = Math.min(...p.map(q => q.x)), minY = Math.min(...p.map(q => q.y)), maxY = Math.max(...p.map(q => q.y))
+    const pick = (onSide) => p.filter(onSide).reduce((b, q) => q.x < b.x ? q : b)
+    const a = pick(q => q.y <= minY + tol), b = pick(q => q.y >= maxY - tol)
+    if (maxY - minY < tol) return null
+    return { kind: 'ortho', orient: 'v', x1: a.x, y1: a.y, x2: b.x, y2: b.y, pos: minX - mmToPx(AUTO_SIDE_MM), scale: byView[v].scale }
+  }
+
+  const out = []
+  if (byView.front) {
+    out.push(width('front', true), height('front'))
+    if (byView.top) out.push(height('top'))
+    else if (byView.right) out.push(width('right', true))
+    else if (byView.left) out.push(width('left', true))
+  } else {
+    for (const v of Object.keys(byView)) out.push(width(v, true), height(v))
+  }
+  return out.filter(Boolean)
 }
 
 /**

@@ -91,10 +91,12 @@ export function layoutViews(viewsData, gapMm = GAP_MM) {
     const dx = pagePos[v].x - boxes[v].minX
     const dy = pagePos[v].y - boxes[v].minY
     const translated = translateView(viewsData[v], dx, dy)
-    merged.lines.push(...translated.lines)
-    merged.circles.push(...translated.circles)
-    merged.arcs.push(...translated.arcs)
-    merged.splines.push(...translated.splines)
+    // `view` tags each entity with its view name (Auto sizes measures per view).
+    const tag = e => ({ ...e, view: v })
+    merged.lines.push(...translated.lines.map(tag))
+    merged.circles.push(...translated.circles.map(tag))
+    merged.arcs.push(...translated.arcs.map(tag))
+    merged.splines.push(...translated.splines.map(tag))
     merged.centres.push(...translated.centres)
     const b = boxes[v]
     merged.boxes[v] = { minX: b.minX + dx, minY: b.minY + dy, maxX: b.maxX + dx, maxY: b.maxY + dy }
@@ -306,10 +308,10 @@ export function autoScale(viewsData, pageConfig, opts = {}) {
  */
 export function mmViewToPx({ lines, circles, arcs, splines }) {
   // Keep style ('dashed' hidden edges, 'center' centre lines), the lettering
-  // flag and the view's drawing scale (read by the DIM tool).
+  // flag, the view's drawing scale (read by the DIM tool) and its name.
   const st = e => ({
     ...(e.style ? { style: e.style } : {}), ...(e.text ? { text: true } : {}),
-    ...(e.viewScale ? { viewScale: e.viewScale } : {}),
+    ...(e.viewScale ? { viewScale: e.viewScale } : {}), ...(e.view ? { view: e.view } : {}),
   })
   return {
     lines: lines.map(l => ({

@@ -22,7 +22,7 @@ import PageSetupPanel from './tools/PageSetupPanel.jsx'
 import GuidePanel from './tools/GuidePanel.jsx'
 import OrthoViewsPanel from './tools/OrthoViewsPanel.jsx'
 import { pageAreaMm } from './tools/orthoViewsMath.js'
-import { DEFAULT_DIM_STYLE, dimPrimitives, distToDim, angleDimFromLines, orthoDimFromPoints } from './tools/dimGeometry.js'
+import { DEFAULT_DIM_STYLE, dimPrimitives, distToDim, angleDimFromLines, orthoDimFromPoints, overallDimsForViews } from './tools/dimGeometry.js'
 import DimPanel from './tools/DimPanel.jsx'
 import LineSnapPanel from './tools/LineSnapPanel.jsx'
 import CircleSnapPanel from './tools/CircleSnapPanel.jsx'
@@ -169,6 +169,9 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   const [dimCircleKind,setDimCircleKind]=useState('auto')    // 'auto' (⌀ circle, R arc) | 'diameter' | 'radius'
   const [dimAngleLines,setDimAngleLines]=useState([])        // line indices picked for an angle dim
   const [dimLineHover,setDimLineHover]=useState(null)        // line index under the mouse (angle mode)
+  // Chain / Baseline run after its first dimension: {orient, pos, base, last, dir, count, scale}
+  const [dimChain,setDimChain]=useState(null)
+  const [dimNoteText,setDimNoteText]=useState('')            // Note mode: the text to place
 
   // Join tool state
   const [joinFirstPt,setJoinFirstPt]=useState(null)   // {lineIdx, end:'x1y1'|'x2y2', x, y} or spline equiv
@@ -561,7 +564,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     setTraceOpen(false);setTraceInsertPt(null)
   }
   function resetDim(){
-    setDimToolStep(0);setDimToolPts([]);setDimToolPreview(null);setDimAngleLines([]);setDimLineHover(null)
+    setDimToolStep(0);setDimToolPts([]);setDimToolPreview(null);setDimAngleLines([]);setDimLineHover(null);setDimChain(null)
   }
   function resetJoin(){
     setJoinFirstPt(null);setJoinHover(null)
@@ -907,6 +910,30 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     return best
   }
 
+  // Auto sizes: overall width/height/depth on the generated views, once each.
+  // Returns how many were added (0 = no generated views on the sheet).
+  function addAutoSizes(){
+    const nd=overallDimsForViews({lines,circles,arcs,splines})
+    if (!nd.length) return 0
+    commit(snapshot())
+    setDims(d=>[...d,...nd.map(x=>({...x,text:''}))])
+    return nd.length
+  }
+
+  // How many holes of this size the callout stands for: circles of the same
+  // radius in the same generated view (or, outside a view, the same scale).
+  function holeCount(c){
+    return circles.filter(o=>Math.abs(o.r-c.r)<0.5&&(c.view?o.view===c.view:(o.viewScale||1)===(c.viewScale||1))).length
+  }
+
+  // Chain: the next dimension runs on from the last point along the same line.
+  // Baseline: every dimension starts at the first point, each a step further out.
+  function nextRunDim(run,cur){
+    const from=dimMode==='baseline'?run.base:run.last
+    const pos=dimMode==='baseline'?run.pos+run.dir*mmToPx(dimStyle.textMm*2+1)*run.count:run.pos
+    return {kind:'ortho',orient:run.orient,x1:from.x,y1:from.y,x2:cur.x,y2:cur.y,pos,...(run.scale?{scale:run.scale}:{})}
+  }
+
   // Dim tool — live preview while placing, per flyout mode
   useEffect(()=>{
     if (tool!=='dim'||!mousePos){setDimToolPreview(null);setDimLineHover(null);return}
@@ -941,22 +968,47 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       setDimToolPreview(d)
       return
     }
-    // Horizontal/vertical and aligned: two points, then where the line sits.
+    if (dimMode==='hole'){
+      // Hover a circle: one click places "N× ⌀D" on a leader
+      let best=null,bestDist=SELECT_DIST*2/zoomRef.scale
+      circles.forEach(c=>{
+        const d=Math.abs(Math.hypot(mousePos.x-c.cx,mousePos.y-c.cy)-c.r)
+        if(d<bestDist){bestDist=d;best=c}
+      })
+      if (!best){setDimToolPreview(null);return}
+      setDimToolPreview(withScale({kind:'hole',cx:best.cx,cy:best.cy,r:best.r,angle:Math.atan2(mousePos.y-best.cy,mousePos.x-best.cx),count:holeCount(best)},best.viewScale))
+      return
+    }
+    if (dimMode==='note'){
+      // Click the arrow tip, then where the text goes
+      if (dimToolStep===0){setDimToolPreview(null);return}
+      const tip=dimToolPts[0]
+      setDimToolPreview({kind:'leader',x1:tip.x,y1:tip.y,x2:mousePos.x,y2:mousePos.y,text:(dimNoteText.trim()||'NOTE').toUpperCase()})
+      return
+    }
+    // Horizontal/vertical, aligned, chain, baseline: two points, then where the line sits.
     if (dimToolStep===0){setDimToolPreview(null);return}
     const snap=getGeoSnap(mousePos,lines,circles,arcs,null,false,splines,intersectionPts)
     const cur=snap?{x:snap.x,y:snap.y}:mousePos
+    const ortho=dimMode!=='aligned'
+    if (dimChain){
+      // Chain / Baseline run: the next dimension to the point under the mouse
+      if (Math.hypot(cur.x-dimChain.last.x,cur.y-dimChain.last.y)<=1){setDimToolPreview(null);return}
+      setDimToolPreview(nextRunDim(dimChain,cur))
+      return
+    }
     if (dimToolStep===1){
       const p1=dimToolPts[0]
       if (Math.hypot(cur.x-p1.x,cur.y-p1.y)<=1){setDimToolPreview(null);return}
       const s=viewScaleNear(p1)||viewScaleNear(cur)
-      const d=dimMode==='hv'
+      const d=ortho
         ? orthoDimFromPoints(p1,cur,{x:cur.x,y:cur.y},dimOrientLock||(Math.abs(cur.x-p1.x)>=Math.abs(cur.y-p1.y)?'h':'v'))
         : {kind:'linear',x1:p1.x,y1:p1.y,x2:cur.x,y2:cur.y,offset:0}
       setDimToolPreview(withScale(d,s))
     } else if (dimToolStep===2){
       const [p1,p2]=dimToolPts
       const s=viewScaleNear(p1)||viewScaleNear(p2)
-      if (dimMode==='hv'){
+      if (ortho){
         setDimToolPreview(withScale(orthoDimFromPoints(p1,p2,mousePos,dimOrientLock),s))
         return
       }
@@ -967,7 +1019,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       const offset=(mousePos.x-p1.x)*nx+(mousePos.y-p1.y)*ny
       setDimToolPreview(withScale({kind:'linear',x1:p1.x,y1:p1.y,x2:p2.x,y2:p2.y,offset},s))
     }
-  },[tool,mousePos,dimToolStep,dimToolPts,dimMode,dimOrientLock,dimCircleKind,dimAngleLines,circles,arcs,lines,splines,intersectionPts])
+  },[tool,mousePos,dimToolStep,dimToolPts,dimMode,dimOrientLock,dimCircleKind,dimAngleLines,dimChain,dimNoteText,circles,arcs,lines,splines,intersectionPts])
 
   // Join tool hover — find nearest line/spline endpoint within snap distance
   useEffect(()=>{
@@ -2279,8 +2331,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       const snap=getGeoSnap(raw,lines,circles,arcs,null,false,splines,intersectionPts)
       const pt=snap?{x:snap.x,y:snap.y}:raw
 
-      // Circle mode: one click places the hovered diameter/radius
-      if (dimMode==='circle'){
+      // Circle / hole-callout mode: one click places the hovered one
+      if (dimMode==='circle'||dimMode==='hole'){
         if (dimToolPreview){commit(snapshot());setDims(d=>[...d,{...dimToolPreview,text:''}])}
         resetDim();return
       }
@@ -2298,7 +2350,26 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         if (dimToolPreview){commit(snapshot());setDims(d=>[...d,{...dimToolPreview,text:''}])}
         resetDim();return
       }
-      // Horizontal/vertical and aligned: click 1=p1, 2=p2, 3=where the line sits
+      // Note: click the arrow tip, then where the text goes (text typed in the flyout)
+      if (dimMode==='note'){
+        if (dimToolStep===0){setDimToolPts([pt]);setDimToolStep(1);return}
+        const note=dimNoteText.trim().toUpperCase()
+        if (!note||!dimToolPreview) return
+        commit(snapshot())
+        setDims(d=>[...d,{...dimToolPreview,text:note}])
+        resetDim();return
+      }
+      const run=dimMode==='chain'||dimMode==='baseline'
+      // Chain / Baseline after the first dimension: each click adds the next one
+      if (run&&dimChain){
+        if (Math.hypot(pt.x-dimChain.last.x,pt.y-dimChain.last.y)<=1) return
+        commit(snapshot())
+        const d=nextRunDim(dimChain,pt)
+        setDims(ds=>[...ds,{...d,text:''}])
+        setDimChain(c=>({...c,last:pt,count:c.count+1}))
+        return
+      }
+      // H/V, aligned, and a run's first dimension: click 1=p1, 2=p2, 3=where the line sits
       if (dimToolStep===0){
         setDimToolPts([pt]);setDimToolStep(1)
       } else if (dimToolStep===1){
@@ -2306,7 +2377,12 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       } else if (dimToolStep===2&&dimToolPreview){
         commit(snapshot())
         setDims(d=>[...d,{...dimToolPreview,text:''}])
-        resetDim()
+        if (run){
+          const p=dimToolPreview,[p1,p2]=dimToolPts
+          const dir=Math.sign(p.orient==='h'?p.pos-p1.y:p.pos-p1.x)||-1
+          setDimChain({orient:p.orient,pos:p.pos,base:p1,last:p2,dir,count:1,scale:p.scale})
+          setDimToolStep(3);setDimToolPts([])
+        } else resetDim()
       }
       return
     }
@@ -2817,7 +2893,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     if ((e.key==='p'||e.key==='P')&&!e.ctrlKey&&!e.shiftKey&&tool==='line'){setPKeyDown(p=>!p);return}
     // Dimension tool, horizontal/vertical mode: H / V lock the direction
     // (press again to release) — ahead of H's dashed-line toggle below.
-    if (tool==='dim'&&dimMode==='hv'&&!e.ctrlKey&&!e.shiftKey&&/^[hv]$/i.test(e.key)){
+    if (tool==='dim'&&(dimMode==='hv'||((dimMode==='chain'||dimMode==='baseline')&&!dimChain))&&!e.ctrlKey&&!e.shiftKey&&/^[hv]$/i.test(e.key)){
       const o=e.key.toLowerCase();setDimOrientLock(p=>p===o?null:o);return
     }
     if ((e.key==='h'||e.key==='H')&&!e.ctrlKey&&!e.shiftKey){
@@ -2972,7 +3048,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     }
 
     if (tool==='dim'){
-      if (e.key==='Escape'){resetDim();return}
+      // Esc cancels; Enter (or Esc) also ends a Chain / Baseline run
+      if (e.key==='Escape'||(e.key==='Enter'&&dimChain)){resetDim();return}
       return
     }
 
@@ -3187,7 +3264,17 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         if (dimAngleLines.length===1) return { step:2, total:3, color:c, action:'Click the second line', hints:[K('Esc')] }
         return { step:3, total:3, color:c, action:'Click where the angle goes', hints:[K('Esc')] }
       }
-      const hv=dimMode==='hv'?[K('H','horizontal'),K('V','vertical')]:[]
+      if (dimMode==='hole') return { step:1, total:1, color:c,
+        action:'Click a hole', hints:[K('Esc')] }
+      if (dimMode==='note') {
+        if (!dimNoteText.trim()) return { step:1, total:3, color:c, action:'Type the note in the panel', hints:[] }
+        if (dimToolStep===0) return { step:2, total:3, color:c, action:'Click what the arrow points at', hints:[K('Esc')] }
+        return { step:3, total:3, color:c, action:'Click where the text goes', hints:[K('Esc')] }
+      }
+      if (dimChain) return { step:4, total:4, color:c,
+        action:dimMode==='baseline'?'Click the next point (measured from the first)':'Click the next point',
+        hints:[K('Enter','finish'),K('Esc')] }
+      const hv=dimMode!=='aligned'?[K('H','horizontal'),K('V','vertical')]:[]
       if (dimToolStep===0) return { step:1, total:3, color:c,
         action:'Click the first point',
         hints:[...hv] }
@@ -3502,6 +3589,9 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
                 circleKind={dimCircleKind} onCircleKind={setDimCircleKind}
                 style={dimStyle} onStyle={setDimStyle}
                 anglePicked={dimAngleLines.length}
+                running={!!dimChain} onFinish={resetDim}
+                noteText={dimNoteText} onNoteText={setDimNoteText}
+                onAutoSizes={addAutoSizes}
               />
             )}
             {t==='spline'&&tool==='spline'&&(

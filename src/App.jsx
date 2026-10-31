@@ -878,6 +878,26 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     setResizeHover(nearestScaleEntity(mousePos,lines,circles,arcs,splines))
   },[tool,resizeAccepted,mousePos,lines,circles,arcs,splines])
 
+  // Drawing scale of the generated orthographic view (if any) whose geometry
+  // passes through `pt` — those entities carry viewScale (2 = drawn at 2:1),
+  // so a dimension on them shows the real part size, not the paper size.
+  function viewScaleNear(pt){
+    if (!pt) return null
+    const tol=SELECT_DIST/zoomRef.scale
+    for (const l of lines){
+      if (!l.viewScale) continue
+      const dx=l.x2-l.x1,dy=l.y2-l.y1,L2=dx*dx+dy*dy||1
+      const t=Math.max(0,Math.min(1,((pt.x-l.x1)*dx+(pt.y-l.y1)*dy)/L2))
+      if (Math.hypot(pt.x-(l.x1+dx*t),pt.y-(l.y1+dy*t))<tol) return l.viewScale
+    }
+    for (const c of [...circles,...arcs]){
+      if (!c.viewScale) continue
+      const d=Math.hypot(pt.x-c.cx,pt.y-c.cy)
+      if (Math.abs(d-c.r)<tol||d<tol) return c.viewScale
+    }
+    return null
+  }
+
   // Dim tool — live preview while placing
   useEffect(()=>{
     if (tool!=='dim'||!mousePos){setDimToolPreview(null);return}
@@ -897,11 +917,11 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       if (bestCircle){
         const c=circles[bestCircle.idx]
         const ang=Math.atan2(mousePos.y-c.cy,mousePos.x-c.cx)
-        setDimToolPreview({kind:'diameter',cx:c.cx,cy:c.cy,r:c.r,angle:ang})
+        setDimToolPreview({kind:'diameter',cx:c.cx,cy:c.cy,r:c.r,angle:ang,...(c.viewScale?{scale:c.viewScale}:{})})
       } else if (bestArc){
         const a=arcs[bestArc.idx]
         const ang=Math.atan2(mousePos.y-a.cy,mousePos.x-a.cx)
-        setDimToolPreview({kind:'radius',cx:a.cx,cy:a.cy,r:a.r,angle:ang})
+        setDimToolPreview({kind:'radius',cx:a.cx,cy:a.cy,r:a.r,angle:ang,...(a.viewScale?{scale:a.viewScale}:{})})
       } else {
         setDimToolPreview(null)
       }
@@ -910,7 +930,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       const p1=dimToolPts[0]
       const dx=mousePos.x-p1.x,dy=mousePos.y-p1.y
       const len=Math.hypot(dx,dy)
-      if(len>1) setDimToolPreview({kind:'linear',x1:p1.x,y1:p1.y,x2:mousePos.x,y2:mousePos.y,offset:0})
+      const s=viewScaleNear(p1)||viewScaleNear(mousePos)
+      if(len>1) setDimToolPreview({kind:'linear',x1:p1.x,y1:p1.y,x2:mousePos.x,y2:mousePos.y,offset:0,...(s?{scale:s}:{})})
     } else if (dimToolStep===2){
       // Got p1+p2, set offset distance
       const [p1,p2]=dimToolPts
@@ -919,9 +940,10 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       // Perpendicular offset = signed distance from mouse to line p1-p2
       const nx=-dy/len,ny=dx/len
       const offset=(mousePos.x-p1.x)*nx+(mousePos.y-p1.y)*ny
-      setDimToolPreview({kind:'linear',x1:p1.x,y1:p1.y,x2:p2.x,y2:p2.y,offset})
+      const s=viewScaleNear(p1)||viewScaleNear(p2)
+      setDimToolPreview({kind:'linear',x1:p1.x,y1:p1.y,x2:p2.x,y2:p2.y,offset,...(s?{scale:s}:{})})
     }
-  },[tool,mousePos,dimToolStep,dimToolPts,circles,arcs])
+  },[tool,mousePos,dimToolStep,dimToolPts,circles,arcs,lines])
 
   // Join tool hover — find nearest line/spline endpoint within snap distance
   useEffect(()=>{
@@ -1576,7 +1598,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           ctx.closePath();ctx.fill()
         })
         // Text
-        const txt=dim.text||pxToMm(len).toFixed(2)+' mm'
+        const txt=dim.text||(pxToMm(len)/(dim.scale||1)).toFixed(2)+' mm'
         const mx=(d1x+d2x)/2,my=(d1y+d2y)/2
         ctx.save();ctx.translate(mx,my);ctx.scale(1/sc,1/sc)
         let ang=Math.atan2(uy,ux)
@@ -1598,7 +1620,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           ctx.lineTo(ax+ax2*ARR+ay2*ARR*0.35,ay+ay2*ARR-ax2*ARR*0.35)
           ctx.closePath();ctx.fill()
         })
-        const txt=dim.text||'⌀'+pxToMm(r*2).toFixed(2)+' mm'
+        const txt=dim.text||'⌀'+(pxToMm(r*2)/(dim.scale||1)).toFixed(2)+' mm'
         ctx.save();ctx.translate(cx,cy);ctx.scale(1/sc,1/sc)
         let a=angle;if(a>Math.PI/2||a<-Math.PI/2) a+=Math.PI
         ctx.rotate(a);ctx.font=`${FS*sc}px sans-serif`
@@ -1614,7 +1636,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         ctx.lineTo(ex-cos*ARR-sin*ARR*0.35,ey-sin*ARR+cos*ARR*0.35)
         ctx.lineTo(ex-cos*ARR+sin*ARR*0.35,ey-sin*ARR-cos*ARR*0.35)
         ctx.closePath();ctx.fill()
-        const txt=dim.text||'R'+pxToMm(r).toFixed(2)+' mm'
+        const txt=dim.text||'R'+(pxToMm(r)/(dim.scale||1)).toFixed(2)+' mm'
         ctx.save();ctx.translate(cx,cy);ctx.scale(1/sc,1/sc)
         let a=angle;if(a>Math.PI/2||a<-Math.PI/2) a+=Math.PI
         ctx.rotate(a);ctx.font=`${FS*sc}px sans-serif`
@@ -1639,7 +1661,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           ctx.moveTo(p.x2,p.y2);ctx.lineTo(p.x2+nx*(off+Math.sign(off||1)*ARR*1.5),p.y2+ny*(off+Math.sign(off||1)*ARR*1.5))
           ctx.moveTo(p.x1+nx*off,p.y1+ny*off);ctx.lineTo(p.x2+nx*off,p.y2+ny*off)
           ctx.stroke()
-          const txt=pxToMm(len).toFixed(2)+' mm'
+          const txt=(pxToMm(len)/(p.scale||1)).toFixed(2)+' mm'
           const mx=(p.x1+p.x2)/2+nx*off,my=(p.y1+p.y2)/2+ny*off
           ctx.save();ctx.translate(mx,my);ctx.scale(1/sc,1/sc)
           let a=Math.atan2(uy,ux);if(a>Math.PI/2||a<-Math.PI/2) a+=Math.PI
@@ -1652,14 +1674,14 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         ctx.beginPath();ctx.moveTo(p.cx-p.r*cos,p.cy-p.r*sin);ctx.lineTo(p.cx+p.r*cos,p.cy+p.r*sin);ctx.stroke()
         ctx.setLineDash([]);ctx.save();ctx.translate(p.cx,p.cy);ctx.scale(1/sc,1/sc)
         ctx.font=`${FS*sc}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='bottom'
-        ctx.fillText('⌀'+pxToMm(p.r*2).toFixed(2)+' mm',0,-3)
+        ctx.fillText('⌀'+(pxToMm(p.r*2)/(p.scale||1)).toFixed(2)+' mm',0,-3)
         ctx.restore()
       } else if (p.kind==='radius'){
         const ex=p.cx+p.r*Math.cos(p.angle),ey=p.cy+p.r*Math.sin(p.angle)
         ctx.beginPath();ctx.moveTo(p.cx,p.cy);ctx.lineTo(ex,ey);ctx.stroke()
         ctx.setLineDash([]);ctx.save();ctx.translate(ex,ey);ctx.scale(1/sc,1/sc)
         ctx.font=`${FS*sc}px sans-serif`;ctx.textAlign='left';ctx.textBaseline='bottom'
-        ctx.fillText('R'+pxToMm(p.r).toFixed(2)+' mm',4,-3)
+        ctx.fillText('R'+(pxToMm(p.r)/(p.scale||1)).toFixed(2)+' mm',4,-3)
         ctx.restore()
       }
       // First point dot
@@ -2345,13 +2367,13 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       if (dimToolPreview?.kind==='diameter'){
         const p=dimToolPreview
         commit(snapshot())
-        setDims(d=>[...d,{kind:'diameter',cx:p.cx,cy:p.cy,r:p.r,angle:p.angle,text:''}])
+        setDims(d=>[...d,{kind:'diameter',cx:p.cx,cy:p.cy,r:p.r,angle:p.angle,text:'',...(p.scale?{scale:p.scale}:{})}])
         resetDim();return
       }
       if (dimToolPreview?.kind==='radius'){
         const p=dimToolPreview
         commit(snapshot())
-        setDims(d=>[...d,{kind:'radius',cx:p.cx,cy:p.cy,r:p.r,angle:p.angle,text:''}])
+        setDims(d=>[...d,{kind:'radius',cx:p.cx,cy:p.cy,r:p.r,angle:p.angle,text:'',...(p.scale?{scale:p.scale}:{})}])
         resetDim();return
       }
       // Linear: click 1=p1, 2=p2, 3=offset

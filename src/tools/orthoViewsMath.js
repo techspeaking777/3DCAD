@@ -258,16 +258,18 @@ export function layoutOnSheet(viewsData, scale, { centreLines = false, labels = 
   const below = labels ? (LABEL_GAP + LABEL_H) / scale : 0
   const cx = (box.minX + box.maxX) / 2, cy = (box.minY - below + box.maxY) / 2
   const s = p => ({ x: (p.x - cx) * scale, y: (p.y - cy) * scale })
+  // viewScale on every piece of view geometry: the Drawing tab's DIM tool
+  // divides by it, so dimensions read the real part size.
   const geo = {
     lines: laid.lines.map(l => {
       const a = s({ x: l.x1, y: l.y1 }), b = s({ x: l.x2, y: l.y2 })
-      return { ...l, x1: a.x, y1: a.y, x2: b.x, y2: b.y }
+      return { ...l, x1: a.x, y1: a.y, x2: b.x, y2: b.y, viewScale: scale }
     }),
-    circles: laid.circles.map(c => { const p = s({ x: c.cx, y: c.cy }); return { ...c, cx: p.x, cy: p.y, r: c.r * scale } }),
-    arcs: laid.arcs.map(a => { const p = s({ x: a.cx, y: a.cy }); return { ...a, cx: p.x, cy: p.y, r: a.r * scale } }),
-    splines: laid.splines.map(sp => ({ ...sp, points: sp.points.map(s) })),
+    circles: laid.circles.map(c => { const p = s({ x: c.cx, y: c.cy }); return { ...c, cx: p.x, cy: p.y, r: c.r * scale, viewScale: scale } }),
+    arcs: laid.arcs.map(a => { const p = s({ x: a.cx, y: a.cy }); return { ...a, cx: p.x, cy: p.y, r: a.r * scale, viewScale: scale } }),
+    splines: laid.splines.map(sp => ({ ...sp, points: sp.points.map(s), viewScale: scale })),
   }
-  if (centreLines) geo.lines.push(...centreLineEntities(laid.centres, s, scale))
+  if (centreLines) geo.lines.push(...centreLineEntities(laid.centres, s, scale).map(l => ({ ...l, viewScale: scale })))
   if (labels) {
     for (const [v, b] of Object.entries(laid.boxes)) {
       const lo = s({ x: (b.minX + b.maxX) / 2, y: b.minY })
@@ -303,9 +305,12 @@ export function autoScale(viewsData, pageConfig, opts = {}) {
  * parseDXF converts LWPOLYLINE vertices.
  */
 export function mmViewToPx({ lines, circles, arcs, splines }) {
-  // Keep style ('dashed' hidden edges, 'center' centre lines) and the
-  // lettering flag.
-  const st = e => ({ ...(e.style ? { style: e.style } : {}), ...(e.text ? { text: true } : {}) })
+  // Keep style ('dashed' hidden edges, 'center' centre lines), the lettering
+  // flag and the view's drawing scale (read by the DIM tool).
+  const st = e => ({
+    ...(e.style ? { style: e.style } : {}), ...(e.text ? { text: true } : {}),
+    ...(e.viewScale ? { viewScale: e.viewScale } : {}),
+  })
   return {
     lines: lines.map(l => ({
       x1: mmToPx(l.x1), y1: -mmToPx(l.y1), x2: mmToPx(l.x2), y2: -mmToPx(l.y2), ...st(l),

@@ -176,7 +176,7 @@ export default function PageSetupPanel({ lines, circles, arcs, splines, dims=[],
       doc.setFillColor(30, 30, 30)
       doc.setLineWidth(LW)
       doc.setLineDashPattern([], 0)
-      dims.forEach(d => drawDimPDF(doc, d, tx, ty, px2mm))
+      dims.forEach(d => drawDimPDF(doc, d, tx, ty, px2mm, px => pxToMm(px) / (d.scale || 1)))
 
       // Draw page border
       doc.setDrawColor(200, 200, 200)
@@ -318,7 +318,10 @@ function drawArrowheadPDF(doc, ax, ay, dx, dy, arrMm) {
   doc.triangle(ax, ay, x1, y1, x2, y2, 'F')
 }
 
-function drawDimPDF(doc, dim, tx, ty, px2mm) {
+// realMm: px → the size the dimension states (the part's real size: drawing mm
+// divided by the view scale of a dim placed on a generated orthographic view,
+// never the PDF's own print scale).
+function drawDimPDF(doc, dim, tx, ty, px2mm, realMm) {
   const ARR = px2mm(6)
   if (dim.kind === 'linear') {
     const dx=dim.x2-dim.x1, dy=dim.y2-dim.y1, len=Math.hypot(dx,dy)
@@ -334,7 +337,7 @@ function drawDimPDF(doc, dim, tx, ty, px2mm) {
     drawArrowheadPDF(doc, d2x, d2y, -ux, -uy, ARR)
     let ang = -Math.atan2(uy,ux) * 180/Math.PI
     if (ang > 90 || ang < -90) ang += 180
-    doc.text(dim.text || `${px2mm(len).toFixed(2)} mm`, (d1x+d2x)/2, (d1y+d2y)/2 - 1, { angle: ang, align: 'center' })
+    doc.text(dim.text || `${realMm(len).toFixed(2)} mm`, (d1x+d2x)/2, (d1y+d2y)/2 - 1, { angle: ang, align: 'center' })
   } else if (dim.kind === 'diameter') {
     const {cx,cy,r,angle} = dim
     const cos=Math.cos(angle), sin=Math.sin(angle)
@@ -345,7 +348,7 @@ function drawDimPDF(doc, dim, tx, ty, px2mm) {
     drawArrowheadPDF(doc, p2x, p2y, -cos, -sin, ARR)
     let a = -angle * 180/Math.PI
     if (a > 90 || a < -90) a += 180
-    doc.text(dim.text || `⌀${px2mm(r*2).toFixed(2)} mm`, tx(cx), ty(cy) - 1, { angle: a, align: 'center' })
+    doc.text(dim.text || `⌀${realMm(r*2).toFixed(2)} mm`, tx(cx), ty(cy) - 1, { angle: a, align: 'center' })
   } else if (dim.kind === 'radius') {
     const {cx,cy,r,angle} = dim
     const ex=cx+r*Math.cos(angle), ey=cy+r*Math.sin(angle)
@@ -355,7 +358,7 @@ function drawDimPDF(doc, dim, tx, ty, px2mm) {
     drawArrowheadPDF(doc, exPdf, eyPdf, -cos, -sin, ARR)
     let a = -angle * 180/Math.PI
     if (a > 90 || a < -90) a += 180
-    doc.text(dim.text || `R${px2mm(r).toFixed(2)} mm`, (cxPdf+exPdf)/2, (cyPdf+eyPdf)/2 - 1, { angle: a, align: 'center' })
+    doc.text(dim.text || `R${realMm(r).toFixed(2)} mm`, (cxPdf+exPdf)/2, (cyPdf+eyPdf)/2 - 1, { angle: a, align: 'center' })
   }
 }
 

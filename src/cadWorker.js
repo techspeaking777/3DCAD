@@ -1,6 +1,6 @@
 import opencascade from 'replicad-opencascadejs/src/replicad_single.js'
 import opencascadeWasm from 'replicad-opencascadejs/src/replicad_single.wasm?url'
-import { setOC, Sketcher, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, Vector, importSTEP, deserializeShape, makeBSplineApproximation, assembleWire, genericSweep } from 'replicad'
+import { setOC, ProjectionCamera, Sketcher, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, Vector, importSTEP, deserializeShape, makeBSplineApproximation, assembleWire, genericSweep } from 'replicad'
 import { projectedProfilePlane, dedupePoints3d } from './tools/sweepProject.js'
 import { springFrame } from './tools/springMath.js'
 
@@ -314,6 +314,101 @@ function getSeamEdgeHashes(shape) {
     }
   }
   return seamHashes
+}
+
+// ── Orthographic views with hidden-line removal ──────────────────────────────
+// OpenCascade's HLR works out which edges (and outlines of curved faces) the
+// viewer can actually see from a direction and which sit behind material.
+// Same calls as replicad's makeProjectedEdges, but every body is added to ONE
+// run so bodies hide each other, and the shapes are only read (never put in a
+// compound, which would delete the shapeStore entries). The output edges lie
+// flat in the camera's frame — x along uAxis, y along normal × uAxis — so
+// their own x,y are already the view's 2D coordinates.
+function hlrViewEdges(shapes, normal, uAxis, withHidden) {
+  const oc = getOC()
+  const camera = new ProjectionCamera([0, 0, 0], [normal.x, normal.y, normal.z], [uAxis.x, uAxis.y, uAxis.z])
+  const algo = new oc.HLRBRep_Algo_1()
+  for (const s of shapes) algo.Add_2(s.wrapped, 0)
+  const projector = new oc.HLRAlgo_Projector_2(camera.wrapped)
+  algo.Projector_1(projector)
+  algo.Update()
+  algo.Hide_1()
+  const toShape = new oc.HLRBRep_HLRToShape(new oc.Handle_HLRBRep_Algo_2(algo))
+  const collect = compounds => {
+    const out = []
+    for (const c of compounds) {
+      if (c.IsNull()) continue
+      for (const e of cast(c).edges) { oc.BRepLib.BuildCurves3d_2(e.wrapped); out.push(e) }
+    }
+    return out
+  }
+  // V = sharp edges, Rg1Line = smooth (tangent) edges such as fillet
+  // boundaries, OutLine = silhouettes of curved faces.
+  const visible = collect([toShape.VCompound_1(), toShape.Rg1LineVCompound_1(), toShape.OutLineVCompound_1()])
+  const hidden = withHidden
+    ? collect([toShape.HCompound_1(), toShape.Rg1LineHCompound_1(), toShape.OutLineHCompound_1()])
+    : []
+  toShape.delete(); projector.delete(); camera.delete()
+  return { visible, hidden }
+}
+
+// If every point lies within 0.01 mm of one straight line, the segment
+// spanning them; otherwise null.
+function straightRun(points) {
+  const a = points[0]
+  let far = a, farD = 0
+  for (const p of points) { const d = Math.hypot(p.x - a.x, p.y - a.y); if (d > farD) { farD = d; far = p } }
+  if (farD < 1e-6) return null
+  const dx = (far.x - a.x) / farD, dy = (far.y - a.y) / farD
+  let tMin = 0, tMax = 0
+  for (const p of points) {
+    const rx = p.x - a.x, ry = p.y - a.y
+    if (Math.abs(rx * dy - ry * dx) > 0.01) return null
+    const t = rx * dx + ry * dy
+    if (t < tMin) tMin = t
+    if (t > tMax) tMax = t
+  }
+  return { x1: a.x + dx * tMin, y1: a.y + dy * tMin, x2: a.x + dx * tMax, y2: a.y + dy * tMax }
+}
+
+// Turns HLR output edges (already flat in view coordinates) into drawing
+// entities: lines and true circles/arcs stay exact, anything else (ellipses
+// from tilted circles, splines) becomes a sampled polyline. `style` marks the
+// hidden set as dashed.
+function hlrEdgesToEntities(edges, out, style) {
+  const flat = v => ({ x: v.x, y: v.y })
+  for (const edge of edges) {
+    const n0 = out.lines.length, c0 = out.circles.length, a0 = out.arcs.length, s0 = out.splines.length
+    const type = edge.geomType
+    if (type === 'LINE') {
+      const sp = edge.startPoint, ep = edge.endPoint
+      if (Math.hypot(sp.x - ep.x, sp.y - ep.y) > 1e-6) out.lines.push({ x1: sp.x, y1: sp.y, x2: ep.x, y2: ep.y })
+    } else if (type === 'CIRCLE') {
+      projectEdge(edge, flat, out.lines, out.circles, out.arcs, out.splines)
+    } else {
+      const n = Math.max(8, Math.min(64, Math.ceil(edge.length / 1.5)))
+      const points = []
+      for (let i = 0; i <= n; i++) points.push(flat(edge.pointAt(i / n)))
+      const closed = Math.hypot(points[0].x - points[n].x, points[0].y - points[n].y) < 1e-6
+      // A circle seen edge-on comes through as a flattened ellipse/spline
+      // (open, or closed and doubling back on itself) — a straight run is
+      // drawn as a real line so the cleanup pass (orthoViewsMath's tidyView)
+      // can merge it with the outline it sits on.
+      const seg = straightRun(points)
+      if (seg) out.lines.push(seg)
+      else {
+        if (closed) points.pop()
+        out.splines.push({ points, closed })
+      }
+    }
+    if (style) {
+      for (let i = n0; i < out.lines.length; i++) out.lines[i].style = style
+      for (let i = c0; i < out.circles.length; i++) out.circles[i].style = style
+      for (let i = a0; i < out.arcs.length; i++) out.arcs[i].style = style
+      for (let i = s0; i < out.splines.length; i++) out.splines[i].style = style
+    }
+    edge.delete()
+  }
 }
 
 // ── Soften ───────────────────────────────────────────────────────────────────
@@ -637,51 +732,6 @@ function softenShape(base, { radius, minRadius, keepFacePoints, picks }) {
     leftover: softenLeftover(cur, left),
     timedOut: Date.now() - t0 >= SOFTEN_TIME_BUDGET_MS,
   }
-}
-
-// For a cylindrical face viewed non-end-on, meshEdges/projectEdge alone
-// produce only the seam edge (an arbitrary line down one side, now filtered
-// via getSeamEdgeHashes above) plus whatever end-circles/arcs bound the
-// face — never the pair of straight silhouette lines a real orthographic
-// drawing needs to read a cylinder as a rectangle. Those lines aren't
-// topological edges at all (nothing in the BREP sits there), so they have
-// to be constructed geometrically: the two U angles where the circular
-// cross-section's tangent runs parallel to the view direction, i.e. where
-// the radius vector aligns with axis × viewNormal. Each angle only
-// produces a line if it actually falls inside the face's own U range (via
-// UVBounds) — a fillet's cylindrical face only sweeps a fraction of the
-// full circle, so unlike a full hole/boss it may silhouette on only one
-// side, or neither. The V range (also from UVBounds) is literal arc-length
-// distance along the axis per OCC's Geom_CylindricalSurface, so
-// face.pointOnSurface(u,0)/(u,1) — already normalized against UVBounds —
-// naturally bounds the line to this face's own axial extent, correct for
-// blind holes/bosses too, not just through ones.
-function cylinderSilhouetteLines(face, normal, project) {
-  const cyl = face.surface.wrapped.Cylinder()
-  const axisDir = cyl.Axis().Direction()
-  const axis = new Vector([axisDir.X(), axisDir.Y(), axisDir.Z()]).normalize()
-  if (Math.abs(axis.dot(normal)) > 0.999) return [] // viewed end-on: already a circle/arc
-  const perp = axis.cross(normal)
-  if (perp.Length < 1e-9) return []
-  perp.normalize()
-  const xDir0 = cyl.XAxis().Direction(), yDir0 = cyl.YAxis().Direction()
-  const xDir = new Vector([xDir0.X(), xDir0.Y(), xDir0.Z()])
-  const yDir = new Vector([yDir0.X(), yDir0.Y(), yDir0.Z()])
-  const { uMin, uMax } = face.UVBounds
-  const width = uMax - uMin
-  const TWO_PI = Math.PI * 2
-  const out = []
-  for (const dir of [perp, perp.multiply(-1)]) {
-    const angle = Math.atan2(dir.dot(yDir), dir.dot(xDir))
-    let rel = (angle - uMin) % TWO_PI
-    if (rel < 0) rel += TWO_PI
-    if (rel > width + 1e-9) continue // this side of the cylinder isn't part of the face (e.g. a fillet)
-    const uNorm = rel / width
-    const p1 = project(face.pointOnSurface(uNorm, 0))
-    const p2 = project(face.pointOnSurface(uNorm, 1))
-    out.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y })
-  }
-  return out
 }
 
 function stripSeamEdges(shape, meshData) {
@@ -1120,27 +1170,21 @@ self.onmessage = async function(e) {
       for (const viewName of params.views) {
         const basis = VIEW_BASES[viewName]
         if (!basis) throw new Error(`computeOrthoViews: unknown view "${viewName}"`)
-        const { uAxis, vAxis, normal } = basis
-        // Origin is the world origin (not a per-face center like
+        const { uAxis, normal } = basis
+        // The camera sits at the world origin (not a per-face center like
         // exportFaceDXF) so every solid's edges land in ONE shared frame per
         // view — required for the client-side layout step to bbox solids
         // correctly relative to each other.
-        const project = v => ({ x: v.dot(uAxis), y: v.dot(vAxis) })
-        const lines = [], circles = [], arcs = [], splines = []
-        for (const solidId of params.solidIds) {
+        const shapes = params.solidIds.map(solidId => {
           const shape = shapeStore.get(solidId)
           if (!shape) throw new Error(`computeOrthoViews-MISS: solid ${solidId} not in store`)
-          const seamHashes = getSeamEdgeHashes(shape)
-          for (const edge of shape.edges) {
-            if (seamHashes.has(edge.hashCode)) continue
-            projectEdge(edge, project, lines, circles, arcs, splines, normal)
-          }
-          for (const face of shape.faces) {
-            if (face.geomType !== 'CYLINDRE') continue
-            lines.push(...cylinderSilhouetteLines(face, normal, project))
-          }
-        }
-        views[viewName] = { lines, circles, arcs, splines }
+          return shape
+        })
+        const out = { lines: [], circles: [], arcs: [], splines: [] }
+        const { visible, hidden } = hlrViewEdges(shapes, normal, uAxis, params.hidden !== false)
+        hlrEdgesToEntities(visible, out, null)
+        hlrEdgesToEntities(hidden, out, 'dashed')
+        views[viewName] = out
       }
       self.postMessage({ type:'result', id, orthoViews: { views } })
       return

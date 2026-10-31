@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { cadEngine } from '../cadEngine.js'
-import { layoutViews, mmViewToPx } from './orthoViewsMath.js'
+import { mmViewToPx, tidyView, layoutOnSheet, autoScale, DRAWING_SCALES, scaleLabel } from './orthoViewsMath.js'
 
 const VIEWS = ['front', 'top', 'right', 'left', 'back', 'bottom']
 const DEFAULT_VIEWS = ['front', 'top', 'right']
@@ -8,10 +8,12 @@ const DEFAULT_VIEWS = ['front', 'top', 'right']
 // Three-step wizard: pick solids (from the live 3D project via getSolidIds,
 // an imperative call up into App3D — see AppShell.jsx) -> pick views ->
 // Generate. Modal-overlay shell matches TracerPanel.jsx's convention.
-export default function OrthoViewsPanel({ getSolidIds, onGenerate, onClose }) {
+export default function OrthoViewsPanel({ getSolidIds, pageConfig, onGenerate, onClose }) {
   const [solidList, setSolidList] = useState([])
   const [selectedSolids, setSelectedSolids] = useState([])
   const [selectedViews, setSelectedViews] = useState(DEFAULT_VIEWS)
+  const [showHidden, setShowHidden] = useState(true)
+  const [scaleChoice, setScaleChoice] = useState('auto')   // 'auto' or one of DRAWING_SCALES
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
 
@@ -36,10 +38,12 @@ export default function OrthoViewsPanel({ getSolidIds, onGenerate, onClose }) {
     setBusy(true)
     setError(null)
     try {
-      const res = await cadEngine.computeOrthoViews({ solidIds: selectedSolids, views: selectedViews })
-      const laidOut = layoutViews(res.orthoViews.views)
-      const px = mmViewToPx(laidOut)
-      onGenerate(px)
+      const res = await cadEngine.computeOrthoViews({ solidIds: selectedSolids, views: selectedViews, hidden: showHidden })
+      const views = {}
+      for (const [name, v] of Object.entries(res.orthoViews.views)) views[name] = tidyView(v)
+      const scale = scaleChoice === 'auto' ? autoScale(views, pageConfig) : scaleChoice
+      const { geo, w, h } = layoutOnSheet(views, scale)
+      onGenerate(mmViewToPx(geo), { scale, wMm: w, hMm: h })
     } catch (err) {
       setError(err.message || 'Failed to generate views')
       setBusy(false)
@@ -103,6 +107,31 @@ export default function OrthoViewsPanel({ getSolidIds, onGenerate, onClose }) {
               </label>
             ))}
           </div>
+
+          <div style={{ fontSize: 10, letterSpacing: '0.08em', color: '#888', marginBottom: 8 }}>SCALE</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 6 }}>
+            {['auto', ...DRAWING_SCALES].map(s => {
+              const on = scaleChoice === s
+              return (
+                <button key={String(s)} onClick={() => setScaleChoice(s)} style={{
+                  padding: '4px 8px', borderRadius: 3, cursor: 'pointer',
+                  border: `1px solid ${on ? '#FF7043' : '#333'}`,
+                  background: on ? 'rgba(255,112,67,0.15)' : 'transparent',
+                  color: on ? '#FF7043' : '#bbb', fontFamily: 'monospace', fontSize: 11,
+                }}>{s === 'auto' ? 'AUTO-FIT' : scaleLabel(s)}</button>
+              )
+            })}
+          </div>
+          <div style={{ fontSize: 10, color: '#666', marginBottom: 18 }}>
+            {scaleChoice === 'auto'
+              ? `Picks the biggest standard scale that fits the ${pageConfig?.size || 'A4'} page.`
+              : 'Views are centred on the page at this scale.'}
+          </div>
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12, color: '#ddd', marginBottom: 18 }}>
+            <input type="checkbox" checked={showHidden} onChange={() => setShowHidden(v => !v)} />
+            <span>Show hidden edges as dashed lines</span>
+          </label>
 
           {error && (
             <div style={{ fontSize: 11, color: '#ff6b6b', marginBottom: 12, wordBreak: 'break-word' }}>

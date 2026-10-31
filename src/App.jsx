@@ -21,6 +21,7 @@ import TextPanel from './tools/TextPanel.jsx'
 import PageSetupPanel from './tools/PageSetupPanel.jsx'
 import GuidePanel from './tools/GuidePanel.jsx'
 import OrthoViewsPanel from './tools/OrthoViewsPanel.jsx'
+import { pageAreaMm } from './tools/orthoViewsMath.js'
 import LineSnapPanel from './tools/LineSnapPanel.jsx'
 import CircleSnapPanel from './tools/CircleSnapPanel.jsx'
 import SplineSnapPanel from './tools/SplineSnapPanel.jsx'
@@ -300,6 +301,12 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       minX=Math.min(minX,a.cx-a.r);maxX=Math.max(maxX,a.cx+a.r)
       minY=Math.min(minY,a.cy-a.r);maxY=Math.max(maxY,a.cy+a.r)
     })
+    zoomToBox(minX,maxX,minY,maxY)
+  }
+
+  // Frames the view on a world-px box.
+  function zoomToBox(minX,maxX,minY,maxY){
+    const canvas=canvasRef.current;if(!canvas)return
     const pad=60,w=canvas.width,h=canvas.height
     const gw=maxX-minX||100,gh=maxY-minY||100
     const sc=Math.min((w-pad*2)/gw,(h-pad*2)/gh,20)
@@ -3893,13 +3900,20 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       {orthoWizardOpen&&(
         <OrthoViewsPanel
           getSolidIds={getSolidIds}
-          onGenerate={({lines:nLines,circles:nCircles,arcs:nArcs,splines:nSplines})=>{
+          pageConfig={pageConfig}
+          onGenerate={({lines:nLines,circles:nCircles,arcs:nArcs,splines:nSplines},{wMm,hMm})=>{
             commit(snapshot())
             setLines(p=>[...p,...nLines])
             setCircles(p=>[...p,...nCircles])
             setArcs(p=>[...p,...nArcs])
             setSplines(p=>[...p,...nSplines])
             setOrthoWizardOpen(false)
+            // The views are centred on the page (which is centred on the
+            // origin) — show the page and frame whichever is bigger.
+            setPageConfig(pc=>pc.showPage?pc:{...pc,showPage:true})
+            const {w:aw,h:ah}=pageAreaMm(pageConfig),m=pageConfig.margin??10
+            const bw=mmToPx(Math.max(aw+2*m,wMm))/2,bh=mmToPx(Math.max(ah+2*m,hMm))/2
+            zoomToBox(-bw,bw,-bh,bh)
           }}
           onClose={()=>setOrthoWizardOpen(false)}
         />

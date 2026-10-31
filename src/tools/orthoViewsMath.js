@@ -94,6 +94,136 @@ export function layoutViews(viewsData, gapMm = GAP_MM) {
   return merged
 }
 
+const TIDY_TOL = 0.02   // mm — edges this close count as the same edge
+const MIN_PIECE = 0.1   // mm — leftover bits shorter than this are dropped
+
+// The parts of segment `l` not already covered by any collinear segment in
+// `cover`, as new segments (keeping l's other fields, e.g. style).
+function uncoveredPieces(l, cover) {
+  const dx = l.x2 - l.x1, dy = l.y2 - l.y1
+  const len = Math.hypot(dx, dy)
+  if (len < MIN_PIECE) return []
+  const ux = dx / len, uy = dy / len
+  const off = (x, y) => Math.abs((x - l.x1) * uy - (y - l.y1) * ux)
+  const along = (x, y) => (x - l.x1) * ux + (y - l.y1) * uy
+  const spans = []
+  for (const c of cover) {
+    if (off(c.x1, c.y1) > TIDY_TOL || off(c.x2, c.y2) > TIDY_TOL) continue
+    const a = along(c.x1, c.y1), b = along(c.x2, c.y2)
+    spans.push([Math.min(a, b) - TIDY_TOL, Math.max(a, b) + TIDY_TOL])
+  }
+  if (!spans.length) return [l]
+  spans.sort((p, q) => p[0] - q[0])
+  const pieces = []
+  let t = 0
+  for (const [a, b] of spans) {
+    if (a > t + MIN_PIECE) pieces.push([t, Math.min(a, len)])
+    t = Math.max(t, b)
+    if (t >= len) break
+  }
+  if (len - t > MIN_PIECE) pieces.push([t, len])
+  return pieces.map(([a, b]) => ({
+    ...l, x1: l.x1 + ux * a, y1: l.y1 + uy * a, x2: l.x1 + ux * b, y2: l.y1 + uy * b,
+  }))
+}
+
+const sameCircle = (a, b) =>
+  Math.abs(a.cx - b.cx) < TIDY_TOL && Math.abs(a.cy - b.cy) < TIDY_TOL && Math.abs(a.r - b.r) < TIDY_TOL
+
+function angleInArc(ang, arc) {
+  const TWO_PI = Math.PI * 2
+  const norm = x => ((x % TWO_PI) + TWO_PI) % TWO_PI
+  return norm(ang - arc.startAngle) <= norm(arc.endAngle - arc.startAngle) + 1e-6
+}
+
+/**
+ * Drafting rule: a visible edge wins over a hidden one in the same place, and
+ * nothing is drawn twice. Hidden-line removal hands back every edge of every
+ * body, so the back outline of a block lies exactly under the front one, a
+ * through-hole's far rim under its near rim, and so on. This drops (or trims)
+ * hidden lines covered by visible ones, hidden circles/arcs on a visible
+ * circle, and duplicates within each set. Input/output: one view's
+ * {lines,circles,arcs,splines} in mm, hidden entities marked style:'dashed'.
+ */
+export function tidyView(view) {
+  const vis = e => !e.style
+  const keptLines = []
+  for (const pass of [vis, e => !vis(e)]) {
+    for (const l of view.lines) {
+      if (!pass(l)) continue
+      keptLines.push(...uncoveredPieces(l, keptLines))
+    }
+  }
+  const keptCircles = []
+  for (const pass of [vis, e => !vis(e)]) {
+    for (const c of view.circles) {
+      if (pass(c) && !keptCircles.some(k => sameCircle(k, c))) keptCircles.push(c)
+    }
+  }
+  const keptArcs = []
+  for (const pass of [vis, e => !vis(e)]) {
+    for (const a of view.arcs) {
+      if (!pass(a)) continue
+      if (keptCircles.some(k => sameCircle(k, a))) continue
+      const mid = a.startAngle + (((a.endAngle - a.startAngle) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) / 2
+      if (keptArcs.some(k => sameCircle(k, a) && angleInArc(a.startAngle, k) && angleInArc(a.endAngle, k) && angleInArc(mid, k))) continue
+      keptArcs.push(a)
+    }
+  }
+  return { lines: keptLines, circles: keptCircles, arcs: keptArcs, splines: view.splines || [] }
+}
+
+// Standard drawing scales, biggest first. 2 means 2:1 (twice real size).
+export const DRAWING_SCALES = [10, 5, 2, 1, 1/2, 1/5, 1/10, 1/20, 1/50, 1/100]
+
+export function scaleLabel(s) {
+  return s >= 1 ? `${s}:1` : `1:${Math.round(1 / s)}`
+}
+
+const PAPER_MM = { A4: [210, 297], A3: [297, 420], A2: [420, 594], A1: [594, 841], A0: [841, 1189] }
+
+// The usable drawing area of the Drawing tab's page (inside the margins), mm.
+export function pageAreaMm(pageConfig) {
+  let [w, h] = PAPER_MM[pageConfig?.size] || PAPER_MM.A4
+  if (pageConfig?.orientation === 'landscape') [w, h] = [h, w]
+  const m = pageConfig?.margin ?? 10
+  return { w: w - 2 * m, h: h - 2 * m }
+}
+
+/**
+ * Lays the views out at drawing scale `scale` and centres the block on the
+ * sheet origin (the Drawing tab's page is centred there too). The gap between
+ * views stays GAP_MM on paper whatever the scale. Returns mm geometry plus
+ * the block's paper size.
+ */
+export function layoutOnSheet(viewsData, scale) {
+  const laid = layoutViews(viewsData, GAP_MM / scale)
+  const box = bboxOf(laid)
+  const cx = (box.minX + box.maxX) / 2, cy = (box.minY + box.maxY) / 2
+  const s = p => ({ x: (p.x - cx) * scale, y: (p.y - cy) * scale })
+  const geo = {
+    lines: laid.lines.map(l => {
+      const a = s({ x: l.x1, y: l.y1 }), b = s({ x: l.x2, y: l.y2 })
+      return { ...l, x1: a.x, y1: a.y, x2: b.x, y2: b.y }
+    }),
+    circles: laid.circles.map(c => { const p = s({ x: c.cx, y: c.cy }); return { ...c, cx: p.x, cy: p.y, r: c.r * scale } }),
+    arcs: laid.arcs.map(a => { const p = s({ x: a.cx, y: a.cy }); return { ...a, cx: p.x, cy: p.y, r: a.r * scale } }),
+    splines: laid.splines.map(sp => ({ ...sp, points: sp.points.map(s) })),
+  }
+  return { geo, w: box.w * scale, h: box.h * scale }
+}
+
+// The biggest standard scale at which the views fit the page's drawing area
+// (with a little breathing room); the smallest scale if nothing fits.
+export function autoScale(viewsData, pageConfig) {
+  const area = pageAreaMm(pageConfig)
+  for (const s of DRAWING_SCALES) {
+    const { w, h } = layoutOnSheet(viewsData, s)
+    if (w <= area.w * 0.9 && h <= area.h * 0.9) return s
+  }
+  return DRAWING_SCALES[DRAWING_SCALES.length - 1]
+}
+
 /**
  * Converts flat {lines,circles,arcs,splines} in mm (CCW angles, Y-up — the
  * convention cadWorker.js's computeOrthoViews already emits) to App.jsx's
@@ -105,14 +235,16 @@ export function layoutViews(viewsData, gapMm = GAP_MM) {
  * parseDXF converts LWPOLYLINE vertices.
  */
 export function mmViewToPx({ lines, circles, arcs, splines }) {
+  // Hidden edges arrive with style:'dashed' — keep it.
+  const st = e => (e.style ? { style: e.style } : {})
   return {
     lines: lines.map(l => ({
-      x1: mmToPx(l.x1), y1: -mmToPx(l.y1), x2: mmToPx(l.x2), y2: -mmToPx(l.y2),
+      x1: mmToPx(l.x1), y1: -mmToPx(l.y1), x2: mmToPx(l.x2), y2: -mmToPx(l.y2), ...st(l),
     })),
-    circles: circles.map(c => ({ cx: mmToPx(c.cx), cy: -mmToPx(c.cy), r: mmToPx(c.r) })),
+    circles: circles.map(c => ({ cx: mmToPx(c.cx), cy: -mmToPx(c.cy), r: mmToPx(c.r), ...st(c) })),
     arcs: arcs.map(a => ({
       cx: mmToPx(a.cx), cy: -mmToPx(a.cy), r: mmToPx(a.r),
-      startAngle: -a.endAngle, endAngle: -a.startAngle,
+      startAngle: -a.endAngle, endAngle: -a.startAngle, ...st(a),
     })),
     // polyline:true — these are literal sampled points (the oblique-circle
     // fallback, see cadWorker.js's projectEdge), not Catmull-Rom control
@@ -123,6 +255,7 @@ export function mmViewToPx({ lines, circles, arcs, splines }) {
       points: s.points.map(p => ({ x: mmToPx(p.x), y: -mmToPx(p.y) })),
       closed: !!s.closed,
       polyline: true,
+      ...st(s),
     })),
   }
 }

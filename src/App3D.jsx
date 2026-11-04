@@ -101,6 +101,9 @@ const SHAPE_OPS = {
   join3d:   { add:'join3d',   cut:'subtract3d', label:'JOIN',    cutLabel:'SUBTRACT',    color:'#FFEE88' },
 }
 const CUT_COLOR = '#53D3E4'
+// Live translucent preview of an add (Extrude, Revolve, Loft, Sweep, Spring):
+// amber so it stands out against the blue bodies it grows from. Cuts are red.
+const ADD_PREVIEW_COLOR = '#FFB300'
 // Move/Copy's rotate-drag angle snap, gated by the same gridSnap toggle the
 // move-drag's distance snap already uses. A fixed degree step rather than
 // tied to gridSizeMm — that dropdown is a linear-mm concept (0.5-50mm) with
@@ -4570,11 +4573,20 @@ const App3D = forwardRef(function App3D(props, ref) {
     {
       const tol = Math.max(0.5, span*0.01)
       if (pts.every(p => distToLine(p, pA, pB) < tol)) {
-        // Genuinely straight open edge → one clean line spanning its real
-        // endpoints. A "closed" loop that's collinear is a degenerate
-        // projection artifact (see above), not a real closed line loop —
-        // fall back to the polyline rather than guessing at a shape.
-        return closed ? fallback() : { ...empty, lines: [{ x1:first.x, y1:first.y, x2:last.x, y2:last.y }] }
+        // Everything projects onto one straight line → one clean line. That
+        // covers a genuinely straight edge AND a round edge seen side-on (a
+        // circle or arc whose plane contains the view direction, e.g. the
+        // rim of a cylinder from the side), which is a closed or doubled-
+        // back run. Span the outermost points along the line, not
+        // first→last: for a closed loop those are the same point.
+        const ux = (pB.x-pA.x)/span, uy = (pB.y-pA.y)/span
+        let tMin = Infinity, tMax = -Infinity
+        for (const p of pts) {
+          const t = (p.x-pA.x)*ux + (p.y-pA.y)*uy
+          if (t < tMin) tMin = t
+          if (t > tMax) tMax = t
+        }
+        return { ...empty, lines: [{ x1:pA.x+ux*tMin, y1:pA.y+uy*tMin, x2:pA.x+ux*tMax, y2:pA.y+uy*tMax }] }
       }
     }
 
@@ -7732,7 +7744,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         const meshData = await cadEngine.spring(springWorkerParams(springSpec))
         if (seq !== springPreviewSeqRef.current) return
         setSpringBuildError(null)
-        vp.showExtrudeSolidPreview(meshDataToPreviewGeometry(meshData), springTool === 'springcut' ? '#e05a4e' : extrudeColor)
+        vp.showExtrudeSolidPreview(meshDataToPreviewGeometry(meshData), springTool === 'springcut' ? '#e05a4e' : ADD_PREVIEW_COLOR)
       } catch (err) {
         if (seq !== springPreviewSeqRef.current) return
         setSpringBuildError(err.message || String(err))
@@ -7794,7 +7806,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         const meshData = await cadEngine.sweep(sweepWorkerFields(st))
         if (seq !== sweepPreviewSeqRef.current) return
         setSweepBuildError(null)
-        vp.showExtrudeSolidPreview(meshDataToPreviewGeometry(meshData), sweepTool === 'sweepcut' ? '#e05a4e' : extrudeColor)
+        vp.showExtrudeSolidPreview(meshDataToPreviewGeometry(meshData), sweepTool === 'sweepcut' ? '#e05a4e' : ADD_PREVIEW_COLOR)
       } catch (err) {
         if (seq !== sweepPreviewSeqRef.current) return
         setSweepBuildError(err.message || String(err))
@@ -9384,7 +9396,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     const angleDeg = Math.min(360, Math.max(1, parseFloat(st.depthInput) || 360))
     vp.showExtrudeSolidPreview(
       buildRevolveGeometry(prof, st.revolveAxis, st.planeId, st.facePlane || null, revolveRangeDeg(angleDeg, st.revolveReverse || false)),
-      isCut ? '#e05a4e' : extrudeColor)
+      isCut ? '#e05a4e' : ADD_PREVIEW_COLOR)
     return () => vp.hideExtrudeSolidPreview?.()
   }, [extrudeState?.armed, extrudeState?.revolveAxis, extrudeState?.profiles, extrudeState?.pickedIdx,
       extrudeState?.planeId, extrudeState?.facePlane, extrudeState?.depthInput, extrudeState?.revolveReverse, extrudeTool, extrudeColor])
@@ -9497,7 +9509,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     vp.showExtrudeSolidPreview(
       buildExtrudePrismGeometry(pts, st.planeId, st.facePlane || null,
         previewRangeMm(isCut, depthMm, st.direction || 'front', st.planeId)),
-      isCut ? '#e05a4e' : extrudeColor)
+      isCut ? '#e05a4e' : ADD_PREVIEW_COLOR)
     return () => vp.hideExtrudeSolidPreview()
   }, [extrudeState?.armed, extrudeState?.revolveAxis, extrudeState?.planeId, extrudeState?.facePlane,
       extrudeState?.profiles, extrudeState?.pickedIdx, extrudeState?.depthInput, extrudeState?.direction,
@@ -9533,7 +9545,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           profiles: list.map(p => ({ pts: p.pts, circle: p.circle, offsetMm: p.offsetMm })),
         })
         if (seq !== loftPreviewSeqRef.current) return
-        vp.showExtrudeSolidPreview(meshDataToPreviewGeometry(meshData), loftTool === 'loftcutout' ? '#e05a4e' : extrudeColor)
+        vp.showExtrudeSolidPreview(meshDataToPreviewGeometry(meshData), loftTool === 'loftcutout' ? '#e05a4e' : ADD_PREVIEW_COLOR)
       } catch {
         if (seq === loftPreviewSeqRef.current) vp.hideExtrudeSolidPreview?.()
       }

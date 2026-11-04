@@ -1483,6 +1483,12 @@ self.onmessage = async function(e) {
       } else {
         base = shapeStore.get(params.sourceSolidId)
         if (!base) throw new Error('Mirror source shape not found in cache (join/mirror source not yet built)')
+        // replicad's mirror() calls this.delete() on its input. Mirroring the
+        // cached shape itself freed the SOURCE body's store entry, so every
+        // later Join/Mirror/Fillet/... on a mirrored Join or Mirror failed with
+        // "has been deleted" (and a reload replayed the same mirror). Same
+        // trap, same fix as transformShape's Copy branch: work on a clone.
+        base = base.clone()
       }
       for (const op of params.ops || []) {
         if (op.type === 'fillet') {

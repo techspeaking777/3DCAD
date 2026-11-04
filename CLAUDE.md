@@ -77,6 +77,7 @@ All OpenCascade work runs in a Web Worker:
 ### General
 
 - **Dev gotcha** — editing `cadWorker.js` reloads the whole page (the worker restarts), losing in-memory work.
+- **replicad transforms free their input** — `mirror`, `translate`, `rotate` (and `scale`) call `this.delete()` on the shape they are called on. **Never call one on a shape taken from `shapeStore`: `.clone()` it first** (`mirrorShape` and `transformShape`'s Copy branch do). Otherwise the source body's cached shape is freed and every later operation on it fails with "has been deleted" — and a reload replays the same step, so the file looks permanently broken.
 - **Errors** — the worker turns raw OpenCascade failures (often a bare number) into plain English in `friendlyCadMessage`; callers prefix them ("Cutout failed: …").
 - **Step-bar hints** — each `SmartStepBar` `hint` is a short verb-first sentence; keep that voice.
 - **Sidebar Add/Cut flyouts** — Extrude, Revolve, Loft, Sweep, Spring and Join each have ONE button opening a `+ add / − cut` flyout (`SHAPE_OPS`, `opFlyout`); the tool ids (`extrude`/`cutout`, `revolve`/`revolvecut`, `loft3d`/`loftcutout`, `sweep3d`/`sweepcut`, `spring3d`/`springcut`, `join3d`/`subtract3d`) are mapped by `activateSolidTool(id)`. Simple mode hides `ADVANCED_SOLID_TOOL_IDS`.

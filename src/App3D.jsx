@@ -1228,6 +1228,20 @@ function LockGlyph({ color='#8899aa' }) {
 // "Edit sketch/profile" action icon — was the same ⚙ as "edit extent", making
 // the two indistinguishable whenever a row shows both buttons (e.g. a
 // cutout has separate profile-edit and extent-edit actions side by side).
+// Show/hide toggle: an open eye when visible, an amber eye with a slash when
+// hidden — full strength either way, so a hidden body's button is easy to find.
+function EyeGlyph({ open }) {
+  const c = open ? '#7fa8cc' : '#FFB300'
+  return (
+    <svg width="15" height="11" viewBox="0 0 15 11" style={{flexShrink:0, display:'block'}}>
+      <path d="M1 5.5C2.8 2.4 5 1 7.5 1s4.7 1.4 6.5 4.5C12.2 8.6 10 10 7.5 10S2.8 8.6 1 5.5z"
+        fill="none" stroke={c} strokeWidth="1.3" strokeLinejoin="round"/>
+      <circle cx="7.5" cy="5.5" r="1.9" fill={open ? c : 'none'} stroke={c} strokeWidth="1.2"/>
+      {!open && <path d="M2 10L13 1" stroke={c} strokeWidth="1.5" strokeLinecap="round"/>}
+    </svg>
+  )
+}
+
 function PencilGlyph({ color='#7fa8cc' }) {
   return (
     <svg width="11" height="11" viewBox="0 0 11 11" style={{flexShrink:0}}>
@@ -1273,6 +1287,7 @@ function CutoutGlyph({ color='#7fa8cc' }) {
 
 function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, onEditShellThickness, onEditLoft, hiddenSolidIds, onToggleBodyVisible, onConvertSketch, onPatternCutout, hasSolids }) {
   const [editingName, setEditingName] = useState(null)
+  const [hoverName, setHoverName] = useState(null)   // row whose name shows the rename cue
 
   // A grouped (multi-body) cutout is several features under the hood (one per
   // solid it spans) but should read as ONE row — collapse to the first member
@@ -1392,20 +1407,31 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                   <input
                     autoFocus
                     defaultValue={feat.name}
-                    style={{flex:1, fontSize:11, fontFamily:'monospace',
+                    maxLength={40}
+                    style={{flex:1, minWidth:0, fontSize:11, fontFamily:'monospace',
                       background:'#0d0d1a', color:'#dce8ff',
                       border:'1px solid #4FC3F7', borderRadius:3, padding:'1px 4px'}}
-                    onBlur={e=>{ onRename(feat.id, e.target.value||feat.name); setEditingName(null) }}
+                    onFocus={e=>e.target.select()}
+                    onBlur={e=>{ onRename(feat.id, e.target.value.trim()||feat.name); setEditingName(null) }}
                     onKeyDown={e=>{
-                      if(e.key==='Enter'){ onRename(feat.id,e.target.value||feat.name); setEditingName(null) }
+                      // Keep typing out of the 3D tab's shortcuts (X = x-ray, Delete, …)
+                      e.stopPropagation()
+                      if(e.key==='Enter'){ onRename(feat.id,e.target.value.trim()||feat.name); setEditingName(null) }
                       if(e.key==='Escape') setEditingName(null)
                     }}
                   />
                 ) : (
                   <span
-                    style={{flex:1, fontSize:11, fontWeight: isActiveSketch?'bold':'normal',
-                      letterSpacing:'0.02em',
-                      color: isActiveSketch?'#4FC3F7':'#c7d3e6'}}
+                    title="Double-click to rename"
+                    style={{flex:1, minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+                      fontSize:11, fontWeight: isActiveSketch?'bold':'normal',
+                      letterSpacing:'0.02em', cursor:'text',
+                      textDecoration: hoverName===feat.id ? 'underline dotted #4FC3F7' : 'none',
+                      textUnderlineOffset: 3,
+                      fontStyle: isBodyHidden ? 'italic' : 'normal',
+                      color: isActiveSketch?'#4FC3F7':isBodyHidden?'#6b7a90':'#c7d3e6'}}
+                    onMouseEnter={()=>setHoverName(feat.id)}
+                    onMouseLeave={()=>setHoverName(h=>h===feat.id?null:h)}
                     onDoubleClick={()=>setEditingName(feat.id)}
                   >
                     {feat.name}
@@ -1416,26 +1442,24 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                 <div style={{display:'flex', gap:2, flexShrink:0}}>
                   {isBodyOwner && (
                     <button
-                      title={isBodyHidden?'Show body':'Hide body'}
+                      title={isBodyHidden?'Hidden — click to show body':'Hide body'}
                       onClick={e=>{e.stopPropagation(); onToggleBodyVisible(feat.id)}}
                       style={{background:'none',border:'none',cursor:'pointer',
-                        padding:'1px 3px', fontSize:12, opacity: isBodyHidden?0.4:1,
-                        color:'#7fa8cc'}}
+                        padding:'2px 3px', display:'flex', alignItems:'center'}}
                     >
-                      {isBodyHidden ? '○' : '◉'}
+                      <EyeGlyph open={!isBodyHidden}/>
                     </button>
                   )}
                   {isSketch && (
                     <>
                       {/* Visibility toggle */}
                       <button
-                        title={feat.visible?'Hide sketch':'Show sketch'}
+                        title={feat.visible?'Hide sketch':'Hidden — click to show sketch'}
                         onClick={e=>{e.stopPropagation(); onToggleVisible(feat.id)}}
                         style={{background:'none',border:'none',cursor:'pointer',
-                          padding:'1px 3px', fontSize:12, opacity: feat.visible?1:0.4,
-                          color:'#7fa8cc'}}
+                          padding:'2px 3px', display:'flex', alignItems:'center'}}
                       >
-                        {feat.visible ? '◉' : '○'}
+                        <EyeGlyph open={!!feat.visible}/>
                       </button>
                       {/* Edit — re-enter sketch */}
                       {!sketchMode && (

@@ -37,6 +37,9 @@ export default function SplashScreen({ onChoose }) {
 
   useEffect(() => {
     function onKey(e) {
+      // The guest/log-in prompt (AppShell) sits on top of this screen — while
+      // it's up, Enter/Space must activate ITS focused button, not start here.
+      if (document.querySelector('[data-welcome-modal]')) return
       if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         e.preventDefault()
         setSel(s => (s + 1) % OPTIONS.length)

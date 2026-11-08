@@ -2578,7 +2578,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // new tab rather than attempting (and failing) a request — no in-app
   // router here to preserve unsaved work across an in-tab redirect.
   async function handleCloudSaveClick() {
-    if (!cloudLoggedIn) { window.open('/login', '_blank'); return }
+    if (!cloudLoggedIn) { window.open('/student-login?next=%2Ftools%2F3d-cad%2Findex.html', '_blank'); return }
     if (cloudProjectIdRef.current) {
       try {
         const dataObj = JSON.parse(serializeProject(features, solids, props.getSheetData?.(), await collectShapeSnapshots(CLOUD_SNAPSHOT_BUDGET).catch(() => null)))
@@ -2612,7 +2612,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   function handleCloudOpenClick() {
-    if (!cloudLoggedIn) { window.open('/login', '_blank'); return }
+    if (!cloudLoggedIn) { window.open('/student-login?next=%2Ftools%2F3d-cad%2Findex.html', '_blank'); return }
     setCloudOpenOpen(true)
   }
 

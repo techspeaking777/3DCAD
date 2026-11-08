@@ -6,14 +6,13 @@ import { useState } from 'react'
 //
 // Class association UX depends on how many classes the user belongs to:
 //   0 classes — no class UI at all, always saves personal (classId: null).
-//   1 class   — defaults TO that class (the common case: a student in one
-//               class saving their work should need zero extra clicks to
-//               have their teacher see it), with an opt-out checkbox.
+//   1 class   — always saves TO that class, no opt-out (a student in one
+//               class must not be able to hide their work from their teacher
+//               by accident); the panel just says where it's going.
 //   2+ classes — an explicit picker, defaulting to "Personal" rather than
 //               guessing which class is intended.
 export default function CloudSavePanel({ classes, defaultName='Untitled project', onSave, onClose }) {
   const [name, setName] = useState(defaultName)
-  const [savePersonally, setSavePersonally] = useState(false)   // only meaningful when classes.length === 1
   const [selectedClassId, setSelectedClassId] = useState('')     // only meaningful when classes.length >= 2 — '' = personal
 
   const s = {
@@ -31,7 +30,7 @@ export default function CloudSavePanel({ classes, defaultName='Untitled project'
   const submit = () => {
     const clean = (name || '').trim() || 'Untitled project'
     let classId = null
-    if (classes.length === 1) classId = savePersonally ? null : classes[0].id
+    if (classes.length === 1) classId = classes[0].id
     else if (classes.length >= 2) classId = selectedClassId || null
     onSave(clean, classId)
   }
@@ -56,14 +55,9 @@ export default function CloudSavePanel({ classes, defaultName='Untitled project'
         </div>
 
         {classes.length === 1 && (
-          <label style={{...s.row, cursor:'pointer'}}>
-            <input type="checkbox" checked={savePersonally} onChange={e=>setSavePersonally(e.target.checked)}/>
-            <span style={{color:'#aaa'}}>
-              {savePersonally
-                ? <>Saving as a personal project (not shared with <strong style={{color:'#eee'}}>{classes[0].name}</strong>)</>
-                : <>Will be saved to <strong style={{color:'#eee'}}>{classes[0].name}</strong> — check to save personally instead</>}
-            </span>
-          </label>
+          <div style={{...s.row, color:'#aaa'}}>
+            Will be saved to <strong style={{color:'#eee'}}>{classes[0].name}</strong>
+          </div>
         )}
 
         {classes.length >= 2 && (

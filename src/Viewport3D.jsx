@@ -1321,6 +1321,35 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
 
   useImperativeHandle(ref, () => ({
 
+    // Small JPEG data-URL of the current 3D view, for the thumbnail a teacher
+    // sees next to a saved project. Renders once and copies the canvas in the
+    // same task (the WebGL buffer isn't preserved between frames), with the
+    // work-plane helpers hidden so it shows the model, not the scaffolding.
+    // Returns null on any failure — a missing thumbnail must never block a save.
+    captureThumbnail(width = 360) {
+      const s = stateRef.current; if (!s) return null
+      const { renderer, scene, camera, workPlanes } = s
+      const planeGroups = Object.values(workPlanes || {}).map(p => p.group)
+      const wasVisible = planeGroups.map(g => g.visible)
+      try {
+        const src = renderer.domElement
+        if (!src.width || !src.height) return null
+        planeGroups.forEach(g => { g.visible = false })
+        renderer.render(scene, camera)
+        const h = Math.max(1, Math.round(width * src.height / src.width))
+        const c = document.createElement('canvas'); c.width = width; c.height = h
+        const ctx = c.getContext('2d')
+        ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, width, h)
+        ctx.drawImage(src, 0, 0, width, h)
+        return c.toDataURL('image/jpeg', 0.7)
+      } catch {
+        return null
+      } finally {
+        planeGroups.forEach((g, i) => { g.visible = wasVisible[i] })
+        try { renderer.render(scene, camera) } catch { /* next frame redraws anyway */ }
+      }
+    },
+
     // screenToWorld: if a sketch plane is active, automatically returns sketch-space
     // coords for that plane. App3D just calls screenToWorld() for everything.
     screenToWorld(clientX, clientY) {

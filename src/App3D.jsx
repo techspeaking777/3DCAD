@@ -1854,6 +1854,31 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [cloudSaveClasses, setCloudSaveClasses] = useState([])
   const [cloudOpenOpen, setCloudOpenOpen] = useState(false)
   const cloudProjectIdRef = useRef(null)
+  // Email of the account that owns the open cloud project. The login cookie is
+  // shared by every tab, so logging in as someone else in another tab silently
+  // changes who this tab saves as — the server then answers "Project not
+  // found" for a project the new account doesn't own. Checking against this
+  // before each re-save turns that into a clear message.
+  const cloudOwnerRef = useRef(null)
+  const shortAccount = (email) => (email || '').replace(/@students.stem4schools.net$/, '')
+  async function assertSameCloudAccount() {
+    const s = await getAuthState()
+    if (!s.loggedIn) throw new Error("You're not logged in any more (or the connection dropped). Reload the page and log in again — use Save As to keep a local copy first.")
+    if (cloudOwnerRef.current && s.email !== cloudOwnerRef.current) {
+      throw new Error(`You're now logged in as ${shortAccount(s.email)}, but this project was saved by ${shortAccount(cloudOwnerRef.current)}. Reload the page to continue.`)
+    }
+  }
+  // Adds the thumbnail teachers see on a student's page. Done on every cloud
+  // write (manual AND autosave) because a PUT replaces the whole data blob —
+  // skipping it once would wipe the thumbnail from the saved project.
+  const withThumbnail = (dataObj) => {
+    const thumb = viewport3dRef.current?.captureThumbnail?.()
+    if (thumb) dataObj.thumbnail = thumb
+    return dataObj
+  }
+  const friendlyCloudError = (err) => err.message === 'Project not found'
+    ? "This project belongs to a different account, so it can't be overwritten from here."
+    : err.message
   useEffect(() => { getAuthState().then(s => setCloudLoggedIn(s.loggedIn)) }, [])
 
   // ── CAD engine (replicad + OpenCascade) ──
@@ -2558,6 +2583,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     // fresh instead of silently overwriting the previous project.
     projectFileHandleRef.current = null
     cloudProjectIdRef.current = null
+    cloudOwnerRef.current = null
     autosaveBaseRef.current = { local: null, cloud: null }
     setAutosaveMsg(null)
     if (projectData) {
@@ -2582,11 +2608,12 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (cloudProjectIdRef.current) {
       try {
         const dataObj = JSON.parse(serializeProject(features, solids, props.getSheetData?.(), await collectShapeSnapshots(CLOUD_SNAPSHOT_BUDGET).catch(() => null)))
-        await updateCloudProject(cloudProjectIdRef.current, undefined, dataObj)
+        await assertSameCloudAccount()
+        await updateCloudProject(cloudProjectIdRef.current, undefined, withThumbnail(dataObj))
         markSaved('cloud')
         flashSaved('Saved to your account')
       } catch (err) {
-        setCadError('Cloud save failed: ' + err.message)
+        setCadError('Cloud save failed: ' + friendlyCloudError(err))
         setTimeout(() => setCadError(null), 6000)
       }
       return
@@ -2600,8 +2627,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     setCloudSaveOpen(false)
     try {
       const dataObj = JSON.parse(serializeProject(features, solids, props.getSheetData?.(), await collectShapeSnapshots(CLOUD_SNAPSHOT_BUDGET).catch(() => null)))
-      const saved = await saveNewCloudProject(name, classId, dataObj)
+      const who = await getAuthState()
+      const saved = await saveNewCloudProject(name, classId, withThumbnail(dataObj))
       cloudProjectIdRef.current = saved.id
+      cloudOwnerRef.current = who.loggedIn ? who.email : null
       markSaved('cloud')
       updateProjectName(name)
       flashSaved('Saved to your account')
@@ -2631,6 +2660,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       autosaveBaseRef.current = { local: null, cloud: null }
       await applyLoadedProject(projectData)
       cloudProjectIdRef.current = id
+      cloudOwnerRef.current = (await getAuthState()).email ?? null
       updateProjectName(name)
     } catch (err) {
       setLoadError(err.message || 'Could not open project')
@@ -2697,7 +2727,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
     if (hasCloud) {
       const id = cloudProjectIdRef.current
-      timers.push(setTimeout(() => run('cloud', data => updateCloudProject(id, undefined, JSON.parse(data))), 10000))
+      timers.push(setTimeout(() => run('cloud', async data => { await assertSameCloudAccount(); return updateCloudProject(id, undefined, withThumbnail(JSON.parse(data))) }), 10000))
     }
     return () => timers.forEach(clearTimeout)
   },[features,solids,autosaveOn,showSplash])

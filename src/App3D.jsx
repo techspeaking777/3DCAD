@@ -5373,7 +5373,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       }
 
       const best = allProfiles[0]
-      if (blockCrossingProfile(profiles, plane, extrudeTool === 'extrude')) return
+      if (blockCrossingProfile(profiles, plane, extrudeTool === 'extrude' || extrudeTool === 'cutout')) return
       const editingFeat = editingFeatureId ? features.find(f => f.id === editingFeatureId) : null
       const isCutoutEdit = editingFeat && (extrudeTool === 'cutout' || extrudeTool === 'revolvecut')
 
@@ -10348,8 +10348,26 @@ const App3D = forwardRef(function App3D(props, ref) {
     // or re-sketching every member of a multi-hole cutout group that shares this
     // solidId) instead of doing N separate full rebuild-and-replay passes.
     const skipSet = skipIds ? new Set(skipIds) : null
-    for (const opFeat of ops) {
+    for (let k = 0; k < ops.length; k++) {
+      const opFeat = ops[k]
       if (opFeat.id === skipId || skipSet?.has(opFeat.id)) continue
+      // A multi-shape cutout is several cutout features sharing a groupId —
+      // replay the consecutive run as ONE subtract (one boolean). An
+      // overridden member (being edited) is replayed on its own as before.
+      if (opFeat.operation === 'cutout' && opFeat.groupId && opFeat.id !== overrideId) {
+        const run = [opFeat]
+        while (k + 1 < ops.length) {
+          const nx = ops[k + 1]
+          if (nx.operation !== 'cutout' || nx.groupId !== opFeat.groupId || nx.id === overrideId) break
+          k++
+          if (nx.id === skipId || skipSet?.has(nx.id)) continue
+          run.push(nx)
+        }
+        if (run.length > 1) {
+          meshData = await cadEngine.subtract({ baseSolidId: baseSolid.id, cuts: run.map(buildCutWorkerParams), base: baseWorkerParams })
+          continue
+        }
+      }
       if (opFeat.type === 'fillet') {
         const radius = opFeat.id === overrideId ? overrideFilletRadius : opFeat.radius
         meshData = await cadEngine.fillet3d({ solidId: baseSolid.id, edgePoints: opFeat.edgePoints, radius, operation: opFeat.operation ?? 'fillet', base: baseWorkerParams })
@@ -10477,13 +10495,14 @@ const App3D = forwardRef(function App3D(props, ref) {
       }
       const targetBox = new THREE.Box3().setFromObject(target.group)
       const targetBaseParams = buildBaseWorkerParams(target)
-      for (let i = 0; i < cutProfiles.length; i++) {
-        if (!profileBoxes[i].intersectsBox(targetBox)) continue
-        const p = cutProfiles[i]
-        const meshData = await cadEngine.subtract({ baseSolidId: target.id, cut: buildCut(p), base: targetBaseParams })
-        const group = replicadMeshToThree(meshData, target.color, target.id)
-        target = { ...target, group }
-        setSolids(prev => prev.map(s => s.id === target.id ? target : s))
+      // Every shape that touches this body goes in ONE subtract (one boolean
+      // in the worker — see cutTolerant), not one per shape.
+      const hits = cutProfiles.filter((p, i) => profileBoxes[i].intersectsBox(targetBox))
+      if (hits.length === 0) continue
+      const meshData = await cadEngine.subtract({ baseSolidId: target.id, cuts: hits.map(buildCut), base: targetBaseParams })
+      target = { ...target, group: replicadMeshToThree(meshData, target.color, target.id) }
+      setSolids(prev => prev.map(s => s.id === target.id ? target : s))
+      for (const p of hits) {
         newFeats.push({
           id: reuseId ? editingId : `cutout-${target.id}-${Date.now()}-${newFeats.length}`,
           type: 'extrude', name: editingFeat?.name || nextCutoutName(), groupId,

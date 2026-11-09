@@ -141,7 +141,23 @@ function overlapVolume(a, b, fuzzy) {
 // result — the looser value can swallow deliberately thin walls, so it is
 // never the default.
 const CUT_RETRY_FUZZY_TOL = 0.5
+// `b` may be an ARRAY of cut tools (every closed shape of one cutout sketch):
+// they are removed in ONE boolean (OCC's multi-tool cut, which copes with
+// tools that overlap each other) instead of one full boolean per shape. If
+// that combined cut fails, the tools are cut one at a time as before, so a
+// batch is never worse than the old way.
 function cutTolerant(a, b) {
+  if (Array.isArray(b)) {
+    if (b.length === 1) return cutTolerant(a, b[0])
+    try {
+      return cutWithFuzzy(a, b, FUSE_FUZZY_TOL)
+    } catch (e) {
+      console.warn('[cadWorker] combined cut failed — cutting the shapes one at a time', e)
+      let s = a
+      for (const t of b) s = cutTolerant(s, t)
+      return s
+    }
+  }
   const result = cutWithFuzzy(a, b, FUSE_FUZZY_TOL)
   try {
     const vA = ocVolume(a.wrapped)
@@ -167,7 +183,17 @@ function cutWithFuzzy(a, b, fuzzy) {
   const [r, gc] = localGC()
   const oc = getOC()
   const progress = r(new oc.Message_ProgressRange_1())
-  const op = r(new oc.BRepAlgoAPI_Cut_3(a.wrapped, b.wrapped, progress))
+  let op
+  if (Array.isArray(b)) {
+    // Several tools at once (see cutTolerant).
+    op = r(new oc.BRepAlgoAPI_Cut_1())
+    const args = r(new oc.TopTools_ListOfShape_1()); args.Append_1(a.wrapped)
+    const tools = r(new oc.TopTools_ListOfShape_1()); for (const t of b) tools.Append_1(t.wrapped)
+    op.SetArguments(args)
+    op.SetTools(tools)
+  } else {
+    op = r(new oc.BRepAlgoAPI_Cut_3(a.wrapped, b.wrapped, progress))
+  }
   op.SetFuzzyValue(fuzzy)
   op.Build(progress)
   // Was silently absent — a failed boolean (e.g. a cut tool exactly
@@ -192,7 +218,20 @@ function cutWithFuzzy(a, b, fuzzy) {
   // own faint edges bleeding through it, which is exactly what made this
   // look like "nothing happened" instead of a clear failure.
   const solidCount = [...result._iterTopo('solid')].length
+  // ...but a REAL cut can leave several pieces too: a ring-shaped cut (an
+  // outline with an island — holesInFace) made right through the body leaves
+  // the island as its own loose piece, and a body that already has a loose
+  // piece keeps it. The no-op failure above always comes back at least as big
+  // as the target (target + leftover tool); a real cut always removes volume.
+  // So several pieces are only refused when nothing was actually removed.
+  let removedSomething = false
   if (solidCount !== 1) {
+    try {
+      const vA = ocVolume(a.wrapped)
+      removedSomething = ocVolume(result.wrapped) < vA - Math.max(1e-6 * vA, 1e-3)
+    } catch { /* keep the refusal */ }
+  }
+  if (solidCount !== 1 && !removedSomething) {
     gc()
     throw new Error(`Cut failed — the boolean produced ${solidCount} separate bodies instead of one cleanly cut solid. Try a different wire size or pitch.`)
   }
@@ -1421,9 +1460,13 @@ self.onmessage = async function(e) {
         // sets depthMm=10000+direction='both' for through-all, or user
         // values for blind cut; isCut=true adds 1mm protrusion on the entry
         // side to avoid coincident-face OCC failures (see buildCutShape).
-        cutShape = buildCutShape(clampCutDepth(params.cut, params.base))
+        // `cuts` (array): every closed shape of one cutout, removed together.
+        cutShape = params.cuts
+          ? params.cuts.map(c => buildCutShape(clampCutDepth(c, params.base)))
+          : buildCutShape(clampCutDepth(params.cut, params.base))
       } catch(e) {
-        throw new Error(`Step2-CUT: ${e.message} | planeId=${params.cut.planeId} facePlane=${!!params.cut.normal} store=${fromStore}`, { cause: e })
+        const c0 = params.cut || params.cuts?.[0] || {}
+        throw new Error(`Step2-CUT: ${e.message} | planeId=${c0.planeId} facePlane=${!!c0.normal} store=${fromStore}`, { cause: e })
       }
       try {
         shape = cutTolerant(base, cutShape)
@@ -2276,8 +2319,10 @@ function buildSpringAxial({ pitchMm, heightMm, lefthand=false, springAxis, sprin
 
 // True when buildExtrude puts pts.holes straight into the profile face (see
 // there). App3D mirrors this rule in holesCutSeparately().
-function holesInFace({ pts, isCut, draftAngleDeg }) {
-  return !isCut && !draftAngleDeg && !!pts?.holes?.length
+// Cuts too: a ring-shaped cut leaves its centre island standing (cuts never
+// carry a draft). Callers may still pass isCut; it no longer matters.
+function holesInFace({ pts, draftAngleDeg }) {
+  return !draftAngleDeg && !!pts?.holes?.length
 }
 
 function buildExtrude({ pts, depthMm, planeId, direction='both',
@@ -2288,8 +2333,8 @@ function buildExtrude({ pts, depthMm, planeId, direction='both',
   // 1mm protrusion on the entry face prevents OCC coincident-face Boolean failures
   const OVH = isCut ? 1 : 0
 
-  // A plain extrude's nested loops (pts.holes — resolveNestedHoles in
-  // extrudeMath.js) go into the SAME face as the outline, so the plate comes
+  // A profile's nested loops (pts.holes — resolveNestedHoles in
+  // extrudeMath.js) go into the SAME face as the outline (extrudes AND cuts), so the plate comes
   // out already holed from ONE extrude (like Fusion), instead of extruding the
   // outline and boolean-cutting each hole. holesInFace() is the one test for
   // this — App3D only cuts holes itself when it's false (drafted extrudes keep

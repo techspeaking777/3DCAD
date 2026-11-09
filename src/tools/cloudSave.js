@@ -92,7 +92,31 @@ export async function updateCloudProject(id, name, dataObj) {
   return res.json()
 }
 
-/** Fetches one saved project's {name, data, format_version}. */
+/**
+ * Teacher/admin only: saves an edited version of a STUDENT's project as a new
+ * project in that student's folder (the original is never touched).
+ * Returns {id, name, class_id, created_at, updated_at}.
+ */
+export async function saveFeedbackCopy(studentId, sourceProjectId, name, dataObj) {
+  const res = await request(`${BASE}/school-admin/students/${encodeURIComponent(studentId)}/projects`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source_project_id: sourceProjectId, name, data: dataObj }),
+  })
+  return res.json()
+}
+
+/** Re-saves a feedback copy this teacher created earlier (server refuses anything else). */
+export async function updateFeedbackCopy(studentId, copyId, name, dataObj) {
+  const res = await request(`${BASE}/school-admin/students/${encodeURIComponent(studentId)}/projects/${encodeURIComponent(copyId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, data: dataObj }),
+  })
+  return res.json()
+}
+
+/** Fetches one saved project's {name, data, format_version, owner_id, owner_name}. owner_name is set only when it isn't the caller's own. */
 export async function loadCloudProject(id) {
   return (await request(`${BASE}/cad/projects/${encodeURIComponent(id)}`)).json()
 }

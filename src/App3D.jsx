@@ -22,7 +22,7 @@ import { isEditableSpline, hitSplineNode, moveSplineNode, insertSplineNode, dele
 import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine, perpLabelOffset } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
 import { loadJSON, exportDXF, parseDXF, saveProjectAs, canPickSaveLocation, exportFaceDXF as writeFaceDXF, saveBlobAs, saveProjectFileAs, loadProjectFile, serializeProject, parseProjectData } from './tools/saveLoad.js'
-import { getAuthState, fetchMyClasses, saveNewCloudProject, updateCloudProject, loadCloudProject } from './tools/cloudSave.js'
+import { getAuthState, fetchMyClasses, saveNewCloudProject, updateCloudProject, loadCloudProject, saveFeedbackCopy, updateFeedbackCopy } from './tools/cloudSave.js'
 import { detectProfiles, detectPath, buildSolid } from './tools/extrudeMath.js'
 import { cadEngine } from './cadEngine.js'
 import { replicadMeshToThree } from './cadMesh.js'
@@ -1881,6 +1881,20 @@ const App3D = forwardRef(function App3D(props, ref) {
     : err.message
   useEffect(() => { getAuthState().then(s => setCloudLoggedIn(s.loggedIn)) }, [])
 
+  // Feedback mode: a teacher/admin opened a STUDENT's project. Their edits never
+  // overwrite it — the first Save creates a new copy in the student's folder
+  // (saveFeedbackCopy), and later saves/autosaves update only that copy.
+  // { studentId, studentName, sourceId, copyId|null }; null = normal mode.
+  const feedbackRef = useRef(null)
+  const [feedbackStudent, setFeedbackStudent] = useState(null)
+  useEffect(() => { props.onFeedbackStudent?.(feedbackStudent) }, [feedbackStudent])
+  function setFeedback(fb) { feedbackRef.current = fb; setFeedbackStudent(fb ? fb.studentName : null) }
+  // Single place every cloud re-save goes through, so feedback copies can never
+  // fall into the owner-only PUT.
+  const writeCloud = (id, dataObj) => feedbackRef.current
+    ? updateFeedbackCopy(feedbackRef.current.studentId, id, undefined, dataObj)
+    : updateCloudProject(id, undefined, dataObj)
+
   // ── CAD engine (replicad + OpenCascade) ──
   const [occReady, setOccReady] = useState(false)
   const [occLoading, setOccLoading] = useState(true)
@@ -2584,6 +2598,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     projectFileHandleRef.current = null
     cloudProjectIdRef.current = null
     cloudOwnerRef.current = null
+    setFeedback(null)
     autosaveBaseRef.current = { local: null, cloud: null }
     setAutosaveMsg(null)
     if (projectData) {
@@ -2609,15 +2624,16 @@ const App3D = forwardRef(function App3D(props, ref) {
       try {
         const dataObj = JSON.parse(serializeProject(features, solids, props.getSheetData?.(), await collectShapeSnapshots(CLOUD_SNAPSHOT_BUDGET).catch(() => null)))
         await assertSameCloudAccount()
-        await updateCloudProject(cloudProjectIdRef.current, undefined, withThumbnail(dataObj))
+        await writeCloud(cloudProjectIdRef.current, withThumbnail(dataObj))
         markSaved('cloud')
-        flashSaved('Saved to your account')
+        flashSaved(feedbackRef.current ? `Saved to ${feedbackRef.current.studentName}'s folder` : 'Saved to your account')
       } catch (err) {
         setCadError('Cloud save failed: ' + friendlyCloudError(err))
         setTimeout(() => setCadError(null), 6000)
       }
       return
     }
+    if (feedbackRef.current) { setCloudSaveClasses([]); setCloudSaveOpen(true); return }
     const classes = await fetchMyClasses()
     setCloudSaveClasses(classes)
     setCloudSaveOpen(true)
@@ -2628,12 +2644,15 @@ const App3D = forwardRef(function App3D(props, ref) {
     try {
       const dataObj = JSON.parse(serializeProject(features, solids, props.getSheetData?.(), await collectShapeSnapshots(CLOUD_SNAPSHOT_BUDGET).catch(() => null)))
       const who = await getAuthState()
-      const saved = await saveNewCloudProject(name, classId, withThumbnail(dataObj))
+      const fb = feedbackRef.current
+      const saved = fb
+        ? await saveFeedbackCopy(fb.studentId, fb.sourceId, name, withThumbnail(dataObj))
+        : await saveNewCloudProject(name, classId, withThumbnail(dataObj))
       cloudProjectIdRef.current = saved.id
       cloudOwnerRef.current = who.loggedIn ? who.email : null
       markSaved('cloud')
       updateProjectName(name)
-      flashSaved('Saved to your account')
+      flashSaved(fb ? `Copy saved to ${fb.studentName}'s folder` : 'Saved to your account')
     } catch (err) {
       setCadError('Cloud save failed: ' + err.message)
       setTimeout(() => setCadError(null), 6000)
@@ -2653,14 +2672,24 @@ const App3D = forwardRef(function App3D(props, ref) {
   async function handleCloudProjectPicked(id) {
     setCloudOpenOpen(false)
     try {
-      const { data, name } = await loadCloudProject(id)
+      const { data, name, owner_id, owner_name } = await loadCloudProject(id)
       const projectData = parseProjectData(data)
       resetAllToolState()
       projectFileHandleRef.current = null
       autosaveBaseRef.current = { local: null, cloud: null }
       await applyLoadedProject(projectData)
-      cloudProjectIdRef.current = id
       cloudOwnerRef.current = (await getAuthState()).email ?? null
+      if (owner_name) {
+        // Someone else's work (teacher viewing a student). If it is itself a
+        // feedback copy this teacher made earlier, keep updating that copy;
+        // otherwise the first Save creates a new one.
+        const mine = data?.feedback?.by && data.feedback.by === (await getAuthState()).id
+        setFeedback({ studentId: owner_id, studentName: owner_name, sourceId: mine ? data.feedback.source : id, copyId: mine ? id : null })
+        cloudProjectIdRef.current = mine ? id : null
+      } else {
+        setFeedback(null)
+        cloudProjectIdRef.current = id
+      }
       updateProjectName(name)
     } catch (err) {
       setLoadError(err.message || 'Could not open project')
@@ -2727,7 +2756,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
     if (hasCloud) {
       const id = cloudProjectIdRef.current
-      timers.push(setTimeout(() => run('cloud', async data => { await assertSameCloudAccount(); return updateCloudProject(id, undefined, withThumbnail(JSON.parse(data))) }), 10000))
+      timers.push(setTimeout(() => run('cloud', async data => { await assertSameCloudAccount(); return writeCloud(id, withThumbnail(JSON.parse(data))) }), 10000))
     }
     return () => timers.forEach(clearTimeout)
   },[features,solids,autosaveOn,showSplash])
@@ -15922,6 +15951,9 @@ const App3D = forwardRef(function App3D(props, ref) {
       {cloudSaveOpen&&(
         <CloudSavePanel
           classes={cloudSaveClasses}
+          defaultName={feedbackStudent ? `${projectName || 'Project'} (feedback)` : undefined}
+          heading={feedbackStudent ? `☁ Save a copy to ${feedbackStudent}'s folder` : undefined}
+          fixedNote={feedbackStudent ? `${feedbackStudent}'s original is not changed. This saves your edited version as a new project in their folder, in the same class.` : null}
           onSave={handleCloudSaveSubmit}
           onClose={()=>setCloudSaveOpen(false)}
         />

@@ -27,6 +27,9 @@ export default function AppShell() {
   const [projectName, setProjectName] = useState(null)
   // {text, error} from App3D's autosave, or null (off / nothing saved yet).
   const [autosave, setAutosave] = useState(null)
+  // Student's name while a teacher/admin is editing a COPY of that student's
+  // work (pushed from App3D); null otherwise.
+  const [feedbackStudent, setFeedbackStudent] = useState(null)
   const app3dRef = useRef(null)
   const drawingRef = useRef(null)
   const app3dWrapRef = useRef(null)
@@ -170,6 +173,15 @@ export default function AppShell() {
           </div>
         )}
 
+        {feedbackStudent && (
+          <span style={{
+            fontFamily: 'monospace', fontSize: 12, marginLeft: 14, padding: '3px 10px', borderRadius: 4,
+            background: '#3a2a00', border: '1px solid #FF9800', color: '#FFB74D', whiteSpace: 'nowrap',
+          }} title="Your changes are saved as a new copy in the student's folder; their original is never changed.">
+            ✎ Editing a copy of {feedbackStudent}'s work
+          </span>
+        )}
+
         {/* Wordmark — lives here (the one bar that's never in either app's own
             toolbar, so it can't get crowded out by tool groups) rather than
             inside App3D's sketch toolbar, which needed the width back. */}
@@ -220,6 +232,7 @@ export default function AppShell() {
             onSheetLoaded={sheet => drawingRef.current?.restoreSheetData(sheet)}
             onProjectNameChange={setProjectName}
             onAutosaveStatus={setAutosave}
+            onFeedbackStudent={setFeedbackStudent}
           />
         </div>
         <div ref={drawingWrapRef} style={{ display: activeTab === 'drawing' ? 'block' : 'none', height: '100%' }}>

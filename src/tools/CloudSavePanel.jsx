@@ -11,7 +11,11 @@ import { useState } from 'react'
 //               by accident); the panel just says where it's going.
 //   2+ classes — an explicit picker, defaulting to "Personal" rather than
 //               guessing which class is intended.
-export default function CloudSavePanel({ classes, defaultName='Untitled project', onSave, onClose }) {
+//
+// Optional `heading` / `fixedNote` (used when a teacher saves a feedback copy
+// into a student's folder): the class UI is replaced by that fixed note, and
+// the destination class is decided server-side.
+export default function CloudSavePanel({ classes, defaultName='Untitled project', heading='☁ Save to My Account', fixedNote=null, onSave, onClose }) {
   const [name, setName] = useState(defaultName)
   const [selectedClassId, setSelectedClassId] = useState('')     // only meaningful when classes.length >= 2 — '' = personal
 
@@ -30,6 +34,7 @@ export default function CloudSavePanel({ classes, defaultName='Untitled project'
   const submit = () => {
     const clean = (name || '').trim() || 'Untitled project'
     let classId = null
+    if (fixedNote) { onSave(clean, null); return }
     if (classes.length === 1) classId = classes[0].id
     else if (classes.length >= 2) classId = selectedClassId || null
     onSave(clean, classId)
@@ -39,7 +44,7 @@ export default function CloudSavePanel({ classes, defaultName='Untitled project'
     <div style={s.overlay} onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div style={s.panel}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
-          <span style={{fontSize:15,fontWeight:'bold',color:'#fff'}}>☁ Save to My Account</span>
+          <span style={{fontSize:15,fontWeight:'bold',color:'#fff'}}>{heading}</span>
           <button onClick={onClose} style={{background:'none',border:'none',color:'#888',fontSize:18,cursor:'pointer'}}>✕</button>
         </div>
 
@@ -54,13 +59,15 @@ export default function CloudSavePanel({ classes, defaultName='Untitled project'
           />
         </div>
 
-        {classes.length === 1 && (
+        {fixedNote && <p style={s.note}>{fixedNote}</p>}
+
+        {!fixedNote && classes.length === 1 && (
           <div style={{...s.row, color:'#aaa'}}>
             Will be saved to <strong style={{color:'#eee'}}>{classes[0].name}</strong>
           </div>
         )}
 
-        {classes.length >= 2 && (
+        {!fixedNote && classes.length >= 2 && (
           <>
             <label style={s.label}>Save to</label>
             <div style={s.row}>
@@ -72,7 +79,7 @@ export default function CloudSavePanel({ classes, defaultName='Untitled project'
           </>
         )}
 
-        {classes.length === 0 && (
+        {!fixedNote && classes.length === 0 && (
           <p style={s.note}>Saved as a personal project — you're not enrolled in or teaching any classes yet.</p>
         )}
 

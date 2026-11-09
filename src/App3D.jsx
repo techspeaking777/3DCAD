@@ -6773,6 +6773,9 @@ const App3D = forwardRef(function App3D(props, ref) {
         const group = replicadMeshToThree(meshData, solid.color, solidId)
         setSolids(prev => prev.map(s => s.id===solidId ? { ...s, group, transform: newTransform } : s))
         setFeatures(prev => prev.map(f => f.id===feat.id ? { ...f, transform: newTransform } : f))
+        // A mirror of this body follows it (mirrorShape replays the source's
+        // `transform`, so pass the new one).
+        await rebuildDependentMirrors({ ...solid, transform: newTransform })
       }
       // Move/Snap Move (not Copy) is the only case that skips the
       // preview-position reset: its solidId gets a freshly rebuilt group
@@ -8655,7 +8658,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     const ops = buildSolidOpsForWorker(sourceSolid, features)
 
     const newSolidId = Date.now()
-    const meshData = await cadEngine.mirrorShape({ solidId: newSolidId, sourceSolidId: sourceSolid.id, base, ops, plane: planeParams })
+    const meshData = await cadEngine.mirrorShape({ solidId: newSolidId, sourceSolidId: sourceSolid.id, base, ops, sourceTransform: sourceSolid.transform, plane: planeParams })
     const group = replicadMeshToThree(meshData, sourceSolid.color, newSolidId)
 
     setSolids(prev => [...prev, {
@@ -8692,7 +8695,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     const ops = buildSolidOpsForWorker(solid, features)
     for (const mirrorFeat of dependents) {
       try {
-        const meshData = await cadEngine.mirrorShape({ solidId: mirrorFeat.solidId, sourceSolidId: solid.id, base, ops, plane: mirrorFeat.mirrorPlane })
+        let meshData = await cadEngine.mirrorShape({ solidId: mirrorFeat.solidId, sourceSolidId: solid.id, base, ops, sourceTransform: solid.transform, plane: mirrorFeat.mirrorPlane })
+        // The mirror's own Move/Rotate, if it has one (as rebuildFeatureSolid does).
+        if (mirrorFeat.transform) meshData = await cadEngine.transformShape({ solidId: mirrorFeat.solidId, position: mirrorFeat.transform.position, rotation: mirrorFeat.transform.rotation })
         const group = replicadMeshToThree(meshData, mirrorFeat.color, mirrorFeat.solidId)
         setSolids(prev => prev.map(s => s.id === mirrorFeat.solidId ? { ...s, group } : s))
         await rebuildDependentMirrors({ id: mirrorFeat.solidId, operation: 'mirror' })
@@ -8753,7 +8758,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (!sourceSolid) throw new Error('Mirror source solid not found')
       const base = buildBaseWorkerParams(sourceSolid)
       const ops = buildSolidOpsForWorker(sourceSolid, feats)
-      let meshData = await cadEngine.mirrorShape({ solidId: feat.solidId, sourceSolidId: sourceSolid.id, base, ops, plane: feat.mirrorPlane })
+      let meshData = await cadEngine.mirrorShape({ solidId: feat.solidId, sourceSolidId: sourceSolid.id, base, ops, sourceTransform: sourceSolid.transform, plane: feat.mirrorPlane })
       // A moved/copied mirror result — mirrorShape bypasses rebuildSolidChain
       // entirely (it's a special case right here, not routed through it), so
       // its own baked-transform bake-in has to happen right after, same as
@@ -8799,7 +8804,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         if (!sourceSolid) throw new Error('Mirror source solid not found (join member)')
         const base = buildBaseWorkerParams(sourceSolid)
         const ops = buildSolidOpsForWorker(sourceSolid, feats)
-        await cadEngine.mirrorShape({ solidId: mf.solidId, sourceSolidId: sourceSolid.id, base, ops, plane: mf.mirrorPlane })
+        await cadEngine.mirrorShape({ solidId: mf.solidId, sourceSolidId: sourceSolid.id, base, ops, sourceTransform: sourceSolid.transform, plane: mf.mirrorPlane })
         members.push({ solidId: mf.solidId, base: null, ops: [] })
       } else if (mf.operation === 'join') {
         // Nested join member (join-of-join) — same "proactively rebuild,

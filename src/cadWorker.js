@@ -1499,6 +1499,17 @@ self.onmessage = async function(e) {
           base = cutTolerant(base, buildCutShape(clampCutDepth(op.params, params.base)))
         }
       }
+      // A source rebuilt from its sketch (params.base) comes back where it was
+      // DRAWN — its Move/Rotate lives separately on the feature's `transform`
+      // and has to be replayed here, the same way transformShape replays it on
+      // a full rebuild (rotate about the pristine shape's own centre, then
+      // translate). Without this a moved body mirrored as if it had never
+      // moved. A source read from shapeStore already has its moves baked in.
+      if (params.base && params.sourceTransform) {
+        const { position, rotation } = params.sourceTransform
+        if (rotation) base = base.rotate(rotation.angleDeg, rotation.pivot ?? base.boundingBox.center, rotation.axis)
+        if (position && position.some(v => v)) base = base.translate(position)
+      }
       // Work-plane mirror: pass the PlaneName string directly — replicad's
       // mirror() accepts 'XY'/'XZ'/'YZ' natively, and this app's work planes
       // always pass through the world origin (see WorkPlanes.js), so no

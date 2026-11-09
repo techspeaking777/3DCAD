@@ -191,6 +191,7 @@ export default function AppShell() {
               <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#69F0AE', whiteSpace: 'nowrap' }} title={auth.email}>
                 ● {displayName(auth.email)}
               </span>
+              <button onClick={() => window.open('/account/projects', '_blank')} title="See everything saved to your account" style={authBtnStyle}>My projects</button>
               <button onClick={logOut} style={{ ...authBtnStyle, borderColor: '#333', color: '#999' }}>Log out</button>
             </>
           ) : (

@@ -1,6 +1,6 @@
 import opencascade from 'replicad-opencascadejs/src/replicad_single.js'
 import opencascadeWasm from 'replicad-opencascadejs/src/replicad_single.wasm?url'
-import { setOC, ProjectionCamera, Sketcher, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, Vector, importSTEP, deserializeShape, makeBSplineApproximation, assembleWire, genericSweep } from 'replicad'
+import { setOC, ProjectionCamera, Sketcher, CompoundSketch, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, Vector, importSTEP, deserializeShape, makeBSplineApproximation, assembleWire, genericSweep } from 'replicad'
 import { projectedProfilePlane, dedupePoints3d } from './tools/sweepProject.js'
 import { springFrame } from './tools/springMath.js'
 
@@ -1469,7 +1469,7 @@ self.onmessage = async function(e) {
         // whole already-holed shape in one geometric op carries the holes
         // along for free, with no coordinate math needed.
         const holes = params.base.pts?.holes
-        if (holes && holes.length) {
+        if (holes && holes.length && !params.base.axis && !holesInFace({ pts: params.base.pts, isCut: false, draftAngleDeg: params.base.draftAngleDeg })) {
           for (const holePts of holes) {
             const holeCut = {
               pts: holePts, depthMm: (params.base.depthMm || 20) * 4 + 10,
@@ -2274,6 +2274,12 @@ function buildSpringAxial({ pitchMm, heightMm, lefthand=false, springAxis, sprin
   return shape
 }
 
+// True when buildExtrude puts pts.holes straight into the profile face (see
+// there). App3D mirrors this rule in holesCutSeparately().
+function holesInFace({ pts, isCut, draftAngleDeg }) {
+  return !isCut && !draftAngleDeg && !!pts?.holes?.length
+}
+
 function buildExtrude({ pts, depthMm, planeId, direction='both',
                         normal, origin, uAxis, vAxis, isCut=false, circle=null,
                         draftAngleDeg=0, draftDirection='out' }) {
@@ -2282,25 +2288,38 @@ function buildExtrude({ pts, depthMm, planeId, direction='both',
   // 1mm protrusion on the entry face prevents OCC coincident-face Boolean failures
   const OVH = isCut ? 1 : 0
 
+  // A plain extrude's nested loops (pts.holes — resolveNestedHoles in
+  // extrudeMath.js) go into the SAME face as the outline, so the plate comes
+  // out already holed from ONE extrude (like Fusion), instead of extruding the
+  // outline and boolean-cutting each hole. holesInFace() is the one test for
+  // this — App3D only cuts holes itself when it's false (drafted extrudes keep
+  // the old way: drafting would taper the hole walls too).
+  const holes = holesInFace({ pts, isCut, draftAngleDeg }) ? pts.holes : null
+  const profileWithHoles = (pts, planeId, offsetMm, normal, origin, uAxis, circle) => {
+    const outer = makeProfile(pts, planeId, offsetMm, normal, origin, uAxis, circle)
+    if (!holes) return outer
+    return new CompoundSketch([outer, ...holes.map(h => makeProfile(h, planeId, offsetMm, normal, origin, uAxis, h.circleMeta || null))])
+  }
+
   let shape
   if (direction === 'front') {
     if (planeId === 'face' && isCut) {
       // Replicad face plane normal points OUTWARD; 'front' cut means INWARD.
       // Put profile depthMm inside the solid and extrude outward through the face + OVH.
-      shape = makeProfile(pts, planeId, -depthMm, normal, origin, uAxis, circle).extrude(depthMm + OVH)
+      shape = profileWithHoles(pts, planeId, -depthMm, normal, origin, uAxis, circle).extrude(depthMm + OVH)
     } else {
       // Work plane, or a regular (non-cut) extrude off a face: profile sits right at the
       // face/plane and grows outward by depthMm. Applying the cutout's "profile inside,
       // extrude back out to the face" math here for a plain extrude would build the new
       // solid entirely inside the existing one — geometrically valid but invisible.
-      shape = makeProfile(pts, planeId, -OVH, normal, origin, uAxis, circle).extrude(depthMm + OVH)
+      shape = profileWithHoles(pts, planeId, -OVH, normal, origin, uAxis, circle).extrude(depthMm + OVH)
     }
   } else if (direction === 'back') {
     // Profile stays at depth; extend extrude by OVH so exit face clears the solid boundary.
-    shape = makeProfile(pts, planeId, -depthMm, normal, origin, uAxis, circle).extrude(depthMm + OVH)
+    shape = profileWithHoles(pts, planeId, -depthMm, normal, origin, uAxis, circle).extrude(depthMm + OVH)
   } else {
     // 'both': sketch at -half, extrude +depth → symmetric around sketch plane (no coincident face)
-    shape = makeProfile(pts, planeId, -half, normal, origin, uAxis, circle).extrude(depthMm)
+    shape = profileWithHoles(pts, planeId, -half, normal, origin, uAxis, circle).extrude(depthMm)
   }
 
   if (draftAngleDeg) {

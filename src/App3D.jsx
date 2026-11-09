@@ -686,6 +686,14 @@ function buildSolidOpsForWorker(solid, features) {
 // for it — the first step of every "rebuild + replay" chain. Returns both
 // the mesh (for an immediate render) and the params (as the `base` fallback
 // for subsequent subtract/fillet3d calls on this solidId).
+// A plain extrude's holes (profilePts.holes) are built INTO the extruded face
+// by the worker (buildExtrude / holesInFace) — one extrude, no boolean cuts.
+// Only a drafted extrude still has them cut separately afterwards (a draft
+// would taper the hole walls too). Keep in step with cadWorker's holesInFace.
+function holesCutSeparately(draftAngleDeg) {
+  return !!draftAngleDeg
+}
+
 async function rebuildBaseMesh(solid) {
   const baseWorkerParams = buildBaseWorkerParams(solid)
   let meshData = solid.operation === 'revolve'
@@ -726,7 +734,7 @@ async function rebuildBaseMesh(solid) {
   // only applies to a plain extrude.
   const holes = solid.operation !== 'revolve' && solid.operation !== 'loft' && solid.operation !== 'sweep' && solid.operation !== 'spring' && solid.operation !== 'import'
     ? solid.profilePts?.holes : null
-  if (holes && holes.length) {
+  if (holes && holes.length && holesCutSeparately(solid.draftAngleDeg)) {
     for (const holePts of holes) {
       const holeCut = {
         pts: holePts, depthMm: (solid.depthMm || 20) * 4 + 10, planeId: solid.planeId, direction: 'both',
@@ -10674,7 +10682,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             } : {}),
           }
           let meshData = await cadEngine.extrude({ ...memberWorkerParams, solidId: member.solidId })
-          for (const holePts of (memberPts.holes || [])) {
+          for (const holePts of (holesCutSeparately(draftAngleDeg) ? memberPts.holes || [] : [])) {
             const holeCut = {
               pts: holePts, depthMm: depthMm*4+10, planeId: member.planeId, direction: 'both',
               circle: holePts.circleMeta || null,
@@ -10769,7 +10777,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           // a plain profile) all the way through regardless of extrude
           // direction — generous depth, symmetric direction, guarantees full penetration.
           let holeIdx = -1
-          for (const holePts of (profPts.holes || [])) {
+          for (const holePts of (holesCutSeparately(draftAngleDeg) ? profPts.holes || [] : [])) {
             holeIdx++
             const holeCut = {
               pts: holePts, depthMm: depthMm*4+10, planeId, direction: 'both',

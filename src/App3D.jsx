@@ -239,6 +239,70 @@ function buildExtrudePrismGeometry(pts, planeId, facePlane, [loMm, hiMm]) {
   return geo
 }
 
+// Where a profile outline crosses or doubles back over itself (its own outer
+// loop or holes, all in sketch px), or null. OpenCascade can't make a face from
+// such a loop, and the preview's caps can't be filled either (it shows only
+// walls) — so this is checked before Extrude/Cutout to give a clear message
+// instead. Only proper crossings and collinear overlaps longer than 1 px count;
+// touching at a shared point is left alone. Each profile is checked on its own
+// (separate profiles may overlap). Returns {x, y} of the first problem found.
+function profileCrossing(profiles) {
+  const open = loop => {
+    const last = loop[loop.length - 1], first = loop[0]
+    return loop.length > 1 && Math.hypot(last.x - first.x, last.y - first.y) < 1e-6 ? loop.slice(0, -1) : loop
+  }
+  for (const prof of profiles) {
+    if (!prof || prof.length < 3) continue
+    const segs = []
+    ;[prof, ...(prof.holes || [])].map(open).forEach((loop, L) => {
+      const n = loop.length
+      if (n < 3) return
+      for (let i = 0; i < n; i++) {
+        const a = loop[i], b = loop[(i + 1) % n]
+        if (Math.hypot(b.x - a.x, b.y - a.y) < 1e-9) continue
+        segs.push({ a, b, L, i, n, minX: Math.min(a.x, b.x), maxX: Math.max(a.x, b.x), minY: Math.min(a.y, b.y), maxY: Math.max(a.y, b.y) })
+      }
+    })
+    segs.sort((s, t) => s.minX - t.minX)
+    const cross = (ox, oy, px, py, qx, qy) => (px - ox) * (qy - oy) - (py - oy) * (qx - ox)
+    for (let p = 0; p < segs.length; p++) {
+      const s = segs[p]
+      for (let q = p + 1; q < segs.length && segs[q].minX <= s.maxX; q++) {
+        const t = segs[q]
+        if (t.maxY < s.minY || t.minY > s.maxY) continue
+        if (s.L === t.L) {
+          const d = Math.abs(s.i - t.i)
+          if (d === 1 || d === s.n - 1) continue   // neighbours share a corner
+        }
+        const { a, b } = s, c = t.a, e = t.b
+        const lenS = Math.hypot(b.x - a.x, b.y - a.y), lenT = Math.hypot(e.x - c.x, e.y - c.y)
+        // Signed distances (px) of each segment's ends from the other's line.
+        const o1 = cross(a.x, a.y, b.x, b.y, c.x, c.y) / lenS, o2 = cross(a.x, a.y, b.x, b.y, e.x, e.y) / lenS
+        const o3 = cross(c.x, c.y, e.x, e.y, a.x, a.y) / lenT, o4 = cross(c.x, c.y, e.x, e.y, b.x, b.y) / lenT
+        const EPS = 1e-3
+        if (((o1 > EPS && o2 < -EPS) || (o1 < -EPS && o2 > EPS)) && ((o3 > EPS && o4 < -EPS) || (o3 < -EPS && o4 > EPS))) {
+          const k = o3 / (o3 - o4)
+          return { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k }
+        }
+        // Doubled-back / duplicate edge: both ends of t lie on s's line and
+        // the two segments share more than 1 px of length.
+        if (Math.abs(o1) < 0.05 && Math.abs(o2) < 0.05) {
+          const ux = (b.x - a.x) / lenS, uy = (b.y - a.y) / lenS
+          const tc = (c.x - a.x) * ux + (c.y - a.y) * uy, te = (e.x - a.x) * ux + (e.y - a.y) * uy
+          const lo = Math.max(0, Math.min(tc, te)), hi = Math.min(lenS, Math.max(tc, te))
+          if (hi - lo > 1) {
+            const m = (lo + hi) / 2
+            return { x: a.x + ux * m, y: a.y + uy * m }
+          }
+        }
+      }
+    }
+  }
+  return null
+}
+
+const PROFILE_CROSSING_MSG = `This shape crosses over itself where it's circled in red, so it can't be made solid. Trim the line that overshoots, or delete the doubled line, then press Finish again.`
+
 // Every visible body a new cutout will cut: its swept box must touch at
 // least one profile's box. Hidden bodies are skipped on purpose — hiding a
 // body is how you keep it out of a cut (e.g. a pin sitting in a hole).
@@ -3633,6 +3697,11 @@ const App3D = forwardRef(function App3D(props, ref) {
     ctx.restore()
   }
 
+  // Sketch px where the profile crosses itself, ringed red until the sketch
+  // changes (set by blockCrossingProfile).
+  const [sketchCrossPt, setSketchCrossPt] = useState(null)
+  useEffect(() => { setSketchCrossPt(null) }, [lines, arcs, splines, circles, sketchMode])
+
   // ── OVERLAY DRAW ──
   // Geometry lives in Three.js (Viewport3D). Tool overlays (snap indicators,
   // rubber-band lines, selection boxes, labels, previews) are drawn onto a
@@ -3779,6 +3848,16 @@ const App3D = forwardRef(function App3D(props, ref) {
     // dot instead of the (much fainter) origin is off-axis from the real
     // path, which BRepOffsetAPI_MakePipeShell then renders as a
     // self-intersecting spike rather than a clean pipe.
+    if (sketchMode && sketchCrossPt) {
+      ctx.save()
+      ctx.translate(sketchCrossPt.x, sketchCrossPt.y)
+      ctx.scale(1/sc, 1/sc)
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 6
+      ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI*2); ctx.stroke()
+      ctx.strokeStyle = '#E53935'; ctx.lineWidth = 3
+      ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI*2); ctx.stroke()
+      ctx.restore()
+    }
     if (sketchMode && sweepState?.path && sweepState?.ghostEndpoint) {
       const gp = sweepState.ghostEndpoint
       ctx.save()
@@ -4531,7 +4610,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (segs) for (const s of segs) drawPreviewLine(ctx,s.x1,s.y1,s.x2,s.y2,includeEdgeConstruction?'#90A4AE':'#FFEB3B',1,sc)
     }
 
-  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction])
+  },[lines,circles,arcs,splines,sketchCrossPt,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction])
 
 
   // ── Phase 2 Step 3: plane tagging ────────────────────────────────────────
@@ -5041,6 +5120,20 @@ const App3D = forwardRef(function App3D(props, ref) {
     saveAsFlatSketch(editingId, planeId, plane, isFace)
   }
 
+  // Finish refuses a profile that crosses itself and stays in the sketch with
+  // the spot ringed. Returns true when it blocked.
+  function blockCrossingProfile(profilesPts, plane) {
+    const at = profileCrossing(profilesPts)
+    if (!at) return false
+    setSketchMode(true)
+    setActivePlane(plane)
+    setCadError(PROFILE_CROSSING_MSG)
+    setTimeout(() => setCadError(prev => prev === PROFILE_CROSSING_MSG ? null : prev), 10000)
+    // After the effect above has cleared any old ring.
+    setTimeout(() => setSketchCrossPt(at), 0)
+    return true
+  }
+
   function handleFinishSketch() {
     const plane = activePlaneRef.current
     const editingId = activeSketchId
@@ -5081,6 +5174,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         return
       }
       const best = allProfiles[0]
+      if (blockCrossingProfile([best.pts], plane)) return
       const profile = { pts: best.pts, circle: best.pts.circleMeta || null }
       const axisLine = lines.find(l => l.style === 'axis' && (l.plane||'XY') === planeId)
       let springAxis
@@ -5163,6 +5257,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       // sweepState.armed). Done there commits; "✎ Sketch" comes back here with the
       // drawing as it was (ghost path lines included).
       const best = allProfiles[0]
+      if (blockCrossingProfile([best.pts], plane)) return
       viewport3dRef.current?.snapToIsometric()
       setSweepState(prev => ({
         ...prev, armed: true, profile: { pts: best.pts, circle: best.pts.circleMeta || null }, profileBasis: plane,
@@ -5187,6 +5282,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         return
       }
       const best = allProfiles[0]
+      if (blockCrossingProfile([best.pts], plane)) return
       const profileEntry = {
         sketchLines: ownLines, sketchCircles: ownCircles, sketchArcs: ownArcs, sketchSplines: ownSplines,
         pts: best.pts, circle: best.pts.circleMeta || null,
@@ -5213,6 +5309,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       }
 
       const best = allProfiles[0]
+      if (blockCrossingProfile(profiles, plane)) return
       const editingFeat = editingFeatureId ? features.find(f => f.id === editingFeatureId) : null
       const isCutoutEdit = editingFeat && (extrudeTool === 'cutout' || extrudeTool === 'revolvecut')
 
@@ -10358,6 +10455,12 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (revolveAxis && pts && profileCrossesAxis(pts, revolveAxis)) {
       setCadError('The shape crosses this axis — pick the other axis, or edit the sketch so it sits on one side.')
       setTimeout(() => setCadError(null), 6000)
+      return
+    }
+
+    if (profileCrossing(revolveAxis ? [pts] : profiles)) {
+      setCadError(PROFILE_CROSSING_MSG)
+      setTimeout(() => setCadError(null), 10000)
       return
     }
 

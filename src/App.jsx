@@ -15,7 +15,7 @@ import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandl
 import { isEditableSpline, hitSplineNode, moveSplineNode, insertSplineNode, deleteSplineNode } from './tools/splineEdit.js'
 import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine, perpLabelOffset } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
-import { loadJSON, exportDXF, parseDXF, saveProjectAs, canPickSaveLocation } from './tools/saveLoad.js'
+import { loadJSON, exportDXF, parseDXF, centreDxfResult, saveProjectAs, canPickSaveLocation } from './tools/saveLoad.js'
 import TracerPanel from './tools/TracerPanel.jsx'
 import TextPanel from './tools/TextPanel.jsx'
 import PageSetupPanel from './tools/PageSetupPanel.jsx'
@@ -2816,6 +2816,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
 
   function handleContextMenu(e){
     e.preventDefault()
+    // Right-click ends a line chain, like Enter / double-click.
+    if (tool==='line'&&startPoint){resetDrawState();return}
     if (tool==='spline'&&splinePoints.length>=2){finishSpline(splinePoints);return}
     if (tool==='mirror'&&!mirrorAccepted&&mirrorSel.length>0) setMirrorAccepted(true)
     if (tool==='movecopy'&&!moveCopyAccepted&&moveCopySel.length>0) setMoveCopyAccepted(true)
@@ -3214,7 +3216,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           hints:[K('T','toggle off'), K('Esc')] }
         return { step:null, total:null, color:c,
           action:`${dimLocked?'🔒 ':''}${dimInput||'—'} mm  ·  ${angleLocked?'🔒 ':''}${angleInput||'—'}°`,
-          hints:[K('Tab','toggle field'), K('Enter','lock'), K('hold Shift','lock guide'), K('T','tangent'), K('Esc')] }
+          hints:[K('Tab','toggle field'), K('Enter','lock'), K('right-click','finish'), K('hold Shift','lock guide'), K('T','tangent'), K('Esc')] }
       }
       return { step:null, total:null, color:c,
         action:'Click first point',
@@ -3236,7 +3238,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         hints:[K('Esc','cancel')] }
       return { step:2, total:3, color:c,
         action:`${splinePoints.length} pts placed`,
-        hints:[K('C',splineClosed?'closed':'open'), K('dbl-click','finish'), K('Esc')] }
+        hints:[K('C',splineClosed?'closed':'open'), K('dbl-click / right-click','finish'), K('Esc')] }
     }
 
     if (tool==='offset') {
@@ -3785,7 +3787,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
               const file=e.target.files?.[0];if(!file)return
               try{
                 const text=await file.text()
-                const result=parseDXF(text,2)
+                // Centred on the origin and framed (DXFs usually start at the part's corner).
+                const result=centreDxfResult(parseDXF(text,2))
                 commit(snapshot())
                 setLines(p=>[...p,...result.lines])
                 setCircles(p=>[...p,...result.circles])
@@ -3793,6 +3796,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
                 setSplines(p=>[...p,...result.splines])
                 const total=result.lines.length+result.circles.length+result.arcs.length+result.splines.length
                 setLoadError(null)
+                if (result.box) zoomToBox(result.box.minX,result.box.maxX,result.box.minY,result.box.maxY)
                 alert(`DXF imported: ${total} entities (${result.lines.length} lines, ${result.circles.length} circles, ${result.arcs.length} arcs, ${result.splines.length} polylines)`)
               }catch(err){
                 setLoadError('DXF import failed: '+err.message)

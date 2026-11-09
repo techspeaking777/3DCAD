@@ -21,7 +21,7 @@ import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandl
 import { isEditableSpline, hitSplineNode, moveSplineNode, insertSplineNode, deleteSplineNode } from './tools/splineEdit.js'
 import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine, perpLabelOffset } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
-import { loadJSON, exportDXF, parseDXF, saveProjectAs, canPickSaveLocation, exportFaceDXF as writeFaceDXF, saveBlobAs, saveProjectFileAs, loadProjectFile, serializeProject, parseProjectData } from './tools/saveLoad.js'
+import { loadJSON, exportDXF, parseDXF, centreDxfResult, saveProjectAs, canPickSaveLocation, exportFaceDXF as writeFaceDXF, saveBlobAs, saveProjectFileAs, loadProjectFile, serializeProject, parseProjectData } from './tools/saveLoad.js'
 import { getAuthState, fetchMyClasses, saveNewCloudProject, updateCloudProject, loadCloudProject, saveFeedbackCopy, updateFeedbackCopy } from './tools/cloudSave.js'
 import { detectProfiles, detectPath, buildSolid } from './tools/extrudeMath.js'
 import { cadEngine } from './cadEngine.js'
@@ -6773,9 +6773,12 @@ const App3D = forwardRef(function App3D(props, ref) {
         const group = replicadMeshToThree(meshData, solid.color, solidId)
         setSolids(prev => prev.map(s => s.id===solidId ? { ...s, group, transform: newTransform } : s))
         setFeatures(prev => prev.map(f => f.id===feat.id ? { ...f, transform: newTransform } : f))
-        // A mirror of this body follows it (mirrorShape replays the source's
-        // `transform`, so pass the new one).
-        await rebuildDependentMirrors({ ...solid, transform: newTransform })
+        // Mirrors of this body stay put — they keep the source position
+        // snapshotted when they were made. Older mirrors without a snapshot
+        // get frozen at the source's position before this move.
+        const oldTransform = solid.transform ?? null
+        setFeatures(prev => prev.map(f => f.operation === 'mirror' && f.sourceSolidId === solidId && !('sourceTransform' in f)
+          ? { ...f, sourceTransform: oldTransform } : f))
       }
       // Move/Snap Move (not Copy) is the only case that skips the
       // preview-position reset: its solidId gets a freshly rebuilt group
@@ -8658,7 +8661,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     const ops = buildSolidOpsForWorker(sourceSolid, features)
 
     const newSolidId = Date.now()
-    const meshData = await cadEngine.mirrorShape({ solidId: newSolidId, sourceSolidId: sourceSolid.id, base, ops, sourceTransform: sourceSolid.transform, plane: planeParams })
+    const meshData = await cadEngine.mirrorShape({ solidId: newSolidId, sourceSolidId: sourceSolid.id, base, ops, sourceTransform: sourceSolid.transform ?? null, plane: planeParams })
     const group = replicadMeshToThree(meshData, sourceSolid.color, newSolidId)
 
     setSolids(prev => [...prev, {
@@ -8672,6 +8675,10 @@ const App3D = forwardRef(function App3D(props, ref) {
       solidId: newSolidId, operation: 'mirror',
       sourceSolidId: sourceSolid.id, sourceFeatureId: sourceFeat.id,
       mirrorPlane: planeParams, color: sourceSolid.color,
+      // Where the source sat when this mirror was made. Rebuilds replay THIS,
+      // not the source's current transform, so moving the source later
+      // doesn't drag the mirror along (see mirrorSourceTransform).
+      sourceTransform: sourceSolid.transform ?? null,
     }])
     // No rebuildDependentMirrors call here — a freshly-created mirror solid
     // cannot yet have anything depending on it.
@@ -8686,6 +8693,13 @@ const App3D = forwardRef(function App3D(props, ref) {
   // to cascade to ITS dependents in turn — always terminates without a cycle
   // guard because a mirror's sourceSolidId always points at a solid created
   // earlier, so the dependency graph can't loop back on itself.
+  // The source Move/Rotate a mirror replays: the one snapshotted when the
+  // mirror was made (null = source wasn't moved). Mirrors saved before the
+  // snapshot existed fall back to the source's current transform.
+  function mirrorSourceTransform(mirrorFeat, sourceSolid) {
+    return 'sourceTransform' in mirrorFeat ? mirrorFeat.sourceTransform : sourceSolid.transform
+  }
+
   async function rebuildDependentMirrors(solid) {
     const dependents = features.filter(f => f.operation === 'mirror' && f.sourceSolidId === solid.id)
     if (dependents.length === 0) return
@@ -8695,7 +8709,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     const ops = buildSolidOpsForWorker(solid, features)
     for (const mirrorFeat of dependents) {
       try {
-        let meshData = await cadEngine.mirrorShape({ solidId: mirrorFeat.solidId, sourceSolidId: solid.id, base, ops, sourceTransform: solid.transform, plane: mirrorFeat.mirrorPlane })
+        let meshData = await cadEngine.mirrorShape({ solidId: mirrorFeat.solidId, sourceSolidId: solid.id, base, ops, sourceTransform: mirrorSourceTransform(mirrorFeat, solid), plane: mirrorFeat.mirrorPlane })
         // The mirror's own Move/Rotate, if it has one (as rebuildFeatureSolid does).
         if (mirrorFeat.transform) meshData = await cadEngine.transformShape({ solidId: mirrorFeat.solidId, position: mirrorFeat.transform.position, rotation: mirrorFeat.transform.rotation })
         const group = replicadMeshToThree(meshData, mirrorFeat.color, mirrorFeat.solidId)
@@ -8758,7 +8772,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (!sourceSolid) throw new Error('Mirror source solid not found')
       const base = buildBaseWorkerParams(sourceSolid)
       const ops = buildSolidOpsForWorker(sourceSolid, feats)
-      let meshData = await cadEngine.mirrorShape({ solidId: feat.solidId, sourceSolidId: sourceSolid.id, base, ops, sourceTransform: sourceSolid.transform, plane: feat.mirrorPlane })
+      let meshData = await cadEngine.mirrorShape({ solidId: feat.solidId, sourceSolidId: sourceSolid.id, base, ops, sourceTransform: mirrorSourceTransform(feat, sourceSolid), plane: feat.mirrorPlane })
       // A moved/copied mirror result — mirrorShape bypasses rebuildSolidChain
       // entirely (it's a special case right here, not routed through it), so
       // its own baked-transform bake-in has to happen right after, same as
@@ -8804,7 +8818,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         if (!sourceSolid) throw new Error('Mirror source solid not found (join member)')
         const base = buildBaseWorkerParams(sourceSolid)
         const ops = buildSolidOpsForWorker(sourceSolid, feats)
-        await cadEngine.mirrorShape({ solidId: mf.solidId, sourceSolidId: sourceSolid.id, base, ops, sourceTransform: sourceSolid.transform, plane: mf.mirrorPlane })
+        await cadEngine.mirrorShape({ solidId: mf.solidId, sourceSolidId: sourceSolid.id, base, ops, sourceTransform: mirrorSourceTransform(mf, sourceSolid), plane: mf.mirrorPlane })
         members.push({ solidId: mf.solidId, base: null, ops: [] })
       } else if (mf.operation === 'join') {
         // Nested join member (join-of-join) — same "proactively rebuild,
@@ -11369,6 +11383,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   function handleMouseDown(e){
+    if (e.button===2) rightDownRef.current={x:e.clientX,y:e.clientY}
     if (e.button===1){e.preventDefault();isPanningRef.current=true;lastPanPosRef.current={x:e.clientX,y:e.clientY}}
     if (e.button===0){
       const worldPos=screenToWorld(e.clientX,e.clientY)
@@ -12295,8 +12310,16 @@ const App3D = forwardRef(function App3D(props, ref) {
     resetSpline()
   }
 
+  // Where the right button went down: a right-DRAG orbits the camera, and its
+  // release must not count as a right-click (it would end the line/spline).
+  const rightDownRef=useRef(null)
   function handleContextMenu(e){
     e.preventDefault()
+    const rd=rightDownRef.current
+    rightDownRef.current=null
+    if (rd&&Math.hypot(e.clientX-rd.x,e.clientY-rd.y)>5) return
+    // Right-click ends a line chain, like Enter / double-click.
+    if (tool==='line'&&startPoint){resetDrawState();return}
     if (tool==='spline'&&splinePoints.length>=2){finishSpline(splinePoints);return}
     if (tool==='mirror'&&!mirrorAccepted&&mirrorSel.length>0) setMirrorAccepted(true)
     if (tool==='movecopy'&&!moveCopyAccepted&&moveCopySel.length>0) setMoveCopyAccepted(true)
@@ -13024,7 +13047,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           hints:[K('T','toggle off'), K('Esc')] }
         return { step:null, total:null, color:c,
           action:`${dimLocked?'🔒 ':''}${dimInput||'—'} mm  ·  ${angleLocked?'🔒 ':''}${angleInput||'—'}°`,
-          hints:[K('Tab','toggle field'), K('Enter','lock'), K('hold Shift','lock guide'), K('T','tangent'), K('Esc')] }
+          hints:[K('Tab','toggle field'), K('Enter','lock'), K('right-click','finish'), K('hold Shift','lock guide'), K('T','tangent'), K('Esc')] }
       }
       return { step:null, total:null, color:c,
         action:'Click first point',
@@ -13052,7 +13075,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         hints:[K('Esc','cancel')] }
       return { step:2, total:3, color:c,
         action:`${splinePoints.length} pts placed`,
-        hints:[K('C',splineClosed?'closed':'open'), K('dbl-click','finish'), K('Esc')] }
+        hints:[K('C',splineClosed?'closed':'open'), K('dbl-click / right-click','finish'), K('Esc')] }
     }
 
     if (tool==='offset') {
@@ -14478,7 +14501,8 @@ const App3D = forwardRef(function App3D(props, ref) {
                   const file=e.target.files?.[0];if(!file)return
                   try{
                     const text=await file.text()
-                    const result=parseDXF(text,2)
+                    // Centred on the sketch origin and framed (DXFs usually start at the part's corner).
+                    const result=centreDxfResult(parseDXF(text,2))
                     commit(snapshot())
                     setLines(p=>[...p,...result.lines])
                     setCircles(p=>[...p,...result.circles])
@@ -14486,6 +14510,8 @@ const App3D = forwardRef(function App3D(props, ref) {
                     setSplines(p=>[...p,...result.splines])
                     const total=result.lines.length+result.circles.length+result.arcs.length+result.splines.length
                     setLoadError(null)
+                    // After the viewport has drawn the new geometry.
+                    if (result.box) setTimeout(()=>zoomToFit(),150)
                     alert(`DXF imported: ${total} entities (${result.lines.length} lines, ${result.circles.length} circles, ${result.arcs.length} arcs, ${result.splines.length} polylines)`)
                   }catch(err){
                     setLoadError('DXF import failed: '+err.message)

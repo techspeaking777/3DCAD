@@ -547,6 +547,40 @@ export async function exportFaceDXF(lines, circles, arcs, suggestedName='face.dx
 // Parses DXF files and converts to our data model.
 // Supports: LINE, CIRCLE, ARC, LWPOLYLINE, POLYLINE/VERTEX, SPLINE
 
+// Moves a parsed DXF ({lines, circles, arcs, splines}) so the middle of its
+// overall bounding box sits on the origin — DXFs usually have their origin at
+// the part's bottom-left corner, which otherwise lands the part off to one
+// side. The whole drawing moves as one, so pieces keep their spacing.
+// Returns {...result, box:{minX,maxX,minY,maxY}} (box after the move), or the
+// result unchanged (box:null) when it has nothing in it.
+export function centreDxfResult(result) {
+  let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity
+  const add = (x, y) => { minX=Math.min(minX,x); maxX=Math.max(maxX,x); minY=Math.min(minY,y); maxY=Math.max(maxY,y) }
+  result.lines.forEach(l => { add(l.x1, l.y1); add(l.x2, l.y2) })
+  result.circles.forEach(c => { add(c.cx-c.r, c.cy-c.r); add(c.cx+c.r, c.cy+c.r) })
+  result.arcs.forEach(a => {
+    // Real arc extent (ends + any compass points the sweep passes), not the
+    // full circle — a big shallow arc would otherwise pull the centre off.
+    const sweep = norm2pi(a.endAngle - a.startAngle) || 2*Math.PI
+    const steps = 32
+    for (let i = 0; i <= steps; i++) {
+      const t = a.startAngle + sweep*i/steps
+      add(a.cx + a.r*Math.cos(t), a.cy + a.r*Math.sin(t))
+    }
+  })
+  result.splines.forEach(s => (s.points || []).forEach(p => add(p.x, p.y)))
+  if (!isFinite(minX)) return { ...result, box: null }
+  const dx = -(minX+maxX)/2, dy = -(minY+maxY)/2
+  return {
+    ...result,
+    lines:   result.lines.map(l => ({ ...l, x1:l.x1+dx, y1:l.y1+dy, x2:l.x2+dx, y2:l.y2+dy })),
+    circles: result.circles.map(c => ({ ...c, cx:c.cx+dx, cy:c.cy+dy })),
+    arcs:    result.arcs.map(a => ({ ...a, cx:a.cx+dx, cy:a.cy+dy })),
+    splines: result.splines.map(s => ({ ...s, points:(s.points || []).map(p => ({ ...p, x:p.x+dx, y:p.y+dy })) })),
+    box: { minX:minX+dx, maxX:maxX+dx, minY:minY+dy, maxY:maxY+dy },
+  }
+}
+
 export function parseDXF(dxfText, scale=2) {
   // scale = px per mm (our SCALE constant)
   const mm = v => v * scale   // DXF units assumed mm

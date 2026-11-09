@@ -1982,8 +1982,10 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       let gizmo = moveGizmoRef.current
       if (!gizmo) {
         gizmo = new THREE.Group()
-        const SHAFT_LEN=80, SHAFT_R=3, HEAD_LEN=28, HEAD_R=9
-        const RING_R=90, RING_TUBE=2.5
+        // Half the original size (was 80/3/28/9, ring 90/2.5). Shaft, head
+        // and ring thickness are kept a bit over half so they stay easy to grab.
+        const SHAFT_LEN=40, SHAFT_R=2, HEAD_LEN=14, HEAD_R=6
+        const RING_R=45, RING_TUBE=1.75
         const materials = {}
         for (const { axis, color } of AXIS_META) {
           // One material shared by this axis's whole handle (move arrow's

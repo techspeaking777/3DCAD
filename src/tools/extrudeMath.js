@@ -215,10 +215,14 @@ export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
       } else {
         // Arc — sample intermediate points
         const arc = seg.ref
-        let a0 = forward ? arc.startAngle : arc.endAngle
-        let a1 = forward ? arc.endAngle   : arc.startAngle
-        if (forward && a1 < a0) a1 += Math.PI*2
-        if (!forward && a0 < a1) a0 += Math.PI*2
+        // The arc's real sweep is end − start taken within (0, 2π] — an angle
+        // can be stored a whole turn off (e.g. −3π/2 for π/2), and a raw
+        // difference then reads as MORE than a full turn: a short corner arc
+        // whose ends sit within CLOSE_TOL became a full-circle "profile".
+        const TWO_PI = Math.PI*2
+        const sweep = ((arc.endAngle - arc.startAngle) % TWO_PI + TWO_PI) % TWO_PI || TWO_PI
+        const a0 = forward ? arc.startAngle : arc.endAngle
+        const a1 = forward ? arc.startAngle + sweep : arc.endAngle - sweep
         const steps = Math.max(4, Math.round(Math.abs(a1-a0) / (Math.PI/16)))
         const startIdx = pts.length
         for (let i=0; i<steps; i++) {

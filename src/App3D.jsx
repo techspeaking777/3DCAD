@@ -3983,7 +3983,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (!color) return
       const lw=(isDelTarget||isOffSel||isMirSel||isCenSel||isMCSel||isRCSel||isRzSel?3:2)/sc
       ctx.save();ctx.strokeStyle=color;ctx.lineWidth=lw;ctx.setLineDash([])
-      ctx.beginPath();ctx.arc(arc.cx,arc.cy,arc.r,arc.startAngle,arc.endAngle,false);ctx.stroke();ctx.restore()
+      ctx.beginPath();ctx.arc(arc.cx,arc.cy,arc.r,arc.startAngle,arc.startAngle+(norm2pi(arc.endAngle-arc.startAngle)||2*Math.PI),false);ctx.stroke();ctx.restore()
     })
     // Splines never got the same selection/hover highlight treatment as
     // lines/circles/arcs above (drawSplines existed, just unused here) — so

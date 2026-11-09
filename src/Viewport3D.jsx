@@ -312,8 +312,10 @@ function buildCircle(c, color=0xffdd44) {
 }
 function buildArc(arc, color=0xffdd44) {
   const p=arc.plane, fp=arc.facePlane, SEG=64
-  let start=arc.startAngle,end=arc.endAngle; if(end<start)end+=Math.PI*2
-  const span=end-start, steps=Math.max(4,Math.round(SEG*span/(Math.PI*2))), pts=[]
+  // Sweep taken within (0, 2π] — an angle stored a whole turn off (e.g. −3π/2
+  // for π/2) would otherwise read as more than a full turn and draw a circle.
+  const TWO_PI=Math.PI*2, start=arc.startAngle
+  const span=((arc.endAngle-start)%TWO_PI+TWO_PI)%TWO_PI||TWO_PI, steps=Math.max(4,Math.round(SEG*span/(Math.PI*2))), pts=[]
   for (let i=0;i<=steps;i++){const a=start+(i/steps)*span; pts.push(pt2three(arc.cx+Math.cos(a)*arc.r,arc.cy+Math.sin(a)*arc.r,p,fp))}
   return makeHaloLine(pts, color, arc.style)
 }

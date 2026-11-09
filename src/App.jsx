@@ -1328,7 +1328,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       const isRzSel=resizeSel.some(e=>e.kind==='arc'&&e.idx===idx)
       const isRzHov=resizeHover?.kind==='arc'&&resizeHover.idx===idx&&!isRzSel
       const color=isDelTarget?'#F44336':isOffSel||isMirSel||isMCSel||isRCSel||isRzSel?'#FF9800':isOffHov||isMirHov||isMCHov||isRCHov||isRzHov?'#FFD600':'#222'
-      ctx.beginPath();ctx.arc(arc.cx,arc.cy,arc.r,arc.startAngle,arc.endAngle,false)
+      // End = start + sweep within (0, 2π]: an angle stored a turn off would otherwise draw a full circle
+      ctx.beginPath();ctx.arc(arc.cx,arc.cy,arc.r,arc.startAngle,arc.startAngle+(norm2pi(arc.endAngle-arc.startAngle)||2*Math.PI),false)
       const aLW=(isDelTarget||isOffSel||isMirSel||isMCSel||isRCSel||isRzSel?3:isOffHov||isMirHov||isMCHov||isRCHov||isRzHov?2:1.5)/sc
       applyEntityStyle(ctx,arc,sc,color,aLW);ctx.stroke();ctx.setLineDash([])
       ;[arc.startAngle,arc.endAngle].forEach(a=>{

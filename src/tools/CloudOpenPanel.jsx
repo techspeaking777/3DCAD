@@ -77,7 +77,14 @@ export default function CloudOpenPanel({ onOpen, onClose }) {
           {!error && projects?.map(p => (
             <div key={p.id} style={s.row}>
               <button style={s.rowOpen} onClick={()=>onOpen(p.id)}>
-                <div style={{fontWeight:'bold',color:'#fff'}}>{p.name}</div>
+                <div style={{fontWeight:'bold',color:'#fff'}}>
+                  {p.name}
+                  {p.shared_by && (
+                    <span style={{marginLeft:8,fontSize:10,fontWeight:'normal',color:'#FFB74D',border:'1px solid #FF9800',borderRadius:3,padding:'1px 5px',whiteSpace:'nowrap'}}>
+                      Shared by {p.shared_by}
+                    </span>
+                  )}
+                </div>
                 <div style={{fontSize:11,color:'#888',marginTop:2}}>
                   Updated {new Date(p.updated_at).toLocaleString()}
                   {p.class_id && classNameById.has(p.class_id) ? ` · ${classNameById.get(p.class_id)}` : ''}

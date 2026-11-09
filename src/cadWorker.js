@@ -2300,6 +2300,16 @@ function buildExtrude({ pts, depthMm, planeId, direction='both',
     if (!holes) return outer
     return new CompoundSketch([outer, ...holes.map(h => makeProfile(h, planeId, offsetMm, normal, origin, uAxis, h.circleMeta || null))])
   }
+  try {
+    return buildExtrudeShape()
+  } catch (e) {
+    // App3D's Finish check (holeTouching) should catch this first; this is the
+    // plain-English backstop for anything it misses.
+    if (holes) throw new Error('a hole touches the edge of the shape or another hole — leave a small gap between them.', { cause: e })
+    throw e
+  }
+
+  function buildExtrudeShape() {
 
   let shape
   if (direction === 'front') {
@@ -2369,6 +2379,7 @@ function buildExtrude({ pts, depthMm, planeId, direction='both',
   }
 
   return shape
+  }
 }
 
 // Rebuilds a solid's OWN base shape (no cuts/fillets applied) from its stored

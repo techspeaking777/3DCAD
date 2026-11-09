@@ -301,6 +301,59 @@ function profileCrossing(profiles) {
   return null
 }
 
+// Where a hole of a plain-extrude profile touches (or nearly touches) the
+// outline or another hole, or null — sketch px. Holes are built INTO the
+// extruded face (worker holesInFace), and OpenCascade can't make a face whose
+// hole touches its edge, so Finish warns instead of a failed extrude.
+// Crossings are profileCrossing's job; this catches the touching cases it
+// deliberately leaves alone (a circle tangent to an edge, two holes kissing).
+// TOL 0.2 px = 0.1 mm — far above the error of a sampled circle (~0.02 px).
+function holeTouching(profiles) {
+  const TOL = 0.2
+  const segDist = (a, b, c, e) => {
+    // Closest points of segments ab and ce (they don't cross — profileCrossing
+    // runs first), so the answer is at one of the four endpoints.
+    const pt = (p, s0, s1) => {
+      const dx = s1.x - s0.x, dy = s1.y - s0.y, L = dx*dx + dy*dy
+      const t = L ? Math.max(0, Math.min(1, ((p.x - s0.x)*dx + (p.y - s0.y)*dy) / L)) : 0
+      const q = { x: s0.x + dx*t, y: s0.y + dy*t }
+      return { d: Math.hypot(p.x - q.x, p.y - q.y), at: { x: (p.x + q.x)/2, y: (p.y + q.y)/2 } }
+    }
+    return [pt(a, c, e), pt(b, c, e), pt(c, a, b), pt(e, a, b)].reduce((m, r) => r.d < m.d ? r : m)
+  }
+  const box = loop => {
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity
+    for (const p of loop) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y) }
+    return { x0, x1, y0, y1 }
+  }
+  const near = (A, B) => !(A.x1 + TOL < B.x0 || B.x1 + TOL < A.x0 || A.y1 + TOL < B.y0 || B.y1 + TOL < A.y0)
+  for (const prof of profiles) {
+    if (!prof?.holes?.length) continue
+    const loops = [prof, ...prof.holes]
+    const boxes = loops.map(box)
+    for (let i = 0; i < loops.length; i++) {
+      for (let j = i + 1; j < loops.length; j++) {
+        // The outline vs a hole only matters near the outline's edge, and a
+        // hole's box is always inside the outline's — so test segments.
+        if (i > 0 && !near(boxes[i], boxes[j])) continue
+        const A = loops[i], B = loops[j]
+        for (let a = 0; a < A.length; a++) {
+          const a0 = A[a], a1 = A[(a + 1) % A.length]
+          const sb = { x0: Math.min(a0.x, a1.x), x1: Math.max(a0.x, a1.x), y0: Math.min(a0.y, a1.y), y1: Math.max(a0.y, a1.y) }
+          if (!near(sb, boxes[j])) continue
+          for (let b = 0; b < B.length; b++) {
+            const b0 = B[b], b1 = B[(b + 1) % B.length]
+            const r = segDist(a0, a1, b0, b1)
+            if (r.d < TOL) return r.at
+          }
+        }
+      }
+    }
+  }
+  return null
+}
+const HOLE_TOUCHING_MSG = `A hole touches the edge of the shape, or another hole, where it's circled in red, so it can't be made solid. Move it to leave a small gap (or trim it into the outline), then press Finish again.`
+
 const PROFILE_CROSSING_MSG = `This shape crosses over itself where it's circled in red, so it can't be made solid. Trim the line that overshoots, or delete the doubled line, then press Finish again.`
 
 // Every visible body a new cutout will cut: its swept box must touch at
@@ -5130,13 +5183,16 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   // Finish refuses a profile that crosses itself and stays in the sketch with
   // the spot ringed. Returns true when it blocked.
-  function blockCrossingProfile(profilesPts, plane) {
-    const at = profileCrossing(profilesPts)
+  // withHoles: also refuse a hole touching the outline/another hole (plain
+  // Extrude only — that's where holes are built into the face).
+  function blockCrossingProfile(profilesPts, plane, withHoles = false) {
+    let at = profileCrossing(profilesPts), msg = PROFILE_CROSSING_MSG
+    if (!at && withHoles) { at = holeTouching(profilesPts); msg = HOLE_TOUCHING_MSG }
     if (!at) return false
     setSketchMode(true)
     setActivePlane(plane)
-    setCadError(PROFILE_CROSSING_MSG)
-    setTimeout(() => setCadError(prev => prev === PROFILE_CROSSING_MSG ? null : prev), 10000)
+    setCadError(msg)
+    setTimeout(() => setCadError(prev => prev === msg ? null : prev), 10000)
     // After the effect above has cleared any old ring.
     setTimeout(() => setSketchCrossPt(at), 0)
     return true
@@ -5317,7 +5373,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       }
 
       const best = allProfiles[0]
-      if (blockCrossingProfile(profiles, plane)) return
+      if (blockCrossingProfile(profiles, plane, extrudeTool === 'extrude')) return
       const editingFeat = editingFeatureId ? features.find(f => f.id === editingFeatureId) : null
       const isCutoutEdit = editingFeat && (extrudeTool === 'cutout' || extrudeTool === 'revolvecut')
 

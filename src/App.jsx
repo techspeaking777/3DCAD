@@ -3797,7 +3797,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
                 const total=result.lines.length+result.circles.length+result.arcs.length+result.splines.length
                 setLoadError(null)
                 if (result.box) zoomToBox(result.box.minX,result.box.maxX,result.box.minY,result.box.maxY)
-                alert(`DXF imported: ${total} entities (${result.lines.length} lines, ${result.circles.length} circles, ${result.arcs.length} arcs, ${result.splines.length} polylines)`)
+                alert(`DXF imported: ${total} entities (${result.lines.length} lines, ${result.circles.length} circles, ${result.arcs.length} arcs, ${result.splines.length} polylines)${result.units && result.units !== 'mm' ? ` — drawing was in ${result.units}, converted to mm` : ''}`)
               }catch(err){
                 setLoadError('DXF import failed: '+err.message)
               }

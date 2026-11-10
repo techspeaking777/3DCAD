@@ -1207,7 +1207,14 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     const planeHit = (!extrudeArmedRef.current && s.workPlanes && showWorkPlanesRef.current && !s.tween?.active)
       ? hitTestPlanes(s.raycaster, s.workPlanes)
       : null
-    const faceWins = !!faceMeshHit && (!planeHit || faceMeshHit.distance < planeHit.distance)
+    // A body face under the cursor wins over a work plane — the planes are
+    // big see-through sheets standing through the model, so "nearest" picked
+    // the plane whenever it passed in front of the face a student was
+    // clicking (e.g. a Cutout on a plate's top face opened on the YZ plane).
+    // A plane can still be picked anywhere it sticks out past the bodies.
+    // Mirror's Pick Plane keeps nearest-wins: there, picking a plane that
+    // passes THROUGH the body is the whole point.
+    const faceWins = !!faceMeshHit && (!planeHit || !mirrorPlanePickArmedRef.current || faceMeshHit.distance < planeHit.distance)
 
     // ── Face hover (only when SKETCH tool is armed) ──
     if (sketchArmedRef.current && s.solidsGroup && !s.tween?.active) {
@@ -1264,9 +1271,18 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     if (onMouseMove) onMouseMove(e)
   }
 
+  // True while the camera is animating to a new view (picking a plane/face,
+  // the view cube, Fit…). Sketch clicks made then would land in the wrong
+  // place — the view under the cursor is still moving — so they are ignored
+  // (the animation is TWEEN_MS long). Mouse-up is let through so no drag gets stuck.
+  function cameraMoving() {
+    return !!stateRef.current?.tween?.active
+  }
+
   function handleClickInternal(e) {
     if (navModeRef.current) return
     const s = stateRef.current
+    if (cameraMoving()) return
     sketchArmedRef.current = sketchArmed  // sync immediately
     extrudeArmedRef.current = extrudeArmed
 
@@ -2565,10 +2581,10 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
                cursor: (sketchArmed && isFaceHovered) ? 'pointer' : cursor||'default',
                position:'relative', ...cssProp }}
       onClick={handleClickInternal}
-      onDoubleClick={onDoubleClick}
-      onContextMenu={onContextMenu}
+      onDoubleClick={e => { if (!cameraMoving()) onDoubleClick?.(e) }}
+      onContextMenu={e => { if (cameraMoving()) { e.preventDefault(); return } onContextMenu?.(e) }}
       onMouseMove={handleMouseMoveInternal}
-      onMouseDown={onMouseDown}
+      onMouseDown={e => { if (!cameraMoving()) onMouseDown?.(e) }}
       onMouseUp={onMouseUp}
     >
       <canvas

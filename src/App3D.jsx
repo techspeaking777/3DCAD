@@ -13976,6 +13976,21 @@ const App3D = forwardRef(function App3D(props, ref) {
                 <span style={{fontSize:9,fontFamily:'monospace',color:'#B47EFF',
                   letterSpacing:'0.06em'}}>FACE DXF</span>
               </button>
+              {/* Export STL — the most-used export (3D printing), so it sits up
+                  here with Measure/Face DXF instead of in the bottom file bar. */}
+              <button onClick={activateExportSTLTool}
+                title="Export STL — click bodies in the 3D view to choose which ones to export (none selected = export all)"
+                style={{...btnBase,background: tool==='exportstl' ? '#4CAF5033' : 'transparent',
+                  outline: tool==='exportstl' ? '2px solid #4CAF50' : '1px solid #2a2a4a',
+                  outlineOffset:'-2px',
+                  flexDirection:'column',gap:2,width:'auto',padding:'0 8px',height:52}}>
+                <svg width="28" height="28" viewBox="0 0 22 22" fill="none">
+                  <path d="M11 2l8 4.5v9L11 20l-8-4.5v-9L11 2z" stroke="#4CAF50" strokeWidth="1.5" strokeLinejoin="round"/>
+                  <path d="M3 6.5L11 11l8-4.5M11 11v9" stroke="#4CAF50" strokeWidth="1.2"/>
+                </svg>
+                <span style={{fontSize:9,fontFamily:'monospace',color:'#4CAF50',
+                  letterSpacing:'0.06em'}}>EXPORT STL</span>
+              </button>
             </>
           )}
           </div>
@@ -14698,7 +14713,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                     setLoadError(null)
                     // After the viewport has drawn the new geometry.
                     if (result.box) setTimeout(()=>zoomToFit(),150)
-                    alert(`DXF imported: ${total} entities (${result.lines.length} lines, ${result.circles.length} circles, ${result.arcs.length} arcs, ${result.splines.length} polylines)`)
+                    alert(`DXF imported: ${total} entities (${result.lines.length} lines, ${result.circles.length} circles, ${result.arcs.length} arcs, ${result.splines.length} polylines)${result.units && result.units !== 'mm' ? ` — drawing was in ${result.units}, converted to mm` : ''}`)
                   }catch(err){
                     setLoadError('DXF import failed: '+err.message)
                   }
@@ -14742,17 +14757,6 @@ const App3D = forwardRef(function App3D(props, ref) {
               while sketching, model/project tools otherwise. */}
           {!sketchMode && (
             <>
-              <button onClick={activateExportSTLTool}
-                title="Export STL — click bodies in the 3D view to choose which ones to export (none selected = export all)"
-                style={{...btnBase, flexDirection:'column', gap:2, background: tool==='exportstl' ? '#4CAF5033' : 'transparent',
-                  border: tool==='exportstl' ? '1px solid #4CAF50' : 'none'}}>
-                <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-                  <path d="M11 2l8 4.5v9L11 20l-8-4.5v-9L11 2z" stroke="#aaa" strokeWidth="1.5" strokeLinejoin="round"/>
-                  <path d="M3 6.5L11 11l8-4.5M11 11v9" stroke="#aaa" strokeWidth="1.2"/>
-                  <text x="4.5" y="19.5" fontSize="5" fill="#4CAF50" fontFamily="monospace" fontWeight="bold">STL</text>
-                </svg>
-                <span style={{fontSize:8,fontFamily:'monospace',letterSpacing:'0.05em',color:'#888'}}>STL</span>
-              </button>
               <button onClick={activateExportSTEPTool}
                 title="Export STEP — click bodies in the 3D view to choose which ones to export (none selected = export all)"
                 style={{...btnBase, flexDirection:'column', gap:2, background: tool==='exportstep' ? '#4FC3F733' : 'transparent',

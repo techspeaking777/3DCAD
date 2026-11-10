@@ -581,9 +581,25 @@ export function centreDxfResult(result) {
   }
 }
 
-export function parseDXF(dxfText, scale=2) {
-  // scale = px per mm (our SCALE constant)
-  const mm = v => v * scale   // DXF units assumed mm
+// The drawing units a DXF says it is in (header $INSUNITS), as mm per unit.
+// Unitless (0) or missing is taken as mm, as before. Common US / laser-cutter
+// files are in inches and came in 25.4× too small without this.
+const DXF_UNITS = {
+  1: { name: "inches", mmPer: 25.4 }, 2: { name: "feet", mmPer: 304.8 },
+  4: { name: "mm", mmPer: 1 }, 5: { name: "cm", mmPer: 10 }, 6: { name: "metres", mmPer: 1000 },
+  8: { name: "microinches", mmPer: 0.0000254 }, 9: { name: "mils", mmPer: 0.0254 },
+  10: { name: "yards", mmPer: 914.4 }, 13: { name: "microns", mmPer: 0.001 }, 14: { name: "decimetres", mmPer: 100 },
+}
+export function dxfUnits(dxfText) {
+  const m = /\$INSUNITS\s*\r?\n\s*70\s*\r?\n\s*(-?\d+)/.exec(dxfText)
+  return (m && DXF_UNITS[parseInt(m[1])]) || { name: "mm", mmPer: 1 }
+}
+
+export function parseDXF(dxfText, pxPerMm=2) {
+  // scale = px per DXF unit: our px-per-mm (SCALE) × the file's mm-per-unit.
+  const units = dxfUnits(dxfText)
+  const scale = pxPerMm * units.mmPer
+  const mm = v => v * scale
   const lines_out = [], circles_out = [], arcs_out = [], splines_out = []
 
   // Split into group code / value pairs
@@ -690,6 +706,7 @@ export function parseDXF(dxfText, scale=2) {
     circles: circles_out,
     arcs: arcs_out,
     splines: betterResult.splines,
+    units: units.name,
   }
 }
 

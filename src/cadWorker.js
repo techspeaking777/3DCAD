@@ -714,7 +714,8 @@ function edgeEnds(edge) {
   return [{ p: vec3(edge.startPoint), into: ts }, { p: vec3(edge.endPoint), into: te }]
 }
 
-function tangentChain(table, startRec) {
+// `accept(rec)` (optional) limits which edges the chain may grow into.
+function tangentChain(table, startRec, accept) {
   const ends = new Map()
   const endsOf = rec => { if (!ends.has(rec.id)) ends.set(rec.id, edgeEnds(rec.edge)); return ends.get(rec.id) }
   const seen = new Set([startRec.id]), out = [startRec], queue = [startRec]
@@ -723,6 +724,7 @@ function tangentChain(table, startRec) {
     for (const a of endsOf(rec)) {
       for (const other of table.values()) {
         if (seen.has(other.id) || !other.faces.some(f => rec.faces.includes(f))) continue
+        if (accept && !accept(other)) continue
         for (const b of endsOf(other)) {
           if (Math.hypot(a.p[0] - b.p[0], a.p[1] - b.p[1], a.p[2] - b.p[2]) > CHAIN_JOIN_TOL) continue
           const dot = a.into[0] * b.into[0] + a.into[1] * b.into[1] + a.into[2] * b.into[2]
@@ -1335,6 +1337,53 @@ self.onmessage = async function(e) {
       }
       const list = recs.map(softenCandidate).filter(Boolean)
       self.postMessage({ type:'result', id, filletEdges: list.map(c => ({ edgeId: c.id, point: c.pt })) })
+      return
+    }
+
+    if (type==='edgeChain') {
+      // Include Edge on a curved edge (spline/ellipse — not a line or circle):
+      // the edge plus every curved edge that flows smoothly into it, walked
+      // end to end and sampled densely along the TRUE curves (mm, shape
+      // coordinates). The app fits ONE spline through it — copying each piece
+      // separately from the coarse render mesh left small corners between them
+      // that Fillet can't round. Lines and circles never join a chain, so a
+      // rounded rectangle still comes in as lines + arcs.
+      const base = shapeStore.get(params.solidId)
+      if (!base) throw new Error('edgeChain-MISS: solid not in store')
+      const table = softenEdgeTable(base)
+      const curved = rec => rec.edge.geomType !== 'LINE' && rec.edge.geomType !== 'CIRCLE'
+      const start = softenFindEdge(table, { edgeId: params.edgeId, point: params.point })
+      if (!start || !curved(start)) {
+        self.postMessage({ type:'result', id, chain: null })
+        return
+      }
+      const recs = tangentChain(table, start, curved)
+      const ends = new Map(recs.map(r => [r.id, edgeEnds(r.edge).map(e => e.p)]))
+      const near = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) <= CHAIN_JOIN_TOL
+      const linked = (r, p) => recs.some(o => o !== r && ends.get(o.id).some(q => near(p, q)))
+      // Start from an open end if there is one (an open run), else anywhere (a loop).
+      let cur = recs[0], forward = true
+      for (const r of recs) {
+        const [s, e] = ends.get(r.id)
+        if (!linked(r, s)) { cur = r; forward = true; break }    // open run starts at r's start
+        if (!linked(r, e)) { cur = r; forward = false; break }   // …or at r's end
+      }
+      const used = new Set(), points = [], edgeIds = []
+      while (cur && !used.has(cur.id)) {
+        used.add(cur.id); edgeIds.push(cur.id)
+        const n = Math.max(8, Math.min(200, Math.ceil(cur.edge.length / 0.5)))
+        for (let i = points.length ? 1 : 0; i <= n; i++) {
+          const v = cur.edge.pointAt(forward ? i / n : 1 - i / n)
+          points.push([v.x, v.y, v.z]); v.delete?.()
+        }
+        const tail = points[points.length - 1]
+        const next = recs.find(o => !used.has(o.id) && ends.get(o.id).some(q => near(tail, q)))
+        if (!next) break
+        forward = near(tail, ends.get(next.id)[0])
+        cur = next
+      }
+      const closed = points.length > 2 && near(points[0], points[points.length - 1])
+      self.postMessage({ type:'result', id, chain: { points, closed, edgeIds } })
       return
     }
 

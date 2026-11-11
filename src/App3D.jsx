@@ -2227,6 +2227,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // references it.
   const [includeEdgeHover, setIncludeEdgeHover] = useState(null)   // {solidId, edgeId, point} | null
   const [includeEdgeSel, setIncludeEdgeSel] = useState([])         // [{solidId, edgeId}] picked so far this session
+  const includeEdgeBusyRef = useRef(false)                          // an edgeChain lookup is in flight — ignore clicks
   // How the next included edge is drawn: false = firm (part of the new profile),
   // true = construction (reference/snapping only, ignored when the profile is
   // built). Kept across picks and tool re-entries, so a run of reference edges
@@ -4729,7 +4730,12 @@ const App3D = forwardRef(function App3D(props, ref) {
   // within tolerance, `lines` holds the same faceted-polyline fallback
   // edgeToSketchSegments would produce). Returns null if the edge can no
   // longer be found.
-  function edgeToSketchGeometry(solidId, edgeId) {
+  // `chainMm` (optional): points along the TRUE curve in mm, shape coordinates
+  // (cadEngine.edgeChain — a curved edge plus the curved edges flowing into
+  // it). Used instead of the render-mesh polyline, which has only a handful of
+  // points on a gentle curve; fitting each piece separately from that left
+  // small corners between them that Fillet can't round.
+  function edgeToSketchGeometry(solidId, edgeId, chainMm) {
     const vp = viewport3dRef.current; if (!vp) return null
     const poly = vp.getEdgePolyline(solidId, edgeId)
     if (!poly?.points?.length) return null
@@ -4737,19 +4743,24 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (!ap) return null
     const toSketch = worldVec => (typeof ap === 'object' ? ap.worldToSketch(worldVec) : worldToSketch(worldVec, ap))
     const { points, matrixWorld } = poly
-    // `points` is consecutive independent segment-pairs (6 floats each), not
-    // a shared-vertex chain (see cadMesh.js's own comment on this format) —
-    // reconstruct the ordered, deduplicated point chain by taking each
-    // segment's first point, plus the very last segment's second point.
     const pts = []
-    for (let i = 0; i + 5 < points.length; i += 6) {
-      const p = new THREE.Vector3(points[i], points[i+1], points[i+2]).applyMatrix4(matrixWorld)
-      pts.push(toSketch(p))
-    }
-    const lastI = points.length - 6
-    if (lastI >= 0) {
-      const p = new THREE.Vector3(points[lastI+3], points[lastI+4], points[lastI+5]).applyMatrix4(matrixWorld)
-      pts.push(toSketch(p))
+    if (chainMm) {
+      // Shape mm → mesh units (cadMesh.js scales by 2) → world → sketch.
+      for (const [x, y, z] of chainMm) pts.push(toSketch(new THREE.Vector3(x*2, y*2, z*2).applyMatrix4(matrixWorld)))
+    } else {
+      // `points` is consecutive independent segment-pairs (6 floats each), not
+      // a shared-vertex chain (see cadMesh.js's own comment on this format) —
+      // reconstruct the ordered, deduplicated point chain by taking each
+      // segment's first point, plus the very last segment's second point.
+      for (let i = 0; i + 5 < points.length; i += 6) {
+        const p = new THREE.Vector3(points[i], points[i+1], points[i+2]).applyMatrix4(matrixWorld)
+        pts.push(toSketch(p))
+      }
+      const lastI = points.length - 6
+      if (lastI >= 0) {
+        const p = new THREE.Vector3(points[lastI+3], points[lastI+4], points[lastI+5]).applyMatrix4(matrixWorld)
+        pts.push(toSketch(p))
+      }
     }
     if (pts.length < 2) return null
     const empty = { lines: [], circles: [], arcs: [], splines: [] }
@@ -4858,9 +4869,29 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (tool !== 'includeedge' || !includeEdgeHover) return false
     const hit = includeEdgeHover
     const already = includeEdgeSel.some(s => s.solidId===hit.solidId && s.edgeId===hit.edgeId)
-    if (already) return true
-    const geo = edgeToSketchGeometry(hit.solidId, hit.edgeId)
-    if (!geo || (!geo.lines.length && !geo.circles.length && !geo.arcs.length && !geo.splines.length)) return true
+    if (already || includeEdgeBusyRef.current) return true
+    // A curved edge (spline/ellipse) brings the curved edges that flow
+    // smoothly into it along, as ONE piece built from the true curve (see
+    // edgeToSketchGeometry's chainMm). Lines and circles are unchanged.
+    const poly = viewport3dRef.current?.getEdgePolyline(hit.solidId, hit.edgeId)
+    const pp = poly?.points
+    if (!pp?.length) return true
+    const m = Math.floor(pp.length / 12) * 6   // start of the middle segment (mesh units = mm × 2)
+    const point = [pp[m] / 2, pp[m+1] / 2, pp[m+2] / 2]
+    includeEdgeBusyRef.current = true
+    cadEngine.edgeChain({ solidId: hit.solidId, edgeId: hit.edgeId, point })
+      .then(r => r?.chain, () => null)
+      .then(chain => {
+        const geo = edgeToSketchGeometry(hit.solidId, hit.edgeId, chain?.points)
+        const ids = chain?.edgeIds?.length ? chain.edgeIds : [hit.edgeId]
+        addIncludedEdgeGeometry(geo, hit.solidId, ids.includes(hit.edgeId) ? ids : [hit.edgeId, ...ids])
+      })
+      .finally(() => { includeEdgeBusyRef.current = false })
+    return true
+  }
+
+  function addIncludedEdgeGeometry(geo, solidId, edgeIds) {
+    if (!geo || (!geo.lines.length && !geo.circles.length && !geo.arcs.length && !geo.splines.length)) return
     const tag = planeTag()
     commit(snapshot())
     // Firm (the default): style is left unset so it looks like hand-drawn
@@ -4876,8 +4907,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (geo.circles.length) setCircles(prev => [...prev, ...geo.circles.map(s => ({ ...s, ...mark, ...tag }))])
     if (geo.arcs.length)    setArcs   (prev => [...prev, ...geo.arcs   .map(s => ({ ...s, ...mark, ...tag }))])
     if (geo.splines.length) setSplines(prev => [...prev, ...geo.splines.map(s => ({ ...s, ...mark, ...tag }))])
-    setIncludeEdgeSel(prev => [...prev, { solidId: hit.solidId, edgeId: hit.edgeId }])
-    return true
+    setIncludeEdgeSel(prev => [...prev, ...edgeIds.map(edgeId => ({ solidId, edgeId }))])
   }
 
   // ── Feature tree helpers ─────────────────────────────────────────────────

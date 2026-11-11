@@ -31,6 +31,7 @@ class CadEngine {
 
       this._worker.onmessage = (e) => {
         const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, soften, softenEdges, filletEdges, filletMax, snapshots, restored, message } = e.data
+        const { chain } = e.data
 
         if (type === 'ready') {
           this._ready = true
@@ -63,6 +64,7 @@ class CadEngine {
             softenEdges ? { softenEdges } :
             filletEdges ? { filletEdges } :
             filletMax !== undefined ? { filletMax } :
+            chain !== undefined ? { chain } :
             snapshots ? { snapshots } :
             restored ? { restored } :
             { faces, edges, ...(soften ? { soften } : {}) }
@@ -110,6 +112,11 @@ class CadEngine {
   /** Which edges one Fillet click means — params: {solidId, edgeId?, point:[x,y,z]? (an edge pick; chain:false keeps just that edge, otherwise the smooth edges flowing into it come too), facePoint:[x,y,z]? (a face pick: all that face's roundable edges), base?}. Resolves {filletEdges:[{edgeId, point:[x,y,z]}]}. */
   async filletEdges(params) {
     return this._send('filletEdges', params)
+  }
+
+  /** Include Edge on a curved edge: that edge plus the curved edges flowing smoothly into it, in order, sampled along the true curves — params: {solidId, edgeId, point:[x,y,z] (mm, shape coordinates)}. Resolves {chain: {points:[[x,y,z],...] (mm), closed, edgeIds} | null (a line/circle, or not found)}. */
+  async edgeChain(params) {
+    return this._send('edgeChain', params)
   }
 
   /** After a failed fillet/chamfer: the largest radius (rounded down to 0.1 mm) that does work on those edges, 0 if none. Nothing is changed. params: {solidId, edgePoints, radius (the one that failed), operation, base?}. Resolves {filletMax}. */

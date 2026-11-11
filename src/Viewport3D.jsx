@@ -1445,17 +1445,48 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       // geomGroup (the sketch-line objects), so outside sketch mode — where
       // that group is empty — this silently did nothing; solidsGroup was
       // never considered at all.
-      const box=new THREE.Box3()
-      box.union(new THREE.Box3().setFromObject(geomGroup))
-      if (solidsGroup) box.union(new THREE.Box3().setFromObject(solidsGroup))
-      if (box.isEmpty()) return
-      const size=new THREE.Vector3(), centre=new THREE.Vector3()
-      box.getSize(size); box.getCenter(centre)
+      //
+      // Measured in CAMERA space (what is actually on screen from this
+      // angle), not as a world-axis box: a world box seen from an iso view
+      // overstates the size. Hidden bodies are skipped (traverseVisible), and
+      // the OrbitControls zoom (camera.zoom) is reset to 1 — the old code
+      // left it alone, so after zooming out Fit still showed the model tiny.
+      camera.updateMatrixWorld()
+      const view=camera.matrixWorldInverse
+      let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity,sumZ=0,nZ=0
+      const v=new THREE.Vector3()
+      const addPt=()=>{
+        if (v.x<minX) minX=v.x; if (v.x>maxX) maxX=v.x
+        if (v.y<minY) minY=v.y; if (v.y>maxY) maxY=v.y
+        sumZ+=v.z; nZ++
+      }
+      const measure=obj=>{
+        if (!(obj.isMesh||obj.isLine||obj.isPoints)) return
+        const pos=obj.geometry?.attributes?.position; if (!pos||!pos.count) return
+        obj.updateWorldMatrix(true,false)
+        // Every vertex for an exact fit; very dense meshes are sampled.
+        const step=Math.max(1,Math.floor(pos.count/20000))
+        for (let i=0;i<pos.count;i+=step){
+          v.fromBufferAttribute(pos,i).applyMatrix4(obj.matrixWorld).applyMatrix4(view)
+          if (Number.isFinite(v.x)&&Number.isFinite(v.y)) addPt()
+        }
+      }
+      if (geomGroup.visible) geomGroup.traverseVisible(measure)
+      if (solidsGroup?.visible) solidsGroup.traverseVisible(measure)
+      if (!nZ) return
+      // Centre of the on-screen extent, back in world space at the model's depth.
+      const centre=new THREE.Vector3((minX+maxX)/2,(minY+maxY)/2,sumZ/nZ).applyMatrix4(camera.matrixWorld)
+      const W=Math.max(maxX-minX,1e-3), H=Math.max(maxY-minY,1e-3)
       const aspect=camera.right/camera.top
-      const frustHNew=Math.max(size.x/(2*aspect),size.y/2)*1.2
+      const frustHNew=Math.max(W/(2*aspect),H/2)*1.3
       camera.left=-frustHNew*aspect; camera.right=frustHNew*aspect
       camera.top=frustHNew; camera.bottom=-frustHNew
+      camera.zoom=1
       camera.updateProjectionMatrix()
+      // Slide the camera along with the target so the viewing angle stays put
+      // (moving only the target would tilt the view).
+      const shift=centre.clone().sub(controls.target)
+      camera.position.add(shift)
       controls.target.copy(centre); controls.update()
     },
 

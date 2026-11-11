@@ -322,11 +322,25 @@ function projectEdge(edge, project, lines, circles, arcs, splines, viewNormal) {
       splines.push({ points: pts, closed: true })
       return
     }
-    // Non-view-parallel partial arc: falls through to the straight-chord
-    // fallback below, same accepted policy as any other non-circle curve.
+    // Non-view-parallel partial arc: falls through to the sampled-curve
+    // fallback below, same as any other non-circle curve.
   }
   const sp = project(edge.startPoint), ep = project(edge.endPoint)
-  lines.push({ x1: sp.x, y1: sp.y, x2: ep.x, y2: ep.y })
+  if (edge.geomType === 'LINE') {
+    lines.push({ x1: sp.x, y1: sp.y, x2: ep.x, y2: ep.y })
+    return
+  }
+  // Splines, ellipses and other curves: trace the real curve as short line
+  // segments (~0.5 mm each, same "sample to LINEs" policy as exportDXF's
+  // splines). A single start→end chord turned a student's wavy spline
+  // outline into a few straight cuts in the Face DXF.
+  const n = Math.max(8, Math.min(400, Math.ceil((edge.length || 0) / 0.5)))
+  let prev = sp
+  for (let i = 1; i <= n; i++) {
+    const p = i === n ? ep : project(edge.pointAt(i / n))
+    if (Math.hypot(p.x - prev.x, p.y - prev.y) > 1e-6) lines.push({ x1: prev.x, y1: prev.y, x2: p.x, y2: p.y })
+    prev = p
+  }
 }
 
 // A periodic surface (cylinder, cone, sphere, torus) needs a "seam" edge in

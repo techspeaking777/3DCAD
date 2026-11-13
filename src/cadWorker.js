@@ -977,6 +977,26 @@ function isPlainCircleCut(c) {
   return !!c?.circle && !c.profiles && !c.axis && c.pitchMm === undefined && !c.pathPts && !c.pathPts3d
 }
 
+// The same cut with its circle as `n` true arcs joined end to end, the first
+// starting at angle `phase` — still an exactly round hole (smooth curved walls,
+// one Fillet click follows the rim), but without sketchCircle's single
+// full-turn face and its seam, which is what OCC's boolean trips over.
+function circleCutAsArcs(c, n, phase) {
+  const { cx, cy, r } = c.circle
+  const PER = 8   // polygon points per arc (only the arc data below is built)
+  const pts = [], curveSegments = []
+  for (let k = 0; k < n; k++) {
+    const a0 = phase + (k / n) * 2 * Math.PI, a1 = phase + ((k + 1) / n) * 2 * Math.PI
+    curveSegments.push({ type: 'arc', startIdx: k * PER, count: PER, cx, cy, r, startAngle: a0, endAngle: a1 })
+    for (let i = 0; i < PER; i++) {
+      const a = a0 + (a1 - a0) * i / PER
+      pts.push({ x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) })
+    }
+  }
+  pts.curveSegments = curveSegments
+  return { ...c, pts, circle: null }
+}
+
 // The same cut with its circle as a 96-sided polygon (sketch px, like pts).
 function circleCutAsPolygon(c) {
   const { cx, cy, r } = c.circle
@@ -1560,28 +1580,58 @@ self.onmessage = async function(e) {
         const c0 = params.cut || params.cuts?.[0] || {}
         throw new Error(`Step2-CUT: ${e.message} | planeId=${c0.planeId} facePlane=${!!c0.normal} store=${fromStore}`, { cause: e })
       }
+      // Plain circle cuts get checked, because a true-cylinder cutter
+      // (sketchCircle: one full-turn face with a seam) can break OCC's boolean:
+      // it throws, or reports success but returns a shape that only fails
+      // later (meshing throws a bare number). Seen with holes crossing a body's
+      // bottom face and an end face a fraction of a degree off square.
+      //   When that happens the circle is re-cut in other forms, gentlest
+      // first: as 2, 3 or 4 true arcs (still exactly round, smooth walls, so
+      // Fillet follows the rim) and last as a 96-gon (faceted walls). No
+      // single form is trusted on its own — the 96-gon multi-tool cut has
+      // returned a VALID but wrong body (cut only partway, split by a stray
+      // face), and has disagreed with the round forms on an ordinary edge
+      // hole — so a retry is accepted only when two forms remove the same
+      // volume, and the earlier (smoother) of the pair is used.
+      // Cuts with no plain circle skip all of this and behave as before.
+      // Replays walk the same ladder, so a rebuild matches.
+      const all = params.cuts || [params.cut]
+      const hasCircle = all.some(isPlainCircleCut)
       try {
         shape = cutTolerant(base, cutShape)
-        // OCC can also report the cut as done but hand back a broken shape
-        // that only fails later (meshing throws a bare number) — catch it here.
-        // Only checked when a circle cut is involved (the retry below needs
-        // one), so other cuts behave exactly as before.
-        if ((params.cuts || [params.cut]).some(isPlainCircleCut) && !cutResultUsable(shape)) throw new Error('the cut came out as a broken shape')
+        if (hasCircle && !cutResultUsable(shape)) throw new Error('the cut came out as a broken shape')
       } catch(e) {
-        // A true-cylinder cutter can break OCC's boolean where the same
-        // circle as a fine polygon cuts fine — seen with a hole crossing both
-        // a body's bottom face and an end face that is a fraction of a degree
-        // off square. Retry once with every plain circle cut as a 96-gon
-        // (replays take the same path, so a rebuild matches).
-        const all = params.cuts || [params.cut]
-        if (!all.some(isPlainCircleCut)) throw new Error(`Step3-BOOL: ${e.message} | store=${fromStore}`, { cause: e })
-        try {
-          const polys = all.map(c => buildCutShape(clampCutDepth(isPlainCircleCut(c) ? circleCutAsPolygon(c) : c, params.base)))
-          shape = cutTolerant(base, params.cuts ? polys : polys[0])
-          console.warn('[cadWorker] circle cut failed — used a fine polygon instead')
-        } catch(e2) {
-          throw new Error(`Step3-BOOL: ${e.message} | store=${fromStore}`, { cause: e2 })
+        if (!hasCircle) throw new Error(`Step3-BOOL: ${e.message} | store=${fromStore}`, { cause: e })
+        const ladder = [
+          ['2 arcs', c => circleCutAsArcs(c, 2, 0)],
+          ['2 arcs, turned', c => circleCutAsArcs(c, 2, Math.PI / 2)],
+          ['3 arcs', c => circleCutAsArcs(c, 3, Math.PI / 6)],
+          ['4 arcs', c => circleCutAsArcs(c, 4, Math.PI / 4)],
+          ['a 96-sided polygon', circleCutAsPolygon],
+        ]
+        const vA = ocVolume(base.wrapped)
+        const tried = []   // usable results so far: {label, out, vol}
+        shape = null
+        for (const [label, remake] of ladder) {
+          try {
+            const tools = all.map(c => buildCutShape(clampCutDepth(isPlainCircleCut(c) ? remake(c) : c, params.base)))
+            const out = cutTolerant(base, params.cuts ? tools : tools[0])
+            if (!cutResultUsable(out)) continue
+            const vol = ocVolume(out.wrapped)
+            const match = tried.find(t => Math.abs(t.vol - vol) <= Math.max(0.01 * Math.abs(vA - vol), 1e-4 * vA, 0.5))
+            if (match) {
+              shape = match.out
+              console.warn(`[cadWorker] circle cut failed as one full circle — cut it as ${match.label} instead (${label} agrees)`)
+              break
+            }
+            tried.push({ label, out, vol })
+          } catch { /* try the next form */ }
         }
+        if (!shape && tried.length) {
+          shape = tried[0].out
+          console.warn(`[cadWorker] circle cut failed as one full circle — cut it as ${tried[0].label} instead (no second form to confirm it)`)
+        }
+        if (!shape) throw new Error(`Step3-BOOL: ${e.message} | store=${fromStore}`, { cause: e })
       }
       shapeStore.set(params.baseSolidId, shape)
     } else if (type==='mirrorShape') {

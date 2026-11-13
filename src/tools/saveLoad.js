@@ -227,7 +227,10 @@ const PROJECT_FORMAT_VERSION = 1
 // project can skip replaying every feature. They are only a cache: the features stay
 // the source of truth, and the block carries a fingerprint of them so a snapshot that
 // no longer matches (file edited by hand, features changed) is ignored on load.
-const SNAPSHOT_FORMAT_VERSION = 1
+// Bump when the worker starts building a saved recipe DIFFERENTLY (v2: failed
+// circle cuts are re-cut as true arcs, not a 96-gon) — older cached shapes are
+// then ignored once and every body is rebuilt from its features on next open.
+const SNAPSHOT_FORMAT_VERSION = 2
 
 // A hash of the features that decide the geometry — not their name, colour or hidden
 // flag (those change without touching a shape). Works on the plain objects as saved,

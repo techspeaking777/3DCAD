@@ -6258,7 +6258,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (hit && !usable) {
       // raycastSolidEdges glowed an edge we can't use — clearing drops the orange picks too, so put them back.
       vp.clearEdgeHighlight()
-      vp.setSelectedEdges(soften3dSel.map(({ solidId, edgeId }) => ({ solidId, edgeId })))
+      vp.setSelectedEdges(soften3dSel.map(({ solidId, edgeId, failed }) => ({ solidId, edgeId, color: failed ? '#ff5252' : null })))
     }
     const next = usable ? hit : null
     setSoften3dHover(prev => (prev?.edgeId === next?.edgeId && prev?.solidId === next?.solidId) ? prev : next)
@@ -6377,10 +6377,11 @@ const App3D = forwardRef(function App3D(props, ref) {
         : skipped ? ` — ${skipped} wouldn't round, still selected: try a smaller radius, or Fillet them one by one` : ''
       flashSaved(`Softened ${done} of ${total} edges (${parts})${note}`, 7000)
       if (leftover?.length) {
-        // The edges left sharp stay picked (their ids belong to the new body), ready for another go.
+        // The edges left sharp stay picked (their ids belong to the new body), ready for
+        // another go — flagged `failed` so they show red, like Fillet's leftovers.
         setSoften3dMode('edges')
         setSoften3dKeepFaces([])
-        setSoften3dSel(leftover.map(l => ({ solidId, edgeId: l.edgeId, point: l.point })))
+        setSoften3dSel(leftover.map(l => ({ solidId, edgeId: l.edgeId, point: l.point, failed: true })))
         setSoften3dBusy(false)
       } else {
         resetSoften3D()
@@ -9240,7 +9241,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // its edges are then new); cleared on leaving the tool.
   useEffect(() => {
     if (tool !== 'soften3d') return
-    viewport3dRef.current?.setSelectedEdges(soften3dSel.map(({ solidId, edgeId }) => ({ solidId, edgeId })))
+    viewport3dRef.current?.setSelectedEdges(soften3dSel.map(({ solidId, edgeId, failed }) => ({ solidId, edgeId, color: failed ? '#ff5252' : null })))
   }, [tool, soften3dSel, solids])
   useEffect(() => {
     if (tool !== 'soften3d') return

@@ -163,14 +163,22 @@ function cutTolerant(a, b) {
     const vA = ocVolume(a.wrapped)
     const removed = vA - ocVolume(result.wrapped)
     if (vA > 0 && removed < 0.02 * vA) {
-      const expected = overlapVolume(a, b, CUT_RETRY_FUZZY_TOL)
-      if (removed < 0.25 * expected && expected - removed > Math.max(0.001 * vA, 1)) {
-        const retry = cutWithFuzzy(a, b, CUT_RETRY_FUZZY_TOL)
-        const removed2 = vA - ocVolume(retry.wrapped)
-        if (Math.abs(removed2 - expected) <= 0.05 * expected) {
-          console.warn('[cadWorker] cut removed almost nothing at the normal tolerance — used the looser retry', { removed, expected })
-          return retry
-        }
+      // Two retries, each judged against the overlap measured at ITS OWN
+      // tolerance: looser (0.5 mm — a cutter just touching a wall), then
+      // exact (0 — some shapes make every fuzzy boolean see NO overlap at
+      // all: a comb-shaped cut along a box's bottom measured 0 mm³ at 0.05
+      // and 0.5 mm but 13,063 mm³ exactly, and silently cut nothing).
+      for (const fuzzy of [CUT_RETRY_FUZZY_TOL, 0]) {
+        const expected = overlapVolume(a, b, fuzzy)
+        if (!(removed < 0.25 * expected && expected - removed > Math.max(0.001 * vA, 1))) continue
+        try {
+          const retry = cutWithFuzzy(a, b, fuzzy)
+          const removed2 = vA - ocVolume(retry.wrapped)
+          if (Math.abs(removed2 - expected) <= 0.05 * expected && shapeIsValid(retry)) {
+            console.warn(`[cadWorker] cut removed almost nothing at the normal tolerance — used the retry at ${fuzzy} mm`, { removed, expected })
+            return retry
+          }
+        } catch { /* try the next tolerance */ }
       }
     }
   } catch (e) {

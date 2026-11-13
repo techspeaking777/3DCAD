@@ -959,6 +959,35 @@ function extendSpringCutPath(cut) {
 // doesn't fail on coincident-face booleans — see extendLoftCutProfiles,
 // extendSpringCutPath, and extendSweepCutPath for the loft-, spring-, and
 // sweep-shaped-cut equivalents (buildRevolve has no such treatment yet).
+// Valid AND meshes the way the result will be meshed for display — a cut can
+// pass BRepCheck yet still throw (a bare number) once meshed.
+function cutResultUsable(shape) {
+  try {
+    if (!shapeIsValid(shape)) return false
+    shape.mesh({ tolerance:0.05, angularTolerance:30 })
+    stripSeamEdges(shape, shape.meshEdges({ keepMesh:true }))
+    return true
+  } catch {
+    return false
+  }
+}
+
+// A straight (extrude) cut of one true circle — see the subtract handler's retry.
+function isPlainCircleCut(c) {
+  return !!c?.circle && !c.profiles && !c.axis && c.pitchMm === undefined && !c.pathPts && !c.pathPts3d
+}
+
+// The same cut with its circle as a 96-sided polygon (sketch px, like pts).
+function circleCutAsPolygon(c) {
+  const { cx, cy, r } = c.circle
+  const pts = []
+  for (let i = 0; i < 96; i++) {
+    const a = (i / 96) * 2 * Math.PI
+    pts.push({ x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) })
+  }
+  return { ...c, pts, circle: null }
+}
+
 function buildCutShape(cut) {
   const shape = buildCutShapeBase(cut)
   return cut.xform ? applyCutXform(shape, cut.xform) : shape
@@ -1533,8 +1562,26 @@ self.onmessage = async function(e) {
       }
       try {
         shape = cutTolerant(base, cutShape)
+        // OCC can also report the cut as done but hand back a broken shape
+        // that only fails later (meshing throws a bare number) — catch it here.
+        // Only checked when a circle cut is involved (the retry below needs
+        // one), so other cuts behave exactly as before.
+        if ((params.cuts || [params.cut]).some(isPlainCircleCut) && !cutResultUsable(shape)) throw new Error('the cut came out as a broken shape')
       } catch(e) {
-        throw new Error(`Step3-BOOL: ${e.message} | store=${fromStore}`, { cause: e })
+        // A true-cylinder cutter can break OCC's boolean where the same
+        // circle as a fine polygon cuts fine — seen with a hole crossing both
+        // a body's bottom face and an end face that is a fraction of a degree
+        // off square. Retry once with every plain circle cut as a 96-gon
+        // (replays take the same path, so a rebuild matches).
+        const all = params.cuts || [params.cut]
+        if (!all.some(isPlainCircleCut)) throw new Error(`Step3-BOOL: ${e.message} | store=${fromStore}`, { cause: e })
+        try {
+          const polys = all.map(c => buildCutShape(clampCutDepth(isPlainCircleCut(c) ? circleCutAsPolygon(c) : c, params.base)))
+          shape = cutTolerant(base, params.cuts ? polys : polys[0])
+          console.warn('[cadWorker] circle cut failed — used a fine polygon instead')
+        } catch(e2) {
+          throw new Error(`Step3-BOOL: ${e.message} | store=${fromStore}`, { cause: e2 })
+        }
       }
       shapeStore.set(params.baseSolidId, shape)
     } else if (type==='mirrorShape') {

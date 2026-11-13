@@ -1961,6 +1961,8 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   const [cadError, setCadError] = useState(null)
   const [saveToast, setSaveToast] = useState(null)
+  // Shown while a slow fillet works out which picked edges will round.
+  const [filletWorking, setFilletWorking] = useState(false)
   function flashSaved(msg='Saved', ms=2000){ setSaveToast(msg); setTimeout(() => setSaveToast(null), ms) }
 
   // ── Cloud save/load (classroom feature) ──────────────────────────────────
@@ -9193,7 +9195,8 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   // Keeps the 3D edge highlight (persistent orange) in sync with the selection set.
   useEffect(() => {
-    viewport3dRef.current?.setSelectedEdges(fillet3dSel.map(({solidId, edgeId}) => ({solidId, edgeId})))
+    // Edges a partial fillet couldn't round come back flagged `failed` — red.
+    viewport3dRef.current?.setSelectedEdges(fillet3dSel.map(({solidId, edgeId, failed}) => ({solidId, edgeId, color: failed ? '#ff5252' : null})))
   }, [fillet3dSel])
 
   // Leaving the fillet tool for any other tool clears all state and highlights.
@@ -9310,10 +9313,22 @@ const App3D = forwardRef(function App3D(props, ref) {
     const pickedSel = fillet3dSel, pickedPos = fillet3dHandlePos
     feat3d.commit(features)
     resetFillet3D()
+    // A fillet that's finding which edges round can take several seconds —
+    // say so, but only if it's actually slow.
+    const workingTimer = setTimeout(() => setFilletWorking(true), 1500)
     try {
       const meshData = editingId
         ? await rebuildSolidChain(targetSolid, { overrideId: editingId, overrideFilletRadius: radius })
-        : await cadEngine.fillet3d({ solidId, edgePoints: points, radius, operation: mode, base: buildBaseWorkerParams(targetSolid) })
+        : await cadEngine.fillet3d({ solidId, edgePoints: points, radius, operation: mode, base: buildBaseWorkerParams(targetSolid), partial: true })
+      // Partial fillet (Fusion-style): the worker rounded the biggest set of
+      // the picked edges that works. Save ONLY those (so a replay rounds the
+      // same set), and hand the rest back as a red selection below.
+      const part = meshData.filletPartial || null
+      const samePt = (a, b) => a.length === b.length && a.every((v, i) => Math.abs(v - b[i]) < 1e-9)
+      const keptIdx = part ? points.map((pt, i) => part.ok.some(o => samePt(o, pt)) ? i : -1).filter(i => i >= 0) : null
+      const savedPoints = keptIdx ? keptIdx.map(i => points[i]) : points
+      const savedEdgeIds = keptIdx ? keptIdx.map(i => edgeIds[i]) : edgeIds
+      clearTimeout(workingTimer); setFilletWorking(false)
       const group = replicadMeshToThree(meshData, targetSolid.color, solidId)
       const updatedSolid = { ...targetSolid, group }
       setSolids(prev => prev.map(s => s.id === solidId ? updatedSolid : s))
@@ -9328,11 +9343,33 @@ const App3D = forwardRef(function App3D(props, ref) {
         setFeatures(prev => [...prev, {
           id: `fillet-${solidId}-${Date.now()}`, type: 'fillet', operation: mode,
           name,
-          solidId, edgePoints: points, edgeIds, radius, color: targetSolid.color,
+          solidId, edgePoints: savedPoints, edgeIds: savedEdgeIds, radius, color: targetSolid.color,
         }])
       }
       await rebuildDependentMirrors(updatedSolid)
+      if (part && part.failedCount > 0) {
+        // Keep the tool open on the edges that didn't round (red), with the
+        // biggest radius they WILL take on the new body pre-filled.
+        const word = mode === 'chamfer' ? 'distance' : 'radius'
+        const n = part.failedCount, total = points.length
+        let max = 0
+        if (part.failed.length) {
+          try {
+            max = (await cadEngine.filletMaxRadius({ solidId, edgePoints: part.failed.map(f => f.point), radius, operation: mode })).filletMax
+          } catch (_) { /* note below without a size */ }
+        }
+        setFillet3dSel(part.failed.map(f => ({ solidId, edgeId: f.edgeId, point: f.point, failed: true })))
+        setFillet3dHandlePos(pickedPos)
+        const them = n === 1 ? 'The red edge' : `The ${n} red edges`
+        if (max > 0) {
+          setFillet3dRadiusInput(String(max))
+          setFillet3dNote(`Rounded ${total - n} of ${total} edges. ${them} won't take ${radius} mm — the largest that fits is ${max} mm. Press Enter to use it, or Esc to stop.`)
+        } else {
+          setFillet3dNote(`Rounded ${total - n} of ${total} edges. ${them} won't take this ${word} at any size. Press Esc to finish.`)
+        }
+      }
     } catch (err) {
+      clearTimeout(workingTimer); setFilletWorking(false)
       const opLabel = mode === 'chamfer' ? 'Chamfer' : 'Fillet'
       const word = mode === 'chamfer' ? 'distance' : 'radius'
       console.error(`${opLabel} failed:`, err)
@@ -13616,6 +13653,15 @@ const App3D = forwardRef(function App3D(props, ref) {
           cursor:'pointer',boxShadow:'0 4px 12px rgba(0,0,0,0.5)'}}>
           {cadError.charAt(0).toUpperCase() + cadError.slice(1)}
           <span style={{opacity:0.6,fontSize:11,marginLeft:10}}>✕</span>
+        </div>
+      )}
+
+      {filletWorking && (
+        <div style={{position:'fixed',top:16,left:'50%',transform:'translateX(-50%)',
+          background:'#5b3a8c',color:'#fff',padding:'10px 20px',borderRadius:8,
+          zIndex:9999,fontFamily:'monospace',fontSize:13,pointerEvents:'none',
+          boxShadow:'0 4px 12px rgba(0,0,0,0.5)'}}>
+          Rounding the edges… checking which ones will take this size
         </div>
       )}
 

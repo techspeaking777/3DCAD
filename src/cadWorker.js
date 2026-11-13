@@ -1,6 +1,6 @@
 import opencascade from 'replicad-opencascadejs/src/replicad_single.js'
 import opencascadeWasm from 'replicad-opencascadejs/src/replicad_single.wasm?url'
-import { setOC, ProjectionCamera, Sketcher, CompoundSketch, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, Vector, importSTEP, deserializeShape, makeBSplineApproximation, assembleWire, genericSweep } from 'replicad'
+import { setOC, EdgeFinder, ProjectionCamera, Sketcher, CompoundSketch, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, Vector, importSTEP, deserializeShape, makeBSplineApproximation, assembleWire, genericSweep } from 'replicad'
 import { projectedProfilePlane, dedupePoints3d } from './tools/sweepProject.js'
 import { springFrame } from './tools/springMath.js'
 
@@ -747,14 +747,114 @@ function tangentChain(table, startRec, accept) {
 // Rounds `base` at `radius` (or bevels it) on the edges near `edgePoints`; null when it fails or comes out invalid.
 function tryFilletOrChamfer(base, edgePoints, radius, isChamfer) {
   try {
-    const filter = edgeFilterForPoints(edgePoints)
-    const out = isChamfer ? base.chamfer(radius, filter) : base.fillet(radius, filter)
-    const ok = shapeIsValid(out)
+    const out = roundEdges(base, edgePoints, radius, isChamfer, true)
     out.delete?.()
-    return ok
+    return true
   } catch (_) {
     return false
   }
+}
+
+// ── Fillet: a sturdier build than replicad's one-shot fillet ─────────────────
+// replicad always builds a fillet with OCC's defaults (rational blend, default
+// tolerances) and gives up on the first failure. OCC's builder takes other
+// settings that often succeed where the defaults don't, so a fillet is tried
+// with the defaults FIRST (identical result to before for everything that
+// already worked — saved files replay unchanged), then looser approximation
+// tolerances, then the two other blend shapes. Each try must come out valid.
+// Chamfers keep replicad's own build (they rarely fail).
+const FILLET_TRIES = [
+  { shape: 'ChFi3d_Rational' },
+  { shape: 'ChFi3d_Rational', params: [1e-2, 1e-3, 1e-4, 1e-3, 1e-4, 1e-2] },   // Tang, Tesp, T2d, TApp3d, TolApp2d, Fleche — 10× looser than OCC's defaults
+  { shape: 'ChFi3d_QuasiAngular' },
+  { shape: 'ChFi3d_Polynomial' },
+]
+
+function filletOnce(base, edges, radius, tryCfg) {
+  const oc = getOC()
+  const mk = new oc.BRepFilletAPI_MakeFillet(base.wrapped, oc.ChFi3d_FilletShape[tryCfg.shape])
+  try {
+    if (tryCfg.params) mk.SetParams(...tryCfg.params)
+    for (const e of edges) mk.Add_2(radius, e.wrapped)
+    const out = cast(mk.Shape())   // Shape() builds; throws if OCC can't
+    if (!shapeIsValid(out)) { out.delete?.(); return null }
+    return out
+  } catch (_) {
+    return null
+  } finally {
+    mk.delete()
+  }
+}
+
+// Rounds (or bevels) `base` on the edges near `edgePoints`; throws when no
+// setting works. Never stores anything. `quick` tries only OCC's defaults —
+// for the searches that run many trials (largest radius, partial fillet):
+// each extra setting costs a full build, and on genuinely bad geometry they
+// all fail anyway (Harvey's kinked handle: 4× slower, no edge rescued).
+function roundEdges(base, edgePoints, radius, isChamfer, quick = false) {
+  if (isChamfer) {
+    const out = base.chamfer(radius, edgeFilterForPoints(edgePoints))
+    if (!shapeIsValid(out)) { out.delete?.(); throw new Error('radius too large for the selected edge(s)') }
+    return out
+  }
+  const edges = new EdgeFinder().either(edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))).find(base)
+  if (!edges.length) throw new Error('Could not fillet, no edge was selected')
+  for (const tryCfg of (quick ? FILLET_TRIES.slice(0, 1) : FILLET_TRIES)) {
+    const out = filletOnce(base, edges, radius, tryCfg)
+    if (out) {
+      if (tryCfg !== FILLET_TRIES[0]) console.warn('[cadWorker] fillet needed a different setting:', tryCfg)
+      return out
+    }
+  }
+  throw new Error('radius too large for the selected edge(s) — try a smaller radius')
+}
+
+// The biggest set of `edgePoints` that rounds together at `radius` (Fusion-
+// style partial fillet). Returns { shape, ok, failed } (shape null when
+// nothing rounds). `deadline` caps the search.
+//   1. Fast scan: round the edges one at a time, each on top of the last
+//      (~0.1 s an edge — a whole-set try that fails costs ~1 s, so halving the
+//      set was 15-25 s on a 15-edge loop). Gives the candidate set.
+//   2. Check: round the candidates TOGETHER on the original body — that's
+//      what gets saved and replayed, so it must work in one go.
+//   3. Only if that check fails: halve the set (slow but thorough) with the
+//      time that's left.
+// `wholeFailed`: the caller already tried the whole set — the halving skips it.
+function roundEdgesPartial(base, edgePoints, radius, isChamfer, deadline, wholeFailed = false) {
+  // 1. fast scan
+  const cand = []
+  let cur = base
+  for (const pt of edgePoints) {
+    if (Date.now() > deadline) break
+    let out = null
+    try { out = roundEdges(cur, [pt], radius, isChamfer, true) } catch (_) { out = null }
+    if (out) { if (cur !== base) cur.delete?.(); cur = out; cand.push(pt) }
+  }
+  if (cur !== base) cur.delete?.()
+  // 2. check
+  if (cand.length) {
+    try {
+      const shape = roundEdges(base, cand, radius, isChamfer, true)
+      return { shape, ok: cand, failed: edgePoints.filter(pt => !cand.includes(pt)) }
+    } catch (_) { /* fall through to the halving search */ }
+  }
+  // 3. halving search
+  const ok = [], failed = []
+  let shape = null
+  const visit = (group, known = false) => {
+    if (!group.length) return
+    if (Date.now() > deadline) { failed.push(...group); return }
+    let out = null
+    if (!known) {
+      try { out = roundEdges(base, [...ok, ...group], radius, isChamfer, true) } catch (_) { out = null }
+    }
+    if (out) { shape?.delete?.(); shape = out; ok.push(...group); return }
+    if (group.length === 1) { failed.push(group[0]); return }
+    const mid = group.length >> 1
+    visit(group.slice(0, mid)); visit(group.slice(mid))
+  }
+  visit(edgePoints, wholeFailed)
+  return { shape, ok, failed }
 }
 
 // One radius round: rounds as many of `cands` as will go together at `radius`.
@@ -1466,6 +1566,7 @@ self.onmessage = async function(e) {
     }
 
     let shape
+    let filletPartial = null   // fillet3d with partial:true — which picked edges rounded / didn't
     if (type==='extrude'||type==='cutout') {
       shape = buildExtrude(params)
       if (params.solidId) shapeStore.set(params.solidId, shape)
@@ -1499,14 +1600,34 @@ self.onmessage = async function(e) {
       // convention used at every op-builder call site.
       const isChamferOp = params.operation === 'chamfer'
       const opLabel = isChamferOp ? 'Chamfer' : 'Fillet'
+      // A NEW fillet on many edges skips the extra settings (each costs a
+      // full ~1 s build on a big selection and rarely rescues one) and, if
+      // the set fails, goes straight to the partial search below.
+      const bigNew = params.partial && params.edgePoints.length > 6
       try {
-        const edgeFilter = e => e.either(
-          params.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt))
-        )
-        shape = isChamferOp ? base.chamfer(params.radius, edgeFilter) : base.fillet(params.radius, edgeFilter)
+        shape = roundEdges(base, params.edgePoints, params.radius, isChamferOp, bigNew)
       } catch(e) {
-        // OCC often throws a bare number here (no .message) when the radius won't fit.
-        throw new Error(`${opLabel} failed: ${e?.message || 'radius too large for the selected edge(s) — try a smaller radius'}`, { cause: e })
+        // `partial` (a NEW fillet, not a replay): round the biggest set of
+        // the picked edges that works and report the rest, the way Fusion
+        // does, instead of failing the lot. The caller saves only `ok`.
+        let part = null
+        if (params.partial && params.edgePoints.length > 1) {
+          part = roundEdgesPartial(base, params.edgePoints, params.radius, isChamferOp, Date.now() + 15000, true)
+        }
+        if (!part?.shape) {
+          // OCC often throws a bare number here (no .message) when the radius won't fit.
+          throw new Error(`${opLabel} failed: ${e?.message || 'radius too large for the selected edge(s) — try a smaller radius'}`, { cause: e })
+        }
+        shape = part.shape
+        // Where the edges that didn't round sit on the NEW shape, so the app
+        // can show them (ids change when the body is rebuilt).
+        const table = softenEdgeTable(shape)
+        const failedEdges = []
+        for (const pt of part.failed) {
+          const rec = softenFindEdge(table, { point: pt }, 0.3)
+          if (rec && !failedEdges.some(f => f.edgeId === rec.id)) failedEdges.push({ edgeId: rec.id, point: pt })
+        }
+        filletPartial = { ok: part.ok, failed: failedEdges, failedCount: part.failed.length }
       }
       // BRepFilletAPI_MakeFillet/MakeChamfer can report success while the
       // blend actually self-intersects (radius too large for the local edge
@@ -1889,7 +2010,7 @@ self.onmessage = async function(e) {
     if (!shape) throw new Error('Null shape')
     const faces = shape.mesh({ tolerance:0.05, angularTolerance:30 })
     const edges = stripSeamEdges(shape, shape.meshEdges({ keepMesh:true }))
-    self.postMessage({ type:'result', id, faces, edges, ...(softenInfo ? { soften: softenInfo } : {}) })
+    self.postMessage({ type:'result', id, faces, edges, ...(softenInfo ? { soften: softenInfo } : {}), ...(filletPartial ? { filletPartial } : {}) })
   } catch(err) {
     // Full detail stays in the console for debugging; the message that goes to
     // the app (and the red banner students see) is plain English.

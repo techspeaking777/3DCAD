@@ -31,7 +31,7 @@ class CadEngine {
 
       this._worker.onmessage = (e) => {
         const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, soften, softenEdges, filletEdges, filletMax, snapshots, restored, message } = e.data
-        const { chain } = e.data
+        const { chain, filletPartial } = e.data
 
         if (type === 'ready') {
           this._ready = true
@@ -67,7 +67,7 @@ class CadEngine {
             chain !== undefined ? { chain } :
             snapshots ? { snapshots } :
             restored ? { restored } :
-            { faces, edges, ...(soften ? { soften } : {}) }
+            { faces, edges, ...(soften ? { soften } : {}), ...(filletPartial ? { filletPartial } : {}) }
           )
         } else if (type === 'error') {
           pending.reject(new Error(message || 'CAD operation failed'))
@@ -104,7 +104,7 @@ class CadEngine {
     return this._send('cutout', params)
   }
 
-  /** Round (or bevel) one or more edges of an existing solid — params: {solidId, edgePoints:[[x,y,z],...] (mm), radius, operation:'fillet'|'chamfer' (defaults to 'fillet'), base?}. */
+  /** Round (or bevel) one or more edges of an existing solid — params: {solidId, edgePoints:[[x,y,z],...] (mm), radius, operation:'fillet'|'chamfer' (defaults to 'fillet'), base?, partial? (a NEW fillet: if all the edges won't round together, round the biggest set that will)}. Resolves {faces, edges, filletPartial?: {ok:[[x,y,z]] (the points that rounded — save only these), failed:[{edgeId, point}] (on the new shape), failedCount}}. */
   async fillet3d(params) {
     return this._send('fillet3d', params)
   }

@@ -824,7 +824,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
         // "picked" and orange for "under the cursor".
         const selColor = measureActiveRef.current ? '#4FC3F7' : '#ffe14d'
         const hovColor = measureActiveRef.current ? '#84FFFF' : '#ff9800'
-        for (const sel of selectedEdgeHighlightsRef.current) drawEdge(sel, selColor)
+        for (const sel of selectedEdgeHighlightsRef.current) drawEdge(sel, sel.color || selColor)
 
         // Skip drawing the hover highlight if it's the same edge already in
         // the selected set — otherwise it'd just paint yellow over the
@@ -1720,8 +1720,13 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
      * are silently skipped rather than breaking the whole highlight.
      */
     setSelectedEdges(list) {
+      // `color` (optional) overrides the usual picked colour for that edge —
+      // Fillet shows the edges a partial fillet couldn't round in red.
       selectedEdgeHighlightsRef.current = (list || [])
-        .map(({ solidId, edgeId }) => this.getEdgePolyline(solidId, edgeId))
+        .map(({ solidId, edgeId, color }) => {
+          const poly = this.getEdgePolyline(solidId, edgeId)
+          return poly && { ...poly, solidId, edgeId, color: color || null }
+        })
         .filter(Boolean)
     },
 

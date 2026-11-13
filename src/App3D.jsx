@@ -9131,6 +9131,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     const vp = viewport3dRef.current; if (!vp) return
     const hit = vp.raycastSolidEdges(e.clientX, e.clientY)
     setFillet3dHover(hit)
+    // No edge under the cursor → show the face a click would pick (all its edges).
+    if (hit) vp.hoverFilletFace(null)
+    else vp.hoverFilletFace(e.clientX, e.clientY)
   }
 
   // Toggles a set of edges in/out of the selection: if every one is already
@@ -9191,7 +9194,9 @@ const App3D = forwardRef(function App3D(props, ref) {
       ? fillet3dHover.point : null
     drawFillet3DMarkers(vp, selPoints, hoverPoint, parseFloat(fillet3dRadiusInput)||0, fillet3dAccepted, fillet3dMode==='chamfer' ? FILLET3D_CHAMFER_COLOR : '#9c6ade')
     return () => clearFillet3DMarker()
-  }, [tool, fillet3dSel, fillet3dHover, fillet3dRadiusInput, fillet3dAccepted, fillet3dMode])
+    // viewTransform: a new object on every camera move — the dots are drawn
+    // once per run, so without it they stayed put while the view orbited.
+  }, [tool, fillet3dSel, fillet3dHover, fillet3dRadiusInput, fillet3dAccepted, fillet3dMode, viewTransform])
 
   // Keeps the 3D edge highlight (persistent orange) in sync with the selection set.
   useEffect(() => {
@@ -9351,7 +9356,10 @@ const App3D = forwardRef(function App3D(props, ref) {
         // Keep the tool open on the edges that didn't round (red), with the
         // biggest radius they WILL take on the new body pre-filled.
         const word = mode === 'chamfer' ? 'distance' : 'radius'
-        const n = part.failedCount, total = points.length
+        // `failed` = the edges found again on the new body (shown red); a
+        // rare one that can't be found is still counted as not rounded.
+        const n = part.failed.length || part.failedCount, total = points.length
+        const rounded = total - part.failedCount
         let max = 0
         if (part.failed.length) {
           try {
@@ -9363,9 +9371,9 @@ const App3D = forwardRef(function App3D(props, ref) {
         const them = n === 1 ? 'The red edge' : `The ${n} red edges`
         if (max > 0) {
           setFillet3dRadiusInput(String(max))
-          setFillet3dNote(`Rounded ${total - n} of ${total} edges. ${them} won't take ${radius} mm — the largest that fits is ${max} mm. Press Enter to use it, or Esc to stop.`)
+          setFillet3dNote(`Rounded ${rounded} of ${total} edges. ${them} won't take ${radius} mm — the largest that fits is ${max} mm. Press Enter to use it, or Esc to stop.`)
         } else {
-          setFillet3dNote(`Rounded ${total - n} of ${total} edges. ${them} won't take this ${word} at any size. Press Esc to finish.`)
+          setFillet3dNote(`Rounded ${rounded} of ${total} edges. ${them} won't take this ${word} at any size — usually a slight corner in the shape where they meet. Press Esc to finish.`)
         }
       }
     } catch (err) {

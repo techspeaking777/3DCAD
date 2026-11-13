@@ -453,6 +453,10 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   // highlighting already makes (isXxxHov vs isXxxSel).
   const hoverEdgeHighlightRef    = useRef(null)  // { points: number[], matrixWorld } | null
   const selectedEdgeHighlightsRef = useRef([])   // [{ points: number[], matrixWorld }]
+  // Fillet: the face a click would pick when no edge is under the cursor —
+  // { loops: THREE.Vector3[][] (world), label: {x,y,z} } | null. Drawn in the
+  // per-frame edge overlay below, so it follows the camera.
+  const filletFaceHoverRef = useRef(null)
   const filletActiveRef  = useRef(false)
   const softenActiveRef  = useRef(false)
   const measureActiveRef = useRef(false)
@@ -824,6 +828,25 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
         // "picked" and orange for "under the cursor".
         const selColor = measureActiveRef.current ? '#4FC3F7' : '#ffe14d'
         const hovColor = measureActiveRef.current ? '#84FFFF' : '#ff9800'
+        // Fillet's face hover: light blue fill + outline (the face-pick colour
+        // Shell and Face DXF use) — "a click here rounds all these edges".
+        const fh = filletActiveRef.current && filletFaceHoverRef.current
+        if (fh && !hoverEdgeHighlightRef.current) {
+          const toS = v => { const q = v.clone().project(cam); return { x:(q.x+1)/2*W, y:(-q.y+1)/2*H } }
+          ctx3.save()
+          ctx3.beginPath()
+          for (const loop of fh.loops) {
+            loop.forEach((pt, i) => { const q = toS(pt); if (i === 0) ctx3.moveTo(q.x, q.y); else ctx3.lineTo(q.x, q.y) })
+            ctx3.closePath()
+          }
+          ctx3.fillStyle = 'rgba(79,195,247,0.18)'; ctx3.fill('evenodd')
+          ctx3.strokeStyle = '#4FC3F7'; ctx3.lineWidth = 3; ctx3.lineJoin = 'round'; ctx3.stroke()
+          const lp = toS(fh.label)
+          ctx3.fillStyle = '#fff'; ctx3.font = 'bold 12px monospace'; ctx3.textAlign = 'center'
+          ctx3.fillText('click to round all its edges', lp.x, lp.y - 8)
+          ctx3.restore()
+        }
+
         for (const sel of selectedEdgeHighlightsRef.current) drawEdge(sel, sel.color || selColor)
 
         // Skip drawing the hover highlight if it's the same edge already in
@@ -1647,6 +1670,31 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
      * handleMouseMoveInternal (excludes isSolidEdge overlays so a click near
      * an edge overlay still resolves to the real face mesh underneath).
      */
+    /**
+     * Fillet's face hover: finds the solid face under the cursor and keeps
+     * its outline (outer loop + holes) for the per-frame overlay. Pass null
+     * to clear. Returns true when a face is highlighted.
+     */
+    hoverFilletFace(clientX, clientY) {
+      if (clientX == null) { filletFaceHoverRef.current = null; return false }
+      const s = stateRef.current; if (!s?.solidsGroup) return false
+      const el = mountRef.current; if (!el) return false
+      const rect = el.getBoundingClientRect()
+      const ndc = new THREE.Vector2(
+        ((clientX - rect.left) / rect.width)  *  2 - 1,
+        ((clientY - rect.top)  / rect.height) * -2 + 1,
+      )
+      const raycaster = new THREE.Raycaster()
+      raycaster.setFromCamera(ndc, s.camera)
+      const meshHit = raycaster.intersectObjects(s.solidsGroup.children, true)
+        .find(h => h.object.isMesh && !h.object.userData?.isSolidEdge)
+      if (!meshHit?.face) { filletFaceHoverRef.current = null; return false }
+      const normal = meshHit.face.normal.clone().transformDirection(meshHit.object.matrixWorld).normalize()
+      const loops = facePickBoundaryLoops({ object: meshHit.object, point: meshHit.point }, normal)
+      filletFaceHoverRef.current = loops?.length ? { loops, label: meshHit.point.clone() } : null
+      return !!filletFaceHoverRef.current
+    },
+
     raycastSolidFace(clientX, clientY) {
       const s = stateRef.current; if (!s?.solidsGroup) return null
       const el = mountRef.current; if (!el) return null
@@ -1734,6 +1782,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     clearEdgeHighlight() {
       hoverEdgeHighlightRef.current = null
       selectedEdgeHighlightsRef.current = []
+      filletFaceHoverRef.current = null
     },
 
     /**

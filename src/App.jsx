@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react'
+import { useState, useRef, useEffect, useMemo, useCallback, forwardRef, useImperativeHandle } from 'react'
 import { pxToMm, mmToPx, ALIGN_SNAP_DIST, ACQUIRE_DIST, SELECT_DIST, LINE_SNAP_DIST, SNAP_DIST, norm2pi, zoomRef, trackingDist } from './constants.js'
 import { angleOnArc, computeAllIntersections, circleCircleIntersect } from './geometry/intersections.js'
 import { getGeoSnap, getAllSnapPoints, checkAngle, checkAngleTight, getAngleSnap, applyTracking, computeLiveAngle, getTanPtsOnCircle, getExternalTangentPairs, nearestPt, nearestOnSegment } from './geometry/snap.js'
@@ -11,7 +11,7 @@ import { nearestScaleEntity, buildScaled } from './tools/scaleMath.js'
 import { nearestFilletLine, computeFillet } from './tools/filletMath.js'
 import { computeExtendPreview } from './tools/extendMath.js'
 import { sampleSpline, nearestSpline, computeSplineTrimPreview, performSplineTrim, distToSpline } from './tools/splineMath.js'
-import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform } from './tools/selectMath.js'
+import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform, findCorner, moveCorner, carryJoinedEnds } from './tools/selectMath.js'
 import { isEditableSpline, hitSplineNode, moveSplineNode, insertSplineNode, deleteSplineNode } from './tools/splineEdit.js'
 import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine, perpLabelOffset } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
@@ -193,6 +193,9 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   const [splineNodeHover,setSplineNodeHover]=useState(null) // {idx,node} under the cursor
   const [splineNodeDragging,setSplineNodeDragging]=useState(false)
   const splineNodeDragRef=useRef(null)                      // {idx,node,startScreen,moved} while a point is held
+  // Select tool: a corner (every line / open-spline end at one point) held for
+  // dragging — {members, startScreen, moved}. See findCorner in selectMath.js.
+  const cornerDragRef=useRef(null)
   // Dimension editing state
   const [selectDimField,setSelectDimField]=useState(null)   // currently focused field
   const [selectDimInput,setSelectDimInput]=useState('')      // value being typed in current field
@@ -436,22 +439,28 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
         const handles2=bbox2?getBBoxHandles(bbox2):null
         const anchorPt=handles2?handles2[selectDimAnchor]||handles2['mc']:null
+        let nl
         if (!anchorPt||selectDimAnchor==='mc'){
           // Anchor = midpoint
           const mx=(l.x1+l.x2)/2,my=(l.y1+l.y2)/2
-          setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x1:mx-nx*newLen/2,y1:my-ny*newLen/2,x2:mx+nx*newLen/2,y2:my+ny*newLen/2}:ln))
+          nl={...l,x1:mx-nx*newLen/2,y1:my-ny*newLen/2,x2:mx+nx*newLen/2,y2:my+ny*newLen/2}
         } else {
           // Find which endpoint is closest to anchor handle — that end stays fixed
           const d1=Math.hypot(l.x1-anchorPt.x,l.y1-anchorPt.y)
           const d2=Math.hypot(l.x2-anchorPt.x,l.y2-anchorPt.y)
-          if (d1<=d2){
-            // x1,y1 stays fixed — x2,y2 moves
-            setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x2:l.x1+nx*newLen,y2:l.y1+ny*newLen}:ln))
-          } else {
-            // x2,y2 stays fixed — x1,y1 moves
-            setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x1:l.x2-nx*newLen,y1:l.y2-ny*newLen}:ln))
-          }
+          nl=d1<=d2
+            ? {...l,x2:l.x1+nx*newLen,y2:l.y1+ny*newLen}    // x1,y1 stays fixed — x2,y2 moves
+            : {...l,x1:l.x2-nx*newLen,y1:l.y2-ny*newLen}    // x2,y2 stays fixed — x1,y1 moves
         }
+        // Lines/splines joined to a moved end come with it, so a closed shape
+        // stays closed (same as the 3D tab's sketch).
+        const moved=lines.map((ln,i)=>i===ent.idx?nl:ln)
+        const carried=carryJoinedEnds(moved,splines,[
+          {from:{x:l.x1,y:l.y1},to:{x:nl.x1,y:nl.y1}},
+          {from:{x:l.x2,y:l.y2},to:{x:nl.x2,y:nl.y2}},
+        ],ent.idx)
+        setLines(carried.lines)
+        if (carried.splines!==splines) setSplines(carried.splines)
       } else if (ent.kind==='circle'&&finalPending.radius&&parseFloat(finalPending.radius)>0){
         const c=circles[ent.idx]
         const newR=mmToPx(parseFloat(finalPending.radius))
@@ -1080,6 +1089,14 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     setSelectHover(best)
   },[tool,mousePos,lines,circles,arcs,splines,dims,dimStyle,selection,selectLiveGeom,viewTransform.scale])
 
+  // Select tool: the corner under the cursor that a press-and-drag would move
+  // (small white square). Not offered where an arc ends.
+  const cornerHover=useMemo(()=>{
+    if (tool!=='select'||!mousePos) return null
+    const c=findCorner(mousePos,lines,arcs,splines,8/viewTransform.scale)
+    return c&&!c.hasArc&&c.members.length?c:null
+  },[tool,mousePos,lines,arcs,splines,viewTransform.scale])
+
   // The one spline (if any) whose points can be edited right now: Select tool,
   // exactly one entity selected, and it's a hand-drawn spline. Reads the live
   // (mid-drag) geometry so the dots follow the cursor.
@@ -1700,6 +1717,16 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       const curArcs    = selectLiveGeom?.arcs    || arcs
       const curSplines = selectLiveGeom?.splines || splines
 
+      // Draggable corner under the cursor (white square)
+      if (cornerHover&&!cornerDragRef.current?.moved){
+        const q=6/sc
+        ctx.save()
+        ctx.fillStyle='#ffffff';ctx.strokeStyle='#1565C0';ctx.lineWidth=2/sc
+        ctx.fillRect(cornerHover.pt.x-q/2,cornerHover.pt.y-q/2,q,q)
+        ctx.strokeRect(cornerHover.pt.x-q/2,cornerHover.pt.y-q/2,q,q)
+        ctx.restore()
+      }
+
       // Highlight hovered entity
       if (selectHover&&!selection.some(s=>s.kind===selectHover.kind&&s.idx===selectHover.idx)){
         ctx.save();ctx.strokeStyle='#64B5F6';ctx.lineWidth=2/sc
@@ -2122,7 +2149,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       if (geo) drawLineIndicator(ctx,geo.x,geo.y,geo.type,sc)
     }
 
-  },[lines,circles,arcs,splines,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,deferredTangent,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,canvasSize,tKeyDown,pKeyDown,perpSourceLineIdx,drawStyle,intersectionPts,joinHover,joinFirstPt,pageConfig,dims,dimToolPreview,dimToolPts,dimStyle,dimMode,dimAngleLines,dimLineHover,gridVisible,gridSizeMm])
+  },[lines,circles,arcs,splines,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,deferredTangent,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,canvasSize,tKeyDown,pKeyDown,perpSourceLineIdx,drawStyle,intersectionPts,joinHover,joinFirstPt,pageConfig,dims,dimToolPreview,dimToolPts,dimStyle,dimMode,dimAngleLines,dimLineHover,gridVisible,gridSizeMm])
 
   function handleMouseDown(e){
     if (e.button===1){e.preventDefault();isPanningRef.current=true;lastPanPosRef.current={x:e.clientX,y:e.clientY}}
@@ -2164,6 +2191,13 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
             return
           }
         }
+        // A line corner under the cursor: press-and-drag moves it, with every
+        // line joined there (a plain click still selects as before).
+        const corner=findCorner(worldPos,lines,arcs,splines,8/viewTransform.scale)
+        if (corner&&!corner.hasArc&&corner.members.length){
+          cornerDragRef.current={members:corner.members,startScreen:{x:sx,y:sy},moved:false}
+          return
+        }
         // Start drag-window for select tool too
         dragStartRef.current={x:sx,y:sy}
         return
@@ -2191,6 +2225,20 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         }
         setSplineNodeDragging(false)
         wasDragRef.current=true
+        return
+      }
+      // Let go of a corner: a real drag commits (undoable); a plain click
+      // falls through to the normal click-to-select.
+      if (cornerDragRef.current){
+        const d=cornerDragRef.current
+        cornerDragRef.current=null
+        if (d.moved&&selectLiveGeom){
+          commit(snapshot())
+          setLines(selectLiveGeom.lines)
+          setSplines(selectLiveGeom.splines)
+          setSelectLiveGeom(null)
+          wasDragRef.current=true
+        }
         return
       }
       // Commit handle drag
@@ -2853,6 +2901,22 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       const pos=geo?{x:geo.x,y:geo.y}:(gridSnap?snapToGrid(worldPos):worldPos)
       setSplineNodeDragging(true)
       setSelectLiveGeom({lines,circles,arcs,splines:splines.map((sp,i)=>i===d.idx?moveSplineNode(sp,d.node,pos):sp)})
+      setMousePos(pos)
+      return
+    }
+
+    // Dragging a corner: snaps like the drawing tools (to geometry that isn't
+    // part of the corner, then the grid); every joined end follows.
+    if (cornerDragRef.current&&(e.buttons&1)){
+      const d=cornerDragRef.current
+      if (!d.moved&&Math.hypot(sx-d.startScreen.x,sy-d.startScreen.y)<4) return   // still a click
+      d.moved=true
+      const lineIdx=new Set(d.members.filter(m=>m.kind==='line').map(m=>m.idx))
+      const splIdx=new Set(d.members.filter(m=>m.kind==='spline').map(m=>m.idx))
+      const geo=getGeoSnap(worldPos,lines.filter((_,i)=>!lineIdx.has(i)),circles,arcs,null,false,splines.filter((_,i)=>!splIdx.has(i)),[])
+      const pos=geo?{x:geo.x,y:geo.y}:(gridSnap?snapToGrid(worldPos):worldPos)
+      const moved=moveCorner(lines,splines,d.members,pos)
+      setSelectLiveGeom({lines:moved.lines,circles,arcs,splines:moved.splines})
       setMousePos(pos)
       return
     }

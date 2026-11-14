@@ -28,6 +28,32 @@ const CLOSE_TOL = 4   // world units — endpoints within this distance are "con
  * Returns an array of closed profiles, each being an ordered array of
  * {x, y} sketch-space points (the shape outline, CCW preferred).
  */
+// Loose ends of an outline: line / arc / open-spline ends that no other piece
+// joins (same CLOSE_TOL joining rule as detectProfiles, same construction
+// filter). Axis lines are skipped — they're always open on purpose. Used to
+// ring the gaps when Finish finds no closed profile. Returns [{x,y}] (sketch px).
+export function openEnds(lines, arcs, planeId, splines = []) {
+  const keep = e => (e.plane || 'XY') === planeId && (e.style !== 'construction' || e.includedEdge) && e.style !== 'axis'
+  const ends = []
+  lines.filter(keep).forEach(l => { ends.push({ x:l.x1, y:l.y1 }, { x:l.x2, y:l.y2 }) })
+  arcs.filter(keep).forEach(a => {
+    ends.push({ x:a.cx+Math.cos(a.startAngle)*a.r, y:a.cy+Math.sin(a.startAngle)*a.r },
+              { x:a.cx+Math.cos(a.endAngle)*a.r,   y:a.cy+Math.sin(a.endAngle)*a.r })
+  })
+  splines.filter(sp => keep(sp) && !sp.closed && sp.points?.length >= 2).forEach(sp => {
+    const a = sp.points[0], b = sp.points[sp.points.length - 1]
+    ends.push({ x:a.x, y:a.y }, { x:b.x, y:b.y })
+  })
+  // Group ends into joints; a joint with only one end is loose.
+  const joints = []   // {x, y, n}
+  for (const p of ends) {
+    const j = joints.find(q => Math.hypot(q.x - p.x, q.y - p.y) < CLOSE_TOL)
+    if (j) j.n++
+    else joints.push({ x:p.x, y:p.y, n:1 })
+  }
+  return joints.filter(j => j.n === 1).map(({ x, y }) => ({ x, y }))
+}
+
 export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
   // Construction geometry (style==='construction') is reference-only, same as
   // real CAD convention — it's meant for snapping/layout aid while sketching,

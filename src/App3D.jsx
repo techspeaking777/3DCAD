@@ -17,13 +17,13 @@ import { nearestFilletLine, computeFillet } from './tools/filletMath.js'
 import { computeExtendPreview } from './tools/extendMath.js'
 import { fitSplineToPoints } from './tools/splineFit.js'
 import { sampleSpline, nearestSpline, computeSplineTrimPreview, performSplineTrim, distToSpline } from './tools/splineMath.js'
-import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform } from './tools/selectMath.js'
+import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform, findCorner, moveCorner, carryJoinedEnds } from './tools/selectMath.js'
 import { isEditableSpline, hitSplineNode, moveSplineNode, insertSplineNode, deleteSplineNode } from './tools/splineEdit.js'
 import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine, perpLabelOffset } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
 import { loadJSON, exportDXF, parseDXF, centreDxfResult, saveProjectAs, canPickSaveLocation, exportFaceDXF as writeFaceDXF, saveBlobAs, saveProjectFileAs, loadProjectFile, serializeProject, parseProjectData } from './tools/saveLoad.js'
 import { getAuthState, fetchMyClasses, saveNewCloudProject, updateCloudProject, loadCloudProject, saveFeedbackCopy, updateFeedbackCopy } from './tools/cloudSave.js'
-import { detectProfiles, detectPath, buildSolid } from './tools/extrudeMath.js'
+import { detectProfiles, detectPath, buildSolid, openEnds } from './tools/extrudeMath.js'
 import { cadEngine } from './cadEngine.js'
 import { replicadMeshToThree } from './cadMesh.js'
 import TracerPanel from './tools/TracerPanel.jsx'
@@ -2359,6 +2359,9 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [splineNodeHover,setSplineNodeHover]=useState(null) // {idx,node} under the cursor
   const [splineNodeDragging,setSplineNodeDragging]=useState(false)
   const splineNodeDragRef=useRef(null)                      // {idx,node,startScreen,moved} while a point is held
+  // Select tool: a corner (every line / open-spline end at one point) held for
+  // dragging — {members, startScreen, moved}. See findCorner in selectMath.js.
+  const cornerDragRef=useRef(null)
   // Dimension editing state
   const [selectDimField,setSelectDimField]=useState(null)   // currently focused field
   const [selectDimInput,setSelectDimInput]=useState('')      // value being typed in current field
@@ -2996,22 +2999,29 @@ const App3D = forwardRef(function App3D(props, ref) {
         const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
         const handles2=bbox2?getBBoxHandles(bbox2):null
         const anchorPt=handles2?handles2[selectDimAnchor]||handles2['mc']:null
+        let nl
         if (!anchorPt||selectDimAnchor==='mc'){
           // Anchor = midpoint
           const mx=(l.x1+l.x2)/2,my=(l.y1+l.y2)/2
-          setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x1:mx-nx*newLen/2,y1:my-ny*newLen/2,x2:mx+nx*newLen/2,y2:my+ny*newLen/2}:ln))
+          nl={...l,x1:mx-nx*newLen/2,y1:my-ny*newLen/2,x2:mx+nx*newLen/2,y2:my+ny*newLen/2}
         } else {
           // Find which endpoint is closest to anchor handle — that end stays fixed
           const d1=Math.hypot(l.x1-anchorPt.x,l.y1-anchorPt.y)
           const d2=Math.hypot(l.x2-anchorPt.x,l.y2-anchorPt.y)
-          if (d1<=d2){
-            // x1,y1 stays fixed — x2,y2 moves
-            setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x2:l.x1+nx*newLen,y2:l.y1+ny*newLen}:ln))
-          } else {
-            // x2,y2 stays fixed — x1,y1 moves
-            setLines(p=>p.map((ln,i)=>i===ent.idx?{...ln,x1:l.x2-nx*newLen,y1:l.y2-ny*newLen}:ln))
-          }
+          nl=d1<=d2
+            ? {...l,x2:l.x1+nx*newLen,y2:l.y1+ny*newLen}    // x1,y1 stays fixed — x2,y2 moves
+            : {...l,x1:l.x2-nx*newLen,y1:l.y2-ny*newLen}    // x2,y2 stays fixed — x1,y1 moves
         }
+        // Lines/splines joined to a moved end come with it, so a closed
+        // outline stays closed (before, only this line moved and the shape
+        // opened up — "No closed profile found").
+        const moved=lines.map((ln,i)=>i===ent.idx?nl:ln)
+        const carried=carryJoinedEnds(moved,splines,[
+          {from:{x:l.x1,y:l.y1},to:{x:nl.x1,y:nl.y1}},
+          {from:{x:l.x2,y:l.y2},to:{x:nl.x2,y:nl.y2}},
+        ],ent.idx)
+        setLines(carried.lines)
+        if (carried.splines!==splines) setSplines(carried.splines)
       } else if (ent.kind==='circle'&&finalPending.radius&&parseFloat(finalPending.radius)>0){
         const c=circles[ent.idx]
         const newR=mmToPx(parseFloat(finalPending.radius))
@@ -3662,6 +3672,15 @@ const App3D = forwardRef(function App3D(props, ref) {
     setSelectHover(best)
   },[tool,mousePos,lines,circles,arcs,splines,dims,selection,selectLiveGeom,viewTransform.scale])
 
+  // Select tool: the corner under the cursor that a press-and-drag would move
+  // (drawn as a small white square). Not offered where an arc ends — moving an
+  // arc's end would change its shape.
+  const cornerHover=useMemo(()=>{
+    if (tool!=='select'||!mousePos||!sketchMode) return null
+    const c=findCorner(mousePos,lines,arcs,splines,8/viewTransform.scale)
+    return c&&!c.hasArc&&c.members.length?c:null
+  },[tool,mousePos,sketchMode,lines,arcs,splines,viewTransform.scale])
+
   // The one spline (if any) whose points can be edited right now: Select tool,
   // exactly one entity selected, and it's a hand-drawn spline. Reads the live
   // (mid-drag) geometry so the dots follow the cursor.
@@ -3764,7 +3783,10 @@ const App3D = forwardRef(function App3D(props, ref) {
   // Sketch px where the profile crosses itself, ringed red until the sketch
   // changes (set by blockCrossingProfile).
   const [sketchCrossPt, setSketchCrossPt] = useState(null)
-  useEffect(() => { setSketchCrossPt(null) }, [lines, arcs, splines, circles, sketchMode])
+  // Loose line ends when Finish finds no closed outline — ringed the same way
+  // (set by handleFinishSketch's showNoProfile), cleared when the sketch changes.
+  const [sketchOpenPts, setSketchOpenPts] = useState([])
+  useEffect(() => { setSketchCrossPt(null); setSketchOpenPts([]) }, [lines, arcs, splines, circles, sketchMode])
 
   // ── OVERLAY DRAW ──
   // Geometry lives in Three.js (Viewport3D). Tool overlays (snap indicators,
@@ -3912,15 +3934,17 @@ const App3D = forwardRef(function App3D(props, ref) {
     // dot instead of the (much fainter) origin is off-axis from the real
     // path, which BRepOffsetAPI_MakePipeShell then renders as a
     // self-intersecting spike rather than a clean pipe.
-    if (sketchMode && sketchCrossPt) {
-      ctx.save()
-      ctx.translate(sketchCrossPt.x, sketchCrossPt.y)
-      ctx.scale(1/sc, 1/sc)
-      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 6
-      ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI*2); ctx.stroke()
-      ctx.strokeStyle = '#E53935'; ctx.lineWidth = 3
-      ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI*2); ctx.stroke()
-      ctx.restore()
+    if (sketchMode && (sketchCrossPt || sketchOpenPts.length)) {
+      for (const pt of [sketchCrossPt, ...sketchOpenPts].filter(Boolean)) {
+        ctx.save()
+        ctx.translate(pt.x, pt.y)
+        ctx.scale(1/sc, 1/sc)
+        ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 6
+        ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI*2); ctx.stroke()
+        ctx.strokeStyle = '#E53935'; ctx.lineWidth = 3
+        ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI*2); ctx.stroke()
+        ctx.restore()
+      }
     }
     if (sketchMode && sweepState?.path && sweepState?.ghostEndpoint) {
       const gp = sweepState.ghostEndpoint
@@ -4323,6 +4347,16 @@ const App3D = forwardRef(function App3D(props, ref) {
       ctx.restore()
     }
 
+    // ── Select tool: draggable corner under the cursor (white square) ──
+    if (tool==='select'&&cornerHover&&!cornerDragRef.current?.moved){
+      const s=6/sc
+      ctx.save()
+      ctx.fillStyle='#ffffff';ctx.strokeStyle='#1565C0';ctx.lineWidth=2/sc
+      ctx.fillRect(cornerHover.pt.x-s/2,cornerHover.pt.y-s/2,s,s)
+      ctx.strokeRect(cornerHover.pt.x-s/2,cornerHover.pt.y-s/2,s,s)
+      ctx.restore()
+    }
+
     // ── Select tool: bbox, handles, dimension labels ──
     if (tool==='select'&&selection.length>0){
       const curLines=selectLiveGeom?.lines||lines,curCircles=selectLiveGeom?.circles||circles
@@ -4674,7 +4708,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (segs) for (const s of segs) drawPreviewLine(ctx,s.x1,s.y1,s.x2,s.y2,includeEdgeConstruction?'#90A4AE':'#FFEB3B',1,sc)
     }
 
-  },[lines,circles,arcs,splines,sketchCrossPt,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction])
+  },[lines,circles,arcs,splines,sketchCrossPt,sketchOpenPts,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction])
 
 
   // ── Phase 2 Step 3: plane tagging ────────────────────────────────────────
@@ -5248,6 +5282,19 @@ const App3D = forwardRef(function App3D(props, ref) {
     const ownArcs = arcs.filter(a => !a.ghostRef)
     const ownSplines = splines.filter(s => !s.ghostRef)
 
+    // No closed outline: say so, and ring every loose end so the student can
+    // see exactly where the gap is (or the bit that sticks out past a corner).
+    const showNoProfile = () => {
+      const ends = openEnds(ownLines, ownArcs, planeId, ownSplines)
+      const msg = ends.length
+        ? `The outline isn't closed — the red ${ends.length === 1 ? 'ring shows a loose end' : 'rings show the loose ends'}. Join ${ends.length === 1 ? 'it' : 'each one'} to another line end (or Trim away a bit that sticks out), then press Finish.`
+        : 'No closed profile found — make sure your sketch forms a closed loop.'
+      setCadError(msg)
+      setTimeout(() => setCadError(prev => prev === msg ? null : prev), ends.length ? 10000 : 5000)
+      // After the clear-on-change effect has run for this Finish.
+      if (ends.length) setTimeout(() => setSketchOpenPts(ends), 0)
+    }
+
     // Detect closed profiles (needed for both standalone sketches and extrude flow)
     const allProfiles = []
     const profiles = detectProfiles(ownLines, ownArcs, planeId, ownCircles, ownSplines)
@@ -5265,8 +5312,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (allProfiles.length === 0) {
         setSketchMode(true)
         setActivePlane(plane)
-        setCadError('No closed profile found — make sure your sketch forms a closed loop.')
-        setTimeout(() => setCadError(null), 5000)
+        showNoProfile()
         return
       }
       const best = allProfiles[0]
@@ -5345,8 +5391,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (allProfiles.length === 0) {
         setSketchMode(true)
         setActivePlane(plane)
-        setCadError('No closed profile found — make sure your sketch forms a closed loop.')
-        setTimeout(() => setCadError(null), 5000)
+        showNoProfile()
         return
       }
       // Profile done: open the confirm popup with the live 3D preview (see
@@ -5373,8 +5418,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (allProfiles.length === 0) {
         setSketchMode(true)
         setActivePlane(plane)
-        setCadError('No closed profile found — make sure your sketch forms a closed loop.')
-        setTimeout(() => setCadError(null), 5000)
+        showNoProfile()
         return
       }
       const best = allProfiles[0]
@@ -5399,8 +5443,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         // No closed profile — warn and stay in sketch mode so the user can fix it
         setSketchMode(true)
         setActivePlane(plane)
-        setCadError('No closed profile found — make sure your sketch forms a closed loop.')
-        setTimeout(() => setCadError(null), 5000)
+        showNoProfile()
         return
       }
 
@@ -11684,6 +11727,13 @@ const App3D = forwardRef(function App3D(props, ref) {
             return
           }
         }
+        // A line corner under the cursor: press-and-drag moves it, with every
+        // line joined there (a plain click still selects as before).
+        const corner=findCorner(worldPos,lines,arcs,splines,8/viewTransform.scale)
+        if (corner&&!corner.hasArc&&corner.members.length){
+          cornerDragRef.current={members:corner.members,startScreen:{x:sx,y:sy},moved:false}
+          return
+        }
         // Start drag-window for select tool too
         dragStartRef.current={x:sx,y:sy}
         return
@@ -11711,6 +11761,20 @@ const App3D = forwardRef(function App3D(props, ref) {
         }
         setSplineNodeDragging(false)
         wasDragRef.current=true
+        return
+      }
+      // Let go of a corner: a real drag commits (undoable); a plain click
+      // falls through to the normal click-to-select.
+      if (cornerDragRef.current){
+        const d=cornerDragRef.current
+        cornerDragRef.current=null
+        if (d.moved&&selectLiveGeom){
+          commit(snapshot())
+          setLines(selectLiveGeom.lines)
+          setSplines(selectLiveGeom.splines)
+          setSelectLiveGeom(null)
+          wasDragRef.current=true
+        }
         return
       }
       // Commit handle drag
@@ -12649,6 +12713,22 @@ const App3D = forwardRef(function App3D(props, ref) {
       const pos=geo?{x:geo.x,y:geo.y}:(gridSnap?snapToGrid(worldPos):worldPos)
       setSplineNodeDragging(true)
       setSelectLiveGeom({lines,circles,arcs,splines:splines.map((sp,i)=>i===d.idx?moveSplineNode(sp,d.node,pos):sp)})
+      setMousePos(pos)
+      return
+    }
+
+    // Dragging a corner: snaps like the drawing tools (to geometry that isn't
+    // part of the corner, then the grid); every joined end follows.
+    if (cornerDragRef.current&&(e.buttons&1)){
+      const d=cornerDragRef.current
+      if (!d.moved&&Math.hypot(sx-d.startScreen.x,sy-d.startScreen.y)<4) return   // still a click
+      d.moved=true
+      const lineIdx=new Set(d.members.filter(m=>m.kind==='line').map(m=>m.idx))
+      const splIdx=new Set(d.members.filter(m=>m.kind==='spline').map(m=>m.idx))
+      const geo=getGeoSnap(worldPos,lines.filter((_,i)=>!lineIdx.has(i)),snapCircles,snapArcs,null,false,splines.filter((_,i)=>!splIdx.has(i)),[])
+      const pos=geo?{x:geo.x,y:geo.y}:(gridSnap?snapToGrid(worldPos):worldPos)
+      const moved=moveCorner(lines,splines,d.members,pos)
+      setSelectLiveGeom({lines:moved.lines,circles,arcs,splines:moved.splines})
       setMousePos(pos)
       return
     }

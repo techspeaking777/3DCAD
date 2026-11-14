@@ -220,3 +220,75 @@ export function applySelectionTransform(
     splines: splines.map((e,i) => selSplines.has(i) ? transformEntity('spline',e, anchor, sx, sy, dx, dy) : e),
   }
 }
+
+// ── Corners: keeping joined lines together ───────────────────────────────────
+// A "corner" is every line end / open-spline end sitting at one point. Moving a
+// corner moves all of them, so a closed outline stays closed when a student
+// drags a corner or edits one line's length/angle. Arcs are left out: moving
+// one end of an arc would change its shape, so a corner that includes an arc
+// end isn't dragged (findCorner reports hasArc) and edits leave arcs alone.
+
+export const CORNER_JOIN_TOL = 2   // sketch px (1 mm): ends this close count as joined
+
+const isOpenEditable = sp => !sp.closed && !sp.ghostRef && Array.isArray(sp.points) && sp.points.length >= 2
+
+// The corner nearest `pos` within `radius`: { pt, members, hasArc } or null.
+// members: [{kind:'line', idx, end:1|2}, {kind:'spline', idx, node}].
+// `skip` (optional) is a predicate on a member, to leave some ends out.
+export function findCorner(pos, lines, arcs, splines, radius, skip = null) {
+  let best = null, bestD = radius
+  const consider = p => { const d = Math.hypot(p.x - pos.x, p.y - pos.y); if (d <= bestD) { bestD = d; best = { x: p.x, y: p.y } } }
+  lines.forEach(l => { if (!l.ghostRef) { consider({ x: l.x1, y: l.y1 }); consider({ x: l.x2, y: l.y2 }) } })
+  splines.forEach(sp => { if (isOpenEditable(sp)) { consider(sp.points[0]); consider(sp.points[sp.points.length - 1]) } })
+  if (!best) return null
+  const near = (x, y) => Math.hypot(x - best.x, y - best.y) <= CORNER_JOIN_TOL
+  const members = []
+  lines.forEach((l, idx) => {
+    if (l.ghostRef) return
+    if (near(l.x1, l.y1)) members.push({ kind: 'line', idx, end: 1 })
+    if (near(l.x2, l.y2)) members.push({ kind: 'line', idx, end: 2 })
+  })
+  splines.forEach((sp, idx) => {
+    if (!isOpenEditable(sp)) return
+    const last = sp.points.length - 1
+    if (near(sp.points[0].x, sp.points[0].y)) members.push({ kind: 'spline', idx, node: 0 })
+    if (near(sp.points[last].x, sp.points[last].y)) members.push({ kind: 'spline', idx, node: last })
+  })
+  const hasArc = arcs.some(a => !a.ghostRef && (
+    near(a.cx + Math.cos(a.startAngle) * a.r, a.cy + Math.sin(a.startAngle) * a.r) ||
+    near(a.cx + Math.cos(a.endAngle) * a.r, a.cy + Math.sin(a.endAngle) * a.r)))
+  return { pt: best, members: skip ? members.filter(m => !skip(m)) : members, hasArc }
+}
+
+// Moves every member end to `to`. Returns new { lines, splines } arrays.
+export function moveCorner(lines, splines, members, to) {
+  const lineEnds = new Map(), splineNodes = new Map()
+  for (const m of members) {
+    if (m.kind === 'line') lineEnds.set(m.idx, [...(lineEnds.get(m.idx) || []), m.end])
+    else splineNodes.set(m.idx, [...(splineNodes.get(m.idx) || []), m.node])
+  }
+  return {
+    lines: lines.map((l, i) => {
+      const ends = lineEnds.get(i); if (!ends) return l
+      return { ...l, ...(ends.includes(1) ? { x1: to.x, y1: to.y } : {}), ...(ends.includes(2) ? { x2: to.x, y2: to.y } : {}) }
+    }),
+    splines: splines.map((sp, i) => {
+      const nodes = splineNodes.get(i); if (!nodes) return sp
+      return { ...sp, points: sp.points.map((p, k) => nodes.includes(k) ? { ...p, x: to.x, y: to.y } : p) }
+    }),
+  }
+}
+
+// After one line's ends were moved (from → to), drag the OTHER lines/splines
+// that were joined at the old end positions along with them. `moves` =
+// [{from, to}], `editedIdx` = the line that was edited (already moved).
+export function carryJoinedEnds(lines, splines, moves, editedIdx) {
+  let out = { lines, splines }
+  for (const { from, to } of moves) {
+    if (Math.hypot(from.x - to.x, from.y - to.y) < 1e-9) continue
+    const c = findCorner(from, out.lines, [], out.splines, CORNER_JOIN_TOL,
+      m => m.kind === 'line' && m.idx === editedIdx)
+    if (c?.members.length) out = moveCorner(out.lines, out.splines, c.members, to)
+  }
+  return out
+}

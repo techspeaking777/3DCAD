@@ -4,12 +4,16 @@ import { useDraggablePanel, DragHandle } from './useDraggablePanel.jsx'
 // Kid-friendly popover shown next to the Fillet toolbar button once both lines
 // are picked. A real, visible input box for the radius — no blind keystrokes —
 // Enter or the Apply button rounds the corner.
-export default function FilletRadiusPanel({ toolColor, value, onChange, onApply, tooLarge }){
+// mode: 'fillet' | 'chamfer' (onMode switches it); corners: how many corners
+// the preview will change (more than 1 for a whole shape); needLines: Chamfer
+// was asked for on an arc.
+export default function FilletRadiusPanel({ toolColor, value, onChange, onApply, tooLarge, mode = 'fillet', onMode, corners = 0, needLines = false }){
   const { panelRef, panelStyle, handleProps } = useDraggablePanel()
   const inputRef = useRef(null)
   useEffect(()=>{ inputRef.current?.focus() }, [])
 
-  const canApply = parseFloat(value)>0 && !tooLarge
+  const canApply = parseFloat(value)>0 && !tooLarge && !needLines
+  const chamfer = mode === 'chamfer'
 
   return (
     <div ref={panelRef} style={{
@@ -23,7 +27,20 @@ export default function FilletRadiusPanel({ toolColor, value, onChange, onApply,
         borderTop:'8px solid transparent',borderBottom:'8px solid transparent',
         borderRight:`9px solid ${toolColor}`}}/>
 
-      <DragHandle {...handleProps}>Fillet Radius</DragHandle>
+      <DragHandle {...handleProps}>{chamfer ? 'Chamfer Distance' : 'Fillet Radius'}</DragHandle>
+
+      {onMode && (
+        <div style={{display:'flex',gap:4,marginBottom:8}}>
+          {[['fillet','ROUND'],['chamfer','CHAMFER']].map(([m,label])=>(
+            <button key={m} onClick={()=>onMode(m)} title={m==='fillet'?'Round the corner':'Cut the corner off straight'}
+              style={{flex:1,padding:'4px 0',borderRadius:5,cursor:'pointer',fontFamily:'monospace',fontSize:9,
+                letterSpacing:'0.05em',fontWeight:'bold',background:mode===m?toolColor+'33':'#0d0d1a',
+                border:`2px solid ${mode===m?toolColor:'#3a3a5a'}`,color:mode===m?toolColor:'#666'}}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div style={{display:'flex',alignItems:'center',gap:6,justifyContent:'center'}}>
         <input
@@ -44,7 +61,9 @@ export default function FilletRadiusPanel({ toolColor, value, onChange, onApply,
         <span style={{color:'#888',fontSize:11}}>mm</span>
       </div>
 
-      {tooLarge && <div style={{marginTop:6,textAlign:'center',fontSize:9,color:'#F44336'}}>Too big for this corner</div>}
+      {corners > 1 && !tooLarge && <div style={{marginTop:6,textAlign:'center',fontSize:9,color:toolColor}}>{corners} corners</div>}
+      {tooLarge && <div style={{marginTop:6,textAlign:'center',fontSize:9,color:'#F44336'}}>Too big for {corners > 1 ? 'these corners' : 'this corner'}</div>}
+      {needLines && <div style={{marginTop:6,textAlign:'center',fontSize:9,color:'#F44336'}}>Chamfer needs two straight lines</div>}
 
       <button
         onClick={onApply}

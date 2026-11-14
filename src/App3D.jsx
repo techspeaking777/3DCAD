@@ -13,7 +13,7 @@ import { nearestMoveCopyEntity, buildCopies, removeSelected } from './tools/move
 import { nearestRotateCopyEntity, buildRotatedCopies } from './tools/rotateCopyMath.js'
 import { buildRectangularOffsets, buildCircularAngles, circularStepAngleDeg } from './tools/patternMath.js'
 import { nearestScaleEntity, buildScaled, scaleSketchAbout } from './tools/scaleMath.js'
-import { nearestFilletLine, computeFillet } from './tools/filletMath.js'
+import { nearestFilletEntity, computeFilletOp } from './tools/filletMath.js'
 import { computeExtendPreview } from './tools/extendMath.js'
 import { fitSplineToPoints } from './tools/splineFit.js'
 import { sampleSpline, nearestSpline, computeSplineTrimPreview, performSplineTrim, distToSpline } from './tools/splineMath.js'
@@ -2287,6 +2287,8 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [resizeHover,setResizeHover]=useState(null)
 
   // Fillet tool state
+  // [{kind:'line'|'arc',idx,clickPt}] up to 2, or [{kind:'chain',idx}] = every corner of that line's shape
+  const [filletMode,setFilletMode]=useState('fillet')   // 'fillet' | 'chamfer' (kept between uses)
   const [filletSel,setFilletSel]=useState([])   // up to 2 {kind:'line',idx,clickPt}
   const [filletAccepted,setFilletAccepted]=useState(false)
   const [filletRadiusInput,setFilletRadiusInput]=useState('')
@@ -3154,20 +3156,22 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
   // Shared by the blind Enter-key flow and the visible FilletRadiusPanel's
   // Apply button (see FilletRadiusPanel.jsx).
+  // Applies a computeFilletOp result: trimmed lines/arcs keep their own style
+  // (and plane); the new rounding arcs / chamfer lines take the style of what
+  // they join and the sketch's plane tag (same bug class as the Mirror tool's commit).
+  // Shared by Enter, the panel's Apply and a click.
   function applyFillet(){
-    if (!filletPreview||filletPreview.tooLarge) return
-    const{newL1,newL2,arc}=filletPreview
-    // Carry style from source lines through fillet
-    const s1=lines[filletSel[0].idx]?.style
-    const s2=lines[filletSel[1].idx]?.style
+    const res=filletPreview
+    if (!res||res.tooLarge||res.needLines||!res.count) return
     commit(snapshot())
-    // Same plane/facePlane tagging every other commit needs — see the
-    // matching comment on the Mirror tool's commit, same bug class.
-    const flPt = planeTag()
-    setLines(p=>[...p.filter((_,i)=>!filletSel.some(s=>s.idx===i)),
-      {...newL1,...(s1?{style:s1}:{}),...flPt},
-      {...newL2,...(s2?{style:s2}:{}),...flPt}])
-    setArcs(p=>[...p,{...arc,...flPt}])
+    const tag=planeTag()
+    const lu=new Map(res.lineUpdates.map(u=>[u.idx,u.geom]))
+    const au=new Map(res.arcUpdates.map(u=>[u.idx,u.geom]))
+    const style=lines[res.lineUpdates[0]?.idx]?.style
+    setLines(p=>[...p.map((l,i)=>lu.has(i)?{...l,...lu.get(i)}:l),
+      ...res.newLines.map(l=>({...l,...(style?{style}:{}),...tag}))])
+    setArcs(p=>[...p.map((a,i)=>au.has(i)?{...a,...au.get(i)}:a),
+      ...res.newArcs.map(a=>({...a,...(style?{style}:{}),...tag}))])
     resetFillet()
   }
   function resetTrace(){
@@ -3704,16 +3708,16 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   useEffect(()=>{
     if (tool!=='fillet'||filletAccepted||!mousePos){setFilletHover(null);return}
-    setFilletHover(nearestFilletLine(mousePos,lines))
-  },[tool,filletAccepted,mousePos,lines])
+    setFilletHover(nearestFilletEntity(mousePos,lines,arcs))
+  },[tool,filletAccepted,mousePos,lines,arcs])
 
   useEffect(()=>{
-    if (tool!=='fillet'||!filletAccepted||filletSel.length<2){setFilletPreview(null);return}
+    const ready=filletSel[0]?.kind==='chain'||filletSel.length===2
+    if (tool!=='fillet'||!filletAccepted||!ready){setFilletPreview(null);return}
     const r=mmToPx(parseFloat(filletRadiusInput)||0)
     if (r<=0){setFilletPreview(null);return}
-    const l1=lines[filletSel[0].idx],l2=lines[filletSel[1].idx]
-    setFilletPreview(computeFillet(l1,l2,r,filletSel[0].clickPt,filletSel[1].clickPt))
-  },[tool,filletAccepted,filletSel,filletRadiusInput,lines])
+    setFilletPreview(computeFilletOp(filletSel,lines,arcs,r,filletMode))
+  },[tool,filletAccepted,filletSel,filletRadiusInput,filletMode,lines,arcs])
 
 
   // ── PERP SNAP — completely separate algorithm, no tangent code ──────────────
@@ -4098,7 +4102,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       const isRCHov=rotateCopyHover?.kind==='line'&&rotateCopyHover.idx===idx&&!isRCSel
       const isRzSel=resizeSel.some(e=>e.kind==='line'&&e.idx===idx)
       const isRzHov=resizeHover?.kind==='line'&&resizeHover.idx===idx&&!isRzSel
-      const isFiSel=filletSel.some(e=>e.kind==='line'&&e.idx===idx)
+      const isFiSel=filletSel.some(e=>(e.kind==='line'||e.kind==='chain')&&e.idx===idx)
       const isFiHov=filletHover?.kind==='line'&&filletHover.idx===idx&&!isFiSel
       const isSelHov=selectHover?.kind==='line'&&selectHover.idx===idx&&!selection.some(s=>s.kind==='line'&&s.idx===idx)
       const isSelected=selection.some(s=>s.kind==='line'&&s.idx===idx)
@@ -4144,11 +4148,13 @@ const App3D = forwardRef(function App3D(props, ref) {
       const isRCHov=rotateCopyHover?.kind==='arc'&&rotateCopyHover.idx===idx&&!isRCSel
       const isRzSel=resizeSel.some(e=>e.kind==='arc'&&e.idx===idx)
       const isRzHov=resizeHover?.kind==='arc'&&resizeHover.idx===idx&&!isRzSel
+      const isFiSel=filletSel.some(e=>e.kind==='arc'&&e.idx===idx)
+      const isFiHov=tool==='fillet'&&filletHover?.kind==='arc'&&filletHover.idx===idx&&!isFiSel
       const isSelHov=selectHover?.kind==='arc'&&selectHover.idx===idx&&!selection.some(s=>s.kind==='arc'&&s.idx===idx)
       const isSelected=selection.some(s=>s.kind==='arc'&&s.idx===idx)
-      const color=isDelTarget?'#F44336':isOffSel||isMirSel||isCenSel||isMCSel||isRCSel||isRzSel?'#FF9800':isOffHov||isMirHov||isCenHov||isMCHov||isRCHov||isRzHov?'#FFD600':isSelHov||isSelected?'#64B5F6':null
+      const color=isDelTarget?'#F44336':isOffSel||isMirSel||isCenSel||isMCSel||isRCSel||isRzSel||isFiSel?'#FF9800':isOffHov||isMirHov||isCenHov||isMCHov||isRCHov||isRzHov||isFiHov?'#FFD600':isSelHov||isSelected?'#64B5F6':null
       if (!color) return
-      const lw=(isDelTarget||isOffSel||isMirSel||isCenSel||isMCSel||isRCSel||isRzSel?3:2)/sc
+      const lw=(isDelTarget||isOffSel||isMirSel||isCenSel||isMCSel||isRCSel||isRzSel||isFiSel?3:2)/sc
       ctx.save();ctx.strokeStyle=color;ctx.lineWidth=lw;ctx.setLineDash([])
       ctx.beginPath();ctx.arc(arc.cx,arc.cy,arc.r,arc.startAngle,arc.startAngle+(norm2pi(arc.endAngle-arc.startAngle)||2*Math.PI),false);ctx.stroke();ctx.restore()
     })
@@ -4310,18 +4316,22 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     // ── Fillet preview ──
     if (tool==='fillet'&&filletAccepted&&filletPreview){
-      if (filletPreview.tooLarge){
-        if (mousePos) drawLabel(ctx,'Radius too large',mousePos.x,mousePos.y-20/sc,'#F44336',sc)
-      } else {
+      const fp=filletPreview
+      if (fp.tooLarge||fp.needLines){
+        if (mousePos) drawLabel(ctx,fp.needLines?'Chamfer needs two straight lines':(filletMode==='chamfer'?'Distance':'Radius')+' too large',mousePos.x,mousePos.y-20/sc,'#F44336',sc)
+      } else if (fp.count){
         ctx.save();ctx.setLineDash([6/sc,3/sc])
         ctx.strokeStyle='#4CAF50';ctx.lineWidth=2/sc
-        const{newL1,newL2,arc,T1,T2}=filletPreview
-        ctx.beginPath();ctx.moveTo(newL1.x1,newL1.y1);ctx.lineTo(newL1.x2,newL1.y2);ctx.stroke()
-        ctx.beginPath();ctx.moveTo(newL2.x1,newL2.y1);ctx.lineTo(newL2.x2,newL2.y2);ctx.stroke()
-        ctx.beginPath();ctx.arc(arc.cx,arc.cy,arc.r,arc.startAngle,arc.endAngle,false);ctx.stroke()
-        ctx.setLineDash([]);[T1,T2].forEach(t=>{ctx.save();ctx.translate(t.x,t.y);ctx.scale(1/sc,1/sc);ctx.beginPath();ctx.arc(0,0,4,0,Math.PI*2);ctx.fillStyle='#4CAF50';ctx.fill();ctx.restore()})
-        const r=mmToPx(parseFloat(filletRadiusInput)||0)
-        drawLabel(ctx,'R '+pxToMm(r).toFixed(1)+' mm · Enter to apply',arc.cx,arc.cy-arc.r/sc-18/sc,'#4CAF50',sc)
+        const arcPath=a=>{ctx.beginPath();ctx.arc(a.cx,a.cy,a.r,a.startAngle,a.startAngle+(norm2pi(a.endAngle-a.startAngle)||2*Math.PI),false);ctx.stroke()}
+        fp.lineUpdates.forEach(({geom:l})=>{ctx.beginPath();ctx.moveTo(l.x1,l.y1);ctx.lineTo(l.x2,l.y2);ctx.stroke()})
+        fp.arcUpdates.forEach(({geom})=>arcPath(geom))
+        fp.newArcs.forEach(arcPath)
+        fp.newLines.forEach(l=>{ctx.beginPath();ctx.moveTo(l.x1,l.y1);ctx.lineTo(l.x2,l.y2);ctx.stroke()})
+        ctx.setLineDash([])
+        fp.marks.forEach(t=>{ctx.save();ctx.translate(t.x,t.y);ctx.scale(1/sc,1/sc);ctx.beginPath();ctx.arc(0,0,4,0,Math.PI*2);ctx.fillStyle='#4CAF50';ctx.fill();ctx.restore()})
+        const at=fp.marks[0]
+        const what=(filletMode==='chamfer'?'Chamfer ':'R ')+(parseFloat(filletRadiusInput)||0)+' mm'+(fp.count>1?' · '+fp.count+' corners':'')
+        drawLabel(ctx,what+' · Enter or click to apply',at.x,at.y-24/sc,'#4CAF50',sc)
         ctx.restore()
       }
     }
@@ -4708,7 +4718,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (segs) for (const s of segs) drawPreviewLine(ctx,s.x1,s.y1,s.x2,s.y2,includeEdgeConstruction?'#90A4AE':'#FFEB3B',1,sc)
     }
 
-  },[lines,circles,arcs,splines,sketchCrossPt,sketchOpenPts,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction])
+  },[lines,circles,arcs,splines,sketchCrossPt,sketchOpenPts,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,filletMode,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction])
 
 
   // ── Phase 2 Step 3: plane tagging ────────────────────────────────────────
@@ -12379,10 +12389,11 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
 
     if (tool==='fillet'){
+      if (e.detail>1) return   // 2nd click of a double-click — handleDoubleClick picks the whole shape
       if (!filletAccepted){
-        const hit=nearestFilletLine(raw,lines)
+        const hit=nearestFilletEntity(raw,lines,arcs)
         if (!hit) return
-        const already=filletSel.findIndex(s=>s.idx===hit.idx)
+        const already=filletSel.findIndex(s=>s.kind===hit.kind&&s.idx===hit.idx)
         if (already>=0) setFilletSel(p=>p.filter((_,i)=>i!==already))
         else if (filletSel.length<2){
           setFilletSel(p=>[...p,hit])
@@ -12393,22 +12404,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         }
       } else {
         // Click applies the fillet (same as Enter)
-        if (!filletPreview||filletPreview.tooLarge) return
-        const{newL1,newL2,arc}=filletPreview
-        // Carry style from source lines through fillet
-        const s1=lines[filletSel[0].idx]?.style
-        const s2=lines[filletSel[1].idx]?.style
-        commit(snapshot())
-        // Same plane/facePlane tagging every other commit needs — see the
-        // matching comment on the Mirror tool's commit, same bug class.
-        // trimLine()/the new arc in filletMath.js drop it just like style did
-        // (hence the existing manual style patch-back below).
-        const flPt = planeTag()
-        setLines(p=>[...p.filter((_,i)=>!filletSel.some(s=>s.idx===i)),
-          {...newL1,...(s1?{style:s1}:{}),...flPt},
-          {...newL2,...(s2?{style:s2}:{}),...flPt}])
-        setArcs(p=>[...p,{...arc,...flPt}])
-        resetFillet()
+        applyFillet()
       }
       return
     }
@@ -12594,6 +12590,17 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   function handleDoubleClick(e){
+    // Fillet: double-click a line to round (or chamfer) every corner of the
+    // shape it belongs to — one radius for the lot.
+    if (tool==='fillet'&&!filletAccepted){
+      const hit=nearestFilletEntity(screenToWorld(e.clientX,e.clientY),lines,arcs)
+      if (hit?.kind==='line'){
+        e.preventDefault()
+        setFilletSel([{kind:'chain',idx:hit.idx}])
+        setFilletAccepted(true)
+      }
+      return
+    }
     // Select tool, one hand-drawn spline picked: double-click on the curve adds a
     // point there (and picks it, ready to drag or delete).
     if (tool==='select'){
@@ -12771,24 +12778,26 @@ const App3D = forwardRef(function App3D(props, ref) {
     setMousePos(snappedWorld);updateTracking(snappedWorld)
   }
 
-  // Keys normally reach handleKeyDown only while focus is inside the app's
-  // root div. Finish Sketch removes its own button, so focus falls to the page
-  // and the Sweep/Spring confirm popup that opens next never heard Esc/Enter
-  // — a sweep that failed to build (Done disabled) left "✎ Sketch" as the only
-  // way out. While that popup is up, Esc/Enter from outside the root are
-  // handed to handleKeyDown too (the latest one, via a ref).
+  // Keys normally reach handleKeyDown only while focus is inside this app's
+  // root div. Clicking a button that then disappears (a panel's Apply, Finish
+  // Sketch, a popup's Done) drops focus to the page itself, and from then on
+  // Ctrl+Z, Esc, Enter and every shortcut did nothing until the canvas was
+  // clicked — e.g. a Sweep popup that failed to build could not be Esc'd.
+  // Keys aimed at the bare page are handed to handleKeyDown (the latest one,
+  // via a ref) — but only while this app is the visible tab (both apps stay
+  // mounted; the hidden one is display:none, so offsetParent is null).
   const handleKeyDownRef = useRef(null)
   handleKeyDownRef.current = handleKeyDown
   useEffect(() => {
-    if (!(sweepState?.armed || springState?.armed)) return
     const onKey = e => {
-      if (e.key !== 'Escape' && e.key !== 'Enter') return
-      if (rootDivRef.current?.contains(e.target)) return   // the root's own onKeyDown has it
+      if (e.target !== document.body && e.target !== document.documentElement) return
+      const root = rootDivRef.current
+      if (!root || root.offsetParent === null) return
       handleKeyDownRef.current?.(e)
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [sweepState?.armed, springState?.armed])
+  }, [])
 
   function handleKeyDown(e){
     if (showSplash) return
@@ -13556,13 +13565,13 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (tool==='fillet') {
       if (!filletAccepted) {
         if (filletSel.length===0) return { step:1, total:3, color:c,
-          action:'Click first line',
+          action:'Click a line or arc — or double-click a shape for every corner',
           hints:[] }
         if (filletSel.length===1) return { step:2, total:3, color:c,
-          action:'Click second line',
+          action:'Click the other line or arc',
           hints:[K('Esc')] }
         return { step:2, total:3, color:c,
-          action:'2 lines selected',
+          action:'2 picked',
           hints:[K('Tab','accept'), K('Esc')] }
       }
       if (filletPreview?.tooLarge) return { step:3, total:3, color:'#EF9A9A',
@@ -16320,13 +16329,17 @@ const App3D = forwardRef(function App3D(props, ref) {
               splinePoints={splinePoints}
             />
           )}
-          {tool==='fillet'&&filletSel.length===2&&(
+          {tool==='fillet'&&(filletSel.length===2||filletSel[0]?.kind==='chain')&&(
             <FilletRadiusPanel
               toolColor={toolConfig.find(([t])=>t==='fillet')[3]}
               value={filletRadiusInput}
               onChange={setFilletRadiusInput}
               onApply={applyFillet}
               tooLarge={!!filletPreview?.tooLarge}
+              mode={filletMode}
+              onMode={setFilletMode}
+              corners={filletPreview?.count||0}
+              needLines={!!filletPreview?.needLines}
             />
           )}
           {tool==='offset'&&offsetEntity&&(

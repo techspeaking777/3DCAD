@@ -11,7 +11,7 @@ import { nearestScaleEntity, buildScaled } from './tools/scaleMath.js'
 import { nearestFilletLine, computeFillet } from './tools/filletMath.js'
 import { computeExtendPreview } from './tools/extendMath.js'
 import { sampleSpline, nearestSpline, computeSplineTrimPreview, performSplineTrim, distToSpline } from './tools/splineMath.js'
-import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform, findCorner, moveCorner, carryJoinedEnds } from './tools/selectMath.js'
+import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform, findCorner, moveCorner, carryJoinedEnds, carrySelectionJoins } from './tools/selectMath.js'
 import { isEditableSpline, hitSplineNode, moveSplineNode, insertSplineNode, deleteSplineNode } from './tools/splineEdit.js'
 import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine, perpLabelOffset } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
@@ -2926,7 +2926,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       const xform=computeHandleTransform(selectDragHandleRef.current,selectBBoxRef.current,selectDragStartRef.current,worldPos)
       const snap=selectSnapshotRef.current
       const result=applySelectionTransform(selection,snap.lines,snap.circles,snap.arcs,snap.splines,xform.anchor,xform.sx,xform.sy,xform.dx,xform.dy)
-      setSelectLiveGeom(result)
+      // Lines joined to the selection's ends follow live, like a corner drag.
+      setSelectLiveGeom(carrySelectionJoins(snap,result,selection))
       setMousePos(worldPos)
       return
     }

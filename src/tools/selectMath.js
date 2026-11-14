@@ -279,16 +279,44 @@ export function moveCorner(lines, splines, members, to) {
   }
 }
 
-// After one line's ends were moved (from → to), drag the OTHER lines/splines
+// After some lines' ends were moved (from → to), drag the OTHER lines/splines
 // that were joined at the old end positions along with them. `moves` =
-// [{from, to}], `editedIdx` = the line that was edited (already moved).
-export function carryJoinedEnds(lines, splines, moves, editedIdx) {
+// [{from, to}]. `edited` = the line index that was edited (already moved), or
+// {lines:Set, splines:Set} of everything that was (those are never touched).
+export function carryJoinedEnds(lines, splines, moves, edited) {
+  const skipLines = edited instanceof Object && edited.lines ? edited.lines : new Set([edited])
+  const skipSplines = edited instanceof Object && edited.splines ? edited.splines : new Set()
   let out = { lines, splines }
   for (const { from, to } of moves) {
     if (Math.hypot(from.x - to.x, from.y - to.y) < 1e-9) continue
     const c = findCorner(from, out.lines, [], out.splines, CORNER_JOIN_TOL,
-      m => m.kind === 'line' && m.idx === editedIdx)
+      m => m.kind === 'line' ? skipLines.has(m.idx) : skipSplines.has(m.idx))
     if (c?.members.length) out = moveCorner(out.lines, out.splines, c.members, to)
   }
   return out
+}
+
+// Select-handle drag (stretch / scale / move a selection): the selected lines
+// moved from `before` to `after`; lines and splines NOT in the selection that
+// were joined to their ends follow live, so a closed shape stays closed — the
+// same as dragging a corner. Returns `after` with those ends carried.
+export function carrySelectionJoins(before, after, selection) {
+  const selLines = new Set(selection.filter(e => e.kind === 'line').map(e => e.idx))
+  const selSplines = new Set(selection.filter(e => e.kind === 'spline').map(e => e.idx))
+  if (!selLines.size) return after
+  const moves = []
+  for (const i of selLines) {
+    const a = before.lines[i], b = after.lines[i]
+    if (!a || !b) continue
+    moves.push({ from: { x: a.x1, y: a.y1 }, to: { x: b.x1, y: b.y1 } }, { from: { x: a.x2, y: a.y2 }, to: { x: b.x2, y: b.y2 } })
+  }
+  // Find joined ends against the BEFORE positions (nothing else has moved yet).
+  let out = { lines: after.lines, splines: after.splines }
+  for (const { from, to } of moves) {
+    if (Math.hypot(from.x - to.x, from.y - to.y) < 1e-9) continue
+    const c = findCorner(from, before.lines, [], before.splines, CORNER_JOIN_TOL,
+      m => m.kind === 'line' ? selLines.has(m.idx) : selSplines.has(m.idx))
+    if (c?.members.length) out = moveCorner(out.lines, out.splines, c.members, to)
+  }
+  return { ...after, lines: out.lines, splines: out.splines }
 }

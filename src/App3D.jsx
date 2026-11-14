@@ -12690,6 +12690,25 @@ const App3D = forwardRef(function App3D(props, ref) {
     setMousePos(snappedWorld);updateTracking(snappedWorld)
   }
 
+  // Keys normally reach handleKeyDown only while focus is inside the app's
+  // root div. Finish Sketch removes its own button, so focus falls to the page
+  // and the Sweep/Spring confirm popup that opens next never heard Esc/Enter
+  // — a sweep that failed to build (Done disabled) left "✎ Sketch" as the only
+  // way out. While that popup is up, Esc/Enter from outside the root are
+  // handed to handleKeyDown too (the latest one, via a ref).
+  const handleKeyDownRef = useRef(null)
+  handleKeyDownRef.current = handleKeyDown
+  useEffect(() => {
+    if (!(sweepState?.armed || springState?.armed)) return
+    const onKey = e => {
+      if (e.key !== 'Escape' && e.key !== 'Enter') return
+      if (rootDivRef.current?.contains(e.target)) return   // the root's own onKeyDown has it
+      handleKeyDownRef.current?.(e)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [sweepState?.armed, springState?.armed])
+
   function handleKeyDown(e){
     if (showSplash) return
     // Hold Shift while an alignment guide shows → lock the line onto it.
@@ -12736,6 +12755,11 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (e.ctrlKey&&e.key==='s'){e.preventDefault();sketchMode?handleSave():handleSaveProject();return}
     if ((e.key==='f'||e.key==='F')&&!e.ctrlKey){zoomToFit();return}
     if ((e.key==='x'||e.key==='X')&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&!/^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName||'')&&!e.target?.isContentEditable){setXray(v=>!v);return}
+    // Sweep/Spring confirm popup: Esc always cancels the whole feature. Checked
+    // FIRST — while the popup is up the active sketch tool is still Line, and
+    // a Line left mid-chain used to swallow every Esc, leaving the popup with
+    // only "✎ Sketch" (and a failed build disables Done), i.e. no way out.
+    if (e.key==='Escape'&&!sketchMode&&(sweepState?.armed||springState?.armed)){ cancelFeature(); return }
     // Escape in sketch mode: cancel whatever 2D tool is mid-interaction only
     // (an in-progress line/circle/offset/etc.) — it no longer exits the sketch
     // or cancels the feature. That's now the dedicated Cancel button next to
@@ -12983,9 +13007,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       resetJoin3D(); setTool('select'); return
     }
     // Spring coil popup open (the sketch is finished): Esc abandons the spring.
-    if (e.key==='Escape'&&!sketchMode&&springState?.armed){ cancelFeature(); return }
     // Sweep confirm popup open: Enter makes it, Esc abandons it.
-    if (e.key==='Escape'&&!sketchMode&&sweepState?.armed){ cancelFeature(); return }
     if (e.key==='Enter'&&!sketchMode&&sweepState?.armed){
       e.preventDefault()
       if (!sweepBuildError && !(sweepCutTargets && sweepCutTargets.length === 0)) commitSweep(sweepState.path, sweepState.profile)
@@ -16391,6 +16413,9 @@ const App3D = forwardRef(function App3D(props, ref) {
               )}
 
               <div style={{ display:'flex', gap:6 }}>
+                <button onClick={cancelFeature} title="Throw this spring away (Esc)"
+                  style={{ padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold', background:'#1e1e38', color:'#c07070',
+                           border:'1px solid #5a2a2a', borderRadius:4, cursor:'pointer' }}>✕ Cancel</button>
                 <button onClick={springEditSketch} title="Go back to the sketch"
                   style={{ padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold', background:'#1e1e38', color:'#6688aa',
                            border:'1px solid #2a3a5a', borderRadius:4, cursor:'pointer' }}>✎ Sketch</button>
@@ -16432,6 +16457,9 @@ const App3D = forwardRef(function App3D(props, ref) {
                 <div style={{ color:'#ff6b6b', fontSize:10, marginBottom:8, lineHeight:1.3, maxWidth:260 }}>{problem}</div>
               )}
               <div style={{ display:'flex', gap:6 }}>
+                <button onClick={cancelFeature} title="Throw this sweep away (Esc)"
+                  style={{ padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold', background:'#1e1e38', color:'#c07070',
+                           border:'1px solid #5a2a2a', borderRadius:4, cursor:'pointer' }}>✕ Cancel</button>
                 <button onClick={sweepEditSketch} title="Go back to the profile sketch"
                   style={{ padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold', background:'#1e1e38', color:'#6688aa',
                            border:'1px solid #2a3a5a', borderRadius:4, cursor:'pointer' }}>✎ Sketch</button>

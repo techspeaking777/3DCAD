@@ -1,210 +1,257 @@
-// ToolIcons.jsx — pixel-art sprite icons
+// ToolIcons.jsx — tool icons.
+//
+// Sketch tools: 80s vector-arcade style to match the 3D tool buttons — thin
+// glowing lines, standard CAD pictures (Trim = a line with a cut-off dashed
+// piece, Fillet = a rounded corner …) so what students learn here carries over
+// to Fusion / Onshape / Solid Edge. Each group of tools has one colour:
+const SK = {
+  select:    '#7ED957',   // Select
+  draw:      '#53D3E4',   // Line, Circle, Spline, Text, Axis, Trace, Edge
+  edit:      '#FF9F1C',   // Trim, Delete, Extend, Join, Fillet, Offset
+  transform: '#B48CFF',   // Move, Rotate, Scale, Mirror, Centre
+  annotate:  '#FBDA2D',   // Dim, Guide
+}
+const SW = 2, SWG = 1.25, DASH = '3 2.5'
 
-const P = ({x,y,c,s=3}) => <rect x={x} y={y} width={s} height={s} fill={c}/>
-
-// Pixel-art icon wrapper: 48×48 canvas + 14px label area = 48×62 total
-const I = ({children,label,active}) => (
-  <svg width="48" height="62" viewBox="0 0 48 62" fill="none"
-    style={{imageRendering:'pixelated',display:'block'}}>
+// 48×62 button face (48×48 picture + label) — the same footprint the old
+// pixel-art sprites had, so the toolbars didn't change. `draw` gets the colours:
+// c = the main geometry, g = reference geometry (faded).
+const SketchIcon = ({ label, color, active, children }) => (
+  <svg width="48" height="62" viewBox="0 0 48 62" fill="none" style={{ display: 'block' }}>
     <rect x="0" y="0" width="48" height="48" fill="#0a0020" rx="3"/>
-    {active && <rect x="1" y="1" width="46" height="46" fill="none" stroke="#FFFF00" strokeWidth="2" rx="2"/>}
-    {children}
+    {active && <rect x="1" y="1" width="46" height="46" fill={color} fillOpacity="0.12" stroke={color} strokeWidth="2" rx="2"/>}
+    <g transform="translate(4 4) scale(0.833)" style={{ filter: `drop-shadow(0 0 3px ${color})` }}>
+      {/* faded reference geometry; Move/Rotate/Scale/Mirror/Centre's "before"
+          shape is stronger (user asked — it was too faint to see) */}
+      {children({ c: color, g: color + (color === SK.transform ? 'C0' : '66') })}
+    </g>
     <text x="24" y="59" textAnchor="middle" fontFamily="monospace" fontSize="8"
-      fill={active ? '#FFFF00' : '#999999'}>{label}</text>
+      fill={active ? color : '#999999'}>{label}</text>
   </svg>
 )
 
-// ── LINE ──────────────────────────────────────────────────────────────────────
-// ── LINE ──────────────────────────────────────────────────────────────────────
-// x=c*3, y=r*3 from original raw pixel array
+// An end point (hollow square, the usual CAD point mark).
+const Pt = ({ x, y, c }) => <rect x={x - 2} y={y - 2} width="4" height="4" fill="#0a0020" stroke={c} strokeWidth="1.2"/>
+
+// Filled arrowhead with its tip at (x, y), pointing along (dx, dy).
+function Arrow({ x, y, dx, dy, c, len = 5, w = 2.6 }) {
+  const L = Math.hypot(dx, dy), ux = dx / L, uy = dy / L
+  const bx = x - ux * len, by = y - uy * len
+  return <path d={`M${x} ${y} L${bx - uy * w} ${by + ux * w} L${bx + uy * w} ${by - ux * w} Z`} fill={c}/>
+}
+
+// ── Select ───────────────────────────────────────────────────────────────────
+export function IconSelect({ active }) {
+  return <SketchIcon label="SELECT" color={SK.select} active={active}>{({ c }) => <>
+    <rect x="5" y="5" width="26" height="20" stroke={c} strokeWidth={SWG} strokeDasharray={DASH}/>
+    <path d="M18 14 L18 40 L24 34 L28 43 L32 41 L28 33 L36 33 Z" stroke={c} strokeWidth={SW}
+      strokeLinejoin="round" fill={c} fillOpacity="0.12"/>
+  </>}</SketchIcon>
+}
+
+// ── Draw ─────────────────────────────────────────────────────────────────────
 export function IconLine({ active }) {
-  return (
-    <I label="LINE" active={active}>
-      {/* r=0 */}
-      <P x={27} y={0} c="#ff0000"/><P x={30} y={0} c="#fb0404"/><P x={33} y={0} c="#ff0000"/>
-      {/* r=1 */}
-      <P x={24} y={3} c="#f7a1a1"/><P x={27} y={3} c="#f70808"/><P x={30} y={3} c="#ff0000"/><P x={33} y={3} c="#f70808"/><P x={36} y={3} c="#f7a1a1"/>
-      {/* r=2 */}
-      <P x={3} y={6} c="#ff0000"/><P x={6} y={6} c="#ff0000"/><P x={9} y={6} c="#ff0000"/><P x={12} y={6} c="#ff0000"/><P x={24} y={6} c="#f7a1a1"/><P x={27} y={6} c="#f70808"/><P x={30} y={6} c="#000000"/><P x={33} y={6} c="#f70808"/><P x={36} y={6} c="#f7a1a1"/>
-      {/* r=3 */}
-      <P x={3} y={9} c="#ff0000"/><P x={12} y={9} c="#ff0000"/><P x={27} y={9} c="#ff0000"/><P x={30} y={9} c="#000000"/><P x={33} y={9} c="#ff0000"/>
-      {/* r=4 */}
-      <P x={3} y={12} c="#ff0000"/><P x={12} y={12} c="#ff0000"/><P x={27} y={12} c="#ff0000"/><P x={30} y={12} c="#000000"/><P x={33} y={12} c="#ff0000"/>
-      {/* r=5 */}
-      <P x={3} y={15} c="#ff0000"/><P x={12} y={15} c="#ff0000"/><P x={27} y={15} c="#ff0000"/><P x={30} y={15} c="#000000"/><P x={33} y={15} c="#ff0000"/>
-      {/* r=6 */}
-      <P x={3} y={18} c="#ff0000"/><P x={12} y={18} c="#ff0000"/><P x={24} y={18} c="#fb8e8e"/><P x={27} y={18} c="#ff0000"/><P x={30} y={18} c="#ff0000"/><P x={33} y={18} c="#ff0000"/><P x={36} y={18} c="#fb8e8e"/>
-      {/* r=7 */}
-      <P x={3} y={21} c="#ff0000"/><P x={12} y={21} c="#ff0000"/><P x={24} y={21} c="#fb8e8e"/><P x={27} y={21} c="#f70808"/><P x={30} y={21} c="#ff0000"/><P x={33} y={21} c="#f70808"/><P x={36} y={21} c="#fb8e8e"/>
-      {/* r=8 */}
-      <P x={3} y={24} c="#ff0000"/><P x={12} y={24} c="#ff0000"/>
-      {/* r=9 */}
-      <P x={3} y={27} c="#ff0000"/><P x={12} y={27} c="#ff0000"/><P x={30} y={27} c="#ff0000"/>
-      {/* r=10 */}
-      <P x={3} y={30} c="#ff0000"/><P x={12} y={30} c="#ff0000"/><P x={30} y={30} c="#ff0000"/>
-      {/* r=11 */}
-      <P x={3} y={33} c="#ff0000"/><P x={12} y={33} c="#ff0000"/><P x={30} y={33} c="#ff0000"/>
-      {/* r=12 */}
-      <P x={3} y={36} c="#ff0000"/><P x={12} y={36} c="#ff0000"/><P x={15} y={36} c="#ff0000"/><P x={18} y={36} c="#ff0000"/><P x={21} y={36} c="#ff0000"/><P x={30} y={36} c="#ff0000"/>
-      {/* r=13 */}
-      <P x={3} y={39} c="#ff0000"/><P x={21} y={39} c="#ee4444"/><P x={30} y={39} c="#ff0000"/>
-      {/* r=14 */}
-      <P x={3} y={42} c="#ff0000"/><P x={21} y={42} c="#ff0000"/><P x={30} y={42} c="#ff0000"/>
-      {/* r=15 */}
-      <P x={3} y={45} c="#ff0000"/><P x={21} y={45} c="#ff0000"/><P x={24} y={45} c="#ff0000"/><P x={27} y={45} c="#ff0000"/><P x={30} y={45} c="#ff0000"/>
-    </I>
-  )
+  return <SketchIcon label="LINE" color={SK.draw} active={active}>{({ c }) => <>
+    <line x1="9" y1="39" x2="39" y2="9" stroke={c} strokeWidth={SW} strokeLinecap="round"/>
+    <Pt x={9} y={39} c={c}/><Pt x={39} y={9} c={c}/>
+  </>}</SketchIcon>
 }
 
-// ── CIRCLE ─────────────────────────────────────────────────────────────────────
-// x=c*3, y=r*3 from original raw pixel array
 export function IconCircle({ active }) {
-  return (
-    <I label="CIRCLE" active={active}>
-      {/* r=4 */}
-      <P x={18} y={12} c="#4f4f4f"/><P x={21} y={12} c="#4f4f4f"/><P x={24} y={12} c="#4f4f4f"/><P x={27} y={12} c="#4f4f4f"/>
-      {/* r=5 */}
-      <P x={15} y={15} c="#4f4f4f"/><P x={21} y={15} c="#38c3ff"/><P x={24} y={15} c="#38c3ff"/><P x={27} y={15} c="#38c3ff"/><P x={30} y={15} c="#4f4f4f"/>
-      {/* r=6 */}
-      <P x={12} y={18} c="#4f4f4f"/><P x={18} y={18} c="#38c3ff"/><P x={21} y={18} c="#056df5"/><P x={24} y={18} c="#056df5"/><P x={27} y={18} c="#38c3ff"/><P x={30} y={18} c="#38c3ff"/><P x={33} y={18} c="#4f4f4f"/>
-      {/* r=7 */}
-      <P x={12} y={21} c="#4f4f4f"/><P x={15} y={21} c="#38c3ff"/><P x={18} y={21} c="#056df5"/><P x={21} y={21} c="#056df5"/><P x={24} y={21} c="#056df5"/><P x={27} y={21} c="#056df5"/><P x={30} y={21} c="#38c3ff"/><P x={33} y={21} c="#4f4f4f"/>
-      {/* r=8 */}
-      <P x={9} y={24} c="#4f4f4f"/><P x={12} y={24} c="#4f4f4f"/><P x={15} y={24} c="#4f4f4f"/><P x={18} y={24} c="#4f4f4f"/><P x={21} y={24} c="#4f4f4f"/><P x={24} y={24} c="#4f4f4f"/><P x={27} y={24} c="#4f4f4f"/><P x={30} y={24} c="#4f4f4f"/><P x={33} y={24} c="#4f4f4f"/><P x={36} y={24} c="#4f4f4f"/>
-      {/* r=9 */}
-      <P x={6} y={27} c="#4f4f4f"/><P x={12} y={27} c="#b0b0b0"/><P x={15} y={27} c="#b0b0b0"/><P x={18} y={27} c="#b0b0b0"/><P x={21} y={27} c="#b0b0b0"/><P x={24} y={27} c="#b0b0b0"/><P x={27} y={27} c="#b0b0b0"/><P x={30} y={27} c="#b0b0b0"/><P x={33} y={27} c="#878787"/><P x={36} y={27} c="#878787"/><P x={39} y={27} c="#4f4f4f"/>
-      {/* r=10 */}
-      <P x={3} y={30} c="#4f4f4f"/><P x={9} y={30} c="#b0b0b0"/><P x={12} y={30} c="#b0b0b0"/><P x={15} y={30} c="#d4ff00"/><P x={18} y={30} c="#b0b0b0"/><P x={21} y={30} c="#d4ff00"/><P x={24} y={30} c="#b0b0b0"/><P x={27} y={30} c="#d4ff00"/><P x={30} y={30} c="#b0b0b0"/><P x={33} y={30} c="#d4ff00"/><P x={36} y={30} c="#878787"/><P x={39} y={30} c="#878787"/><P x={42} y={30} c="#4f4f4f"/>
-      {/* r=11 */}
-      <P x={0} y={33} c="#4f4f4f"/><P x={6} y={33} c="#b0b0b0"/><P x={9} y={33} c="#b0b0b0"/><P x={12} y={33} c="#b0b0b0"/><P x={15} y={33} c="#b0b0b0"/><P x={18} y={33} c="#b0b0b0"/><P x={21} y={33} c="#b0b0b0"/><P x={24} y={33} c="#b0b0b0"/><P x={27} y={33} c="#b0b0b0"/><P x={30} y={33} c="#b0b0b0"/><P x={33} y={33} c="#b0b0b0"/><P x={36} y={33} c="#878787"/><P x={39} y={33} c="#878787"/><P x={42} y={33} c="#878787"/><P x={45} y={33} c="#4f4f4f"/>
-      {/* r=12 */}
-      <P x={0} y={36} c="#4f4f4f"/><P x={3} y={36} c="#4f4f4f"/><P x={6} y={36} c="#4f4f4f"/><P x={9} y={36} c="#4f4f4f"/><P x={12} y={36} c="#4f4f4f"/><P x={15} y={36} c="#4f4f4f"/><P x={18} y={36} c="#4f4f4f"/><P x={21} y={36} c="#4f4f4f"/><P x={24} y={36} c="#4f4f4f"/><P x={27} y={36} c="#4f4f4f"/><P x={30} y={36} c="#4f4f4f"/><P x={33} y={36} c="#4f4f4f"/><P x={36} y={36} c="#4f4f4f"/><P x={39} y={36} c="#4f4f4f"/><P x={42} y={36} c="#4f4f4f"/><P x={45} y={36} c="#4f4f4f"/>
-      {/* r=13 */}
-      <P x={3} y={39} c="#4f4f4f"/><P x={6} y={39} c="#b0b0b0"/><P x={9} y={39} c="#878787"/><P x={12} y={39} c="#4f4f4f"/><P x={18} y={39} c="#4f4f4f"/><P x={21} y={39} c="#b0b0b0"/><P x={24} y={39} c="#878787"/><P x={27} y={39} c="#4f4f4f"/><P x={33} y={39} c="#4f4f4f"/><P x={36} y={39} c="#b0b0b0"/><P x={39} y={39} c="#878787"/><P x={42} y={39} c="#4f4f4f"/>
-      {/* r=14 */}
-      <P x={6} y={42} c="#4f4f4f"/><P x={9} y={42} c="#4f4f4f"/><P x={21} y={42} c="#4f4f4f"/><P x={24} y={42} c="#4f4f4f"/><P x={36} y={42} c="#4f4f4f"/><P x={39} y={42} c="#4f4f4f"/>
-      {/* r=15 */}
-      <P x={3} y={45} c="#f5ed05"/><P x={6} y={45} c="#f50505"/><P x={9} y={45} c="#f50505"/><P x={12} y={45} c="#f5ed05"/><P x={18} y={45} c="#f5ed05"/><P x={21} y={45} c="#f50505"/><P x={24} y={45} c="#f50505"/><P x={27} y={45} c="#f5ed05"/><P x={33} y={45} c="#f5ed05"/><P x={36} y={45} c="#f50505"/><P x={39} y={45} c="#f50505"/><P x={42} y={45} c="#f5ed05"/>
-    </I>
-  )
+  return <SketchIcon label="CIRCLE" color={SK.draw} active={active}>{({ c }) => <>
+    <circle cx="24" cy="24" r="15" stroke={c} strokeWidth={SW}/>
+    <line x1="24" y1="24" x2="34.6" y2="13.4" stroke={c} strokeWidth={SWG} strokeDasharray={DASH}/>
+    <path d="M20 24 H28 M24 20 V28" stroke={c} strokeWidth="1.5"/>
+    <Pt x={34.6} y={13.4} c={c}/>
+  </>}</SketchIcon>
 }
 
-// ── DELETE ─────────────────────────────────────────────────────────────────────
-// x=c*3, y=r*3 from original raw pixel array
-export function IconDelete({ active }) {
-  return (
-    <I label="DELETE" active={active}>
-      {/* r=3 */}
-      <P x={0} y={9} c="#080808"/><P x={3} y={9} c="#080808"/><P x={6} y={9} c="#080808"/><P x={9} y={9} c="#080808"/><P x={12} y={9} c="#080808"/><P x={15} y={9} c="#080808"/><P x={18} y={9} c="#080808"/><P x={21} y={9} c="#080808"/>
-      {/* r=4 */}
-      <P x={0} y={12} c="#080808"/><P x={3} y={12} c="#080808"/><P x={6} y={12} c="#278604"/><P x={9} y={12} c="#278604"/><P x={12} y={12} c="#278604"/><P x={15} y={12} c="#278604"/><P x={18} y={12} c="#278604"/><P x={21} y={12} c="#080808"/>
-      {/* r=5 */}
-      <P x={0} y={15} c="#080808"/><P x={3} y={15} c="#278604"/><P x={6} y={15} c="#278604"/><P x={9} y={15} c="#080808"/><P x={12} y={15} c="#080808"/><P x={15} y={15} c="#080808"/><P x={18} y={15} c="#080808"/><P x={21} y={15} c="#080808"/><P x={24} y={15} c="#080808"/><P x={27} y={15} c="#080808"/><P x={30} y={15} c="#080808"/><P x={33} y={15} c="#080808"/><P x={36} y={15} c="#080808"/><P x={39} y={15} c="#080808"/><P x={42} y={15} c="#080808"/><P x={45} y={15} c="#080808"/>
-      {/* r=6 */}
-      <P x={0} y={18} c="#278604"/><P x={3} y={18} c="#050505"/><P x={6} y={18} c="#080808"/><P x={9} y={18} c="#080808"/><P x={12} y={18} c="#080808"/><P x={15} y={18} c="#080808"/><P x={18} y={18} c="#080808"/><P x={21} y={18} c="#080808"/><P x={24} y={18} c="#080808"/><P x={27} y={18} c="#278604"/><P x={30} y={18} c="#278604"/><P x={33} y={18} c="#278604"/><P x={36} y={18} c="#080808"/><P x={39} y={18} c="#278604"/><P x={42} y={18} c="#278604"/><P x={45} y={18} c="#278604"/>
-      {/* r=7 */}
-      <P x={0} y={21} c="#050505"/><P x={3} y={21} c="#278604"/><P x={6} y={21} c="#278604"/><P x={9} y={21} c="#278604"/><P x={12} y={21} c="#278604"/><P x={15} y={21} c="#278604"/><P x={18} y={21} c="#278604"/><P x={21} y={21} c="#278604"/><P x={24} y={21} c="#278604"/><P x={27} y={21} c="#278604"/><P x={30} y={21} c="#278604"/><P x={33} y={21} c="#050505"/><P x={36} y={21} c="#278604"/><P x={39} y={21} c="#e50606"/><P x={42} y={21} c="#e50606"/><P x={45} y={21} c="#e50606"/>
-      {/* r=8 */}
-      <P x={0} y={24} c="#278604"/><P x={3} y={24} c="#050505"/><P x={6} y={24} c="#278604"/><P x={9} y={24} c="#050505"/><P x={12} y={24} c="#278604"/><P x={15} y={24} c="#050505"/><P x={18} y={24} c="#278604"/><P x={21} y={24} c="#050505"/><P x={24} y={24} c="#278604"/><P x={27} y={24} c="#07a404"/><P x={30} y={24} c="#278604"/><P x={33} y={24} c="#278604"/><P x={36} y={24} c="#e50606"/><P x={39} y={24} c="#e50606"/><P x={42} y={24} c="#080808"/><P x={45} y={24} c="#080808"/>
-      {/* r=9 */}
-      <P x={0} y={27} c="#080808"/><P x={3} y={27} c="#278604"/><P x={6} y={27} c="#050505"/><P x={9} y={27} c="#278604"/><P x={12} y={27} c="#050505"/><P x={15} y={27} c="#278604"/><P x={18} y={27} c="#050505"/><P x={21} y={27} c="#278604"/><P x={24} y={27} c="#050505"/><P x={27} y={27} c="#278604"/><P x={30} y={27} c="#278604"/><P x={33} y={27} c="#278604"/><P x={36} y={27} c="#278604"/><P x={39} y={27} c="#278604"/><P x={42} y={27} c="#278604"/><P x={45} y={27} c="#278604"/>
-      {/* r=10 */}
-      <P x={0} y={30} c="#080808"/><P x={3} y={30} c="#080808"/><P x={6} y={30} c="#278604"/><P x={9} y={30} c="#278604"/><P x={12} y={30} c="#080808"/><P x={15} y={30} c="#080808"/><P x={18} y={30} c="#080808"/><P x={21} y={30} c="#080808"/><P x={24} y={30} c="#080808"/><P x={27} y={30} c="#278604"/><P x={30} y={30} c="#278604"/><P x={33} y={30} c="#278604"/><P x={36} y={30} c="#080808"/><P x={39} y={30} c="#080808"/><P x={42} y={30} c="#080808"/><P x={45} y={30} c="#080808"/>
-      {/* r=11 */}
-      <P x={0} y={33} c="#080808"/><P x={3} y={33} c="#080808"/><P x={6} y={33} c="#278604"/><P x={9} y={33} c="#278604"/><P x={12} y={33} c="#278604"/><P x={15} y={33} c="#080808"/><P x={24} y={33} c="#080808"/><P x={27} y={33} c="#080808"/><P x={30} y={33} c="#278604"/><P x={33} y={33} c="#278604"/><P x={36} y={33} c="#278604"/><P x={39} y={33} c="#080808"/>
-      {/* r=12 */}
-      <P x={3} y={36} c="#080808"/><P x={6} y={36} c="#080808"/><P x={9} y={36} c="#080808"/><P x={12} y={36} c="#080808"/><P x={15} y={36} c="#080808"/><P x={27} y={36} c="#080808"/><P x={30} y={36} c="#080808"/><P x={33} y={36} c="#080808"/><P x={36} y={36} c="#080808"/><P x={39} y={36} c="#080808"/>
-    </I>
-  )
+export function IconSpline({ active }) {
+  return <SketchIcon label="SPLINE" color={SK.draw} active={active}>{({ c, g }) => <>
+    <path d="M6 36 L16 12 L28 30 L42 10" stroke={g} strokeWidth="1" strokeDasharray="2 2"/>
+    <path d="M6 36 C9 24 12 12 16 12 C21 12 23 30 28 30 C33 30 38 18 42 10" stroke={c} strokeWidth={SW} strokeLinecap="round"/>
+    <Pt x={6} y={36} c={c}/><Pt x={16} y={12} c={c}/><Pt x={28} y={30} c={c}/><Pt x={42} y={10} c={c}/>
+  </>}</SketchIcon>
 }
 
-// ── TRIM ──────────────────────────────────────────────────────────────────────
-export function IconTrim({ active }) {
-  return (
-    <I label="TRIM" active={active}>
-      <P x={3} y={3} c="#046b6c"/><P x={6} y={3} c="#046b6c"/><P x={9} y={3} c="#046b6c"/>
-      <P x={3} y={6} c="#046b6c"/><P x={6} y={6} c="#28989a"/><P x={9} y={6} c="#4cc0c2"/><P x={12} y={6} c="#046b6c"/>
-      <P x={3} y={9} c="#046b6c"/><P x={6} y={9} c="#4cc0c2"/><P x={9} y={9} c="#339c9e"/><P x={12} y={9} c="#339c9e"/><P x={15} y={9} c="#046b6c"/>
-      <P x={6} y={12} c="#046b6c"/><P x={9} y={12} c="#3cc1c3"/><P x={12} y={12} c="#339c9e"/><P x={15} y={12} c="#3cc1c3"/><P x={18} y={12} c="#046b6c"/>
-      <P x={9} y={15} c="#046b6c"/><P x={12} y={15} c="#3cc1c3"/><P x={15} y={15} c="#339c9e"/><P x={18} y={15} c="#3cc1c3"/><P x={21} y={15} c="#046b6c"/>
-      <P x={12} y={18} c="#046b6c"/><P x={15} y={18} c="#3cc1c3"/><P x={18} y={18} c="#339c9e"/><P x={21} y={18} c="#3cc1c3"/><P x={24} y={18} c="#046b6c"/>
-      <P x={15} y={21} c="#046b6c"/><P x={18} y={21} c="#3cc1c3"/><P x={21} y={21} c="#339c9e"/><P x={24} y={21} c="#3cc1c3"/><P x={27} y={21} c="#046b6c"/>
-      <P x={18} y={24} c="#046b6c"/><P x={21} y={24} c="#3cc1c3"/><P x={24} y={24} c="#339c9e"/><P x={27} y={24} c="#3cc1c3"/><P x={30} y={24} c="#046b6c"/><P x={36} y={24} c="#046b6c"/><P x={39} y={24} c="#046b6c"/>
-      <P x={21} y={27} c="#046b6c"/><P x={24} y={27} c="#3cc1c3"/><P x={27} y={27} c="#339c9e"/><P x={30} y={27} c="#3cc1c3"/><P x={33} y={27} c="#046b6c"/><P x={36} y={27} c="#339c9e"/><P x={39} y={27} c="#046b6c"/>
-      <P x={24} y={30} c="#046b6c"/><P x={27} y={30} c="#3cc1c3"/><P x={30} y={30} c="#046b6c"/><P x={33} y={30} c="#339c9e"/><P x={36} y={30} c="#046b6c"/>
-      <P x={27} y={33} c="#046b6c"/><P x={30} y={33} c="#339c9e"/><P x={33} y={33} c="#046b6c"/><P x={36} y={33} c="#eb9c2d"/><P x={39} y={33} c="#9e642e"/>
-      <P x={24} y={36} c="#046b6c"/><P x={27} y={36} c="#339c9e"/><P x={30} y={36} c="#046b6c"/><P x={33} y={36} c="#7c590e"/><P x={36} y={36} c="#55371b"/><P x={39} y={36} c="#eb9c2d"/><P x={42} y={36} c="#9e642e"/>
-      <P x={24} y={39} c="#046b6c"/><P x={27} y={39} c="#046b6c"/><P x={33} y={39} c="#7c590e"/><P x={36} y={39} c="#55371b"/><P x={39} y={39} c="#9e642e"/><P x={42} y={39} c="#046b6c"/>
-      <P x={39} y={42} c="#7c590e"/><P x={42} y={42} c="#046b6c"/><P x={45} y={42} c="#3cc1c3"/>
-      <P x={42} y={45} c="#046b6c"/><P x={45} y={45} c="#046b6c"/>
-    </I>
-  )
+export function IconText({ active }) {
+  return <SketchIcon label="TEXT" color={SK.draw} active={active}>{({ c, g }) => <>
+    <path d="M8 40 L19 9 L30 40 M12.5 29 H25.5" stroke={c} strokeWidth={SW + 0.5} strokeLinecap="round" strokeLinejoin="round"/>
+    <path d="M37 10 V40 M34 10 H40 M34 40 H40" stroke={c} strokeWidth="1.5" strokeLinecap="round"/>
+    <line x1="6" y1="43.5" x2="32" y2="43.5" stroke={g} strokeWidth="1" strokeDasharray="2 2"/>
+  </>}</SketchIcon>
 }
 
-// ── JOIN ──────────────────────────────────────────────────────────────────────
-export function IconJoin({ active }) {
-  return (
-    <I label="JOIN" active={active}>
-      <P x={15} y={0} c="#e64141"/><P x={18} y={0} c="#e64141"/><P x={21} y={0} c="#e64141"/><P x={24} y={0} c="#e64141"/><P x={27} y={0} c="#e64141"/><P x={30} y={0} c="#e64141"/>
-      <P x={12} y={3} c="#e64141"/><P x={15} y={3} c="#e64141"/><P x={21} y={3} c="#85888e"/><P x={24} y={3} c="#85888e"/><P x={30} y={3} c="#e64141"/><P x={33} y={3} c="#e64141"/>
-      <P x={9} y={6} c="#e64141"/><P x={21} y={6} c="#85888e"/><P x={24} y={6} c="#85888e"/><P x={36} y={6} c="#e64141"/>
-      <P x={6} y={9} c="#e64141"/><P x={21} y={9} c="#85888e"/><P x={24} y={9} c="#85888e"/><P x={39} y={9} c="#e64141"/>
-      <P x={3} y={12} c="#e64141"/><P x={21} y={12} c="#85888e"/><P x={24} y={12} c="#85888e"/><P x={42} y={12} c="#e64141"/>
-      <P x={0} y={15} c="#e64141"/><P x={3} y={15} c="#e64141"/><P x={21} y={15} c="#85888e"/><P x={24} y={15} c="#85888e"/><P x={42} y={15} c="#e64141"/><P x={45} y={15} c="#e64141"/>
-      <P x={0} y={18} c="#e64141"/><P x={21} y={18} c="#85888e"/><P x={24} y={18} c="#85888e"/><P x={45} y={18} c="#e64141"/>
-      <P x={0} y={21} c="#e64141"/><P x={3} y={21} c="#85888e"/><P x={6} y={21} c="#85888e"/><P x={9} y={21} c="#85888e"/><P x={12} y={21} c="#85888e"/><P x={15} y={21} c="#85888e"/><P x={18} y={21} c="#85888e"/><P x={27} y={21} c="#85888e"/><P x={30} y={21} c="#85888e"/><P x={33} y={21} c="#85888e"/><P x={36} y={21} c="#85888e"/><P x={39} y={21} c="#85888e"/><P x={42} y={21} c="#85888e"/><P x={45} y={21} c="#e64141"/>
-      <P x={0} y={24} c="#e64141"/><P x={3} y={24} c="#85888e"/><P x={6} y={24} c="#85888e"/><P x={9} y={24} c="#85888e"/><P x={12} y={24} c="#85888e"/><P x={15} y={24} c="#85888e"/><P x={18} y={24} c="#85888e"/><P x={27} y={24} c="#85888e"/><P x={30} y={24} c="#85888e"/><P x={33} y={24} c="#85888e"/><P x={36} y={24} c="#85888e"/><P x={39} y={24} c="#85888e"/><P x={42} y={24} c="#85888e"/><P x={45} y={24} c="#e64141"/>
-      <P x={0} y={27} c="#e64141"/><P x={21} y={27} c="#85888e"/><P x={24} y={27} c="#85888e"/><P x={45} y={27} c="#e64141"/>
-      <P x={0} y={30} c="#e64141"/><P x={3} y={30} c="#e64141"/><P x={21} y={30} c="#85888e"/><P x={24} y={30} c="#85888e"/><P x={42} y={30} c="#e64141"/><P x={45} y={30} c="#e64141"/>
-      <P x={3} y={33} c="#e64141"/><P x={21} y={33} c="#85888e"/><P x={24} y={33} c="#85888e"/><P x={42} y={33} c="#e64141"/>
-      <P x={6} y={36} c="#e64141"/><P x={21} y={36} c="#85888e"/><P x={24} y={36} c="#85888e"/><P x={39} y={36} c="#e64141"/>
-      <P x={9} y={39} c="#e64141"/><P x={21} y={39} c="#85888e"/><P x={24} y={39} c="#85888e"/><P x={36} y={39} c="#e64141"/>
-      <P x={12} y={42} c="#e64141"/><P x={15} y={42} c="#e64141"/><P x={21} y={42} c="#85888e"/><P x={24} y={42} c="#85888e"/><P x={30} y={42} c="#e64141"/><P x={33} y={42} c="#e64141"/>
-      <P x={15} y={45} c="#e64141"/><P x={18} y={45} c="#e64141"/><P x={21} y={45} c="#e64141"/><P x={24} y={45} c="#e64141"/><P x={27} y={45} c="#e64141"/><P x={30} y={45} c="#e64141"/>
-    </I>
-  )
+export function IconAxis({ active }) {
+  return <SketchIcon label="REV AXIS" color={SK.draw} active={active}>{({ c, g }) => <>
+    <line x1="24" y1="4" x2="24" y2="44" stroke={c} strokeWidth={SW} strokeDasharray="7 2.5 2 2.5"/>
+    <ellipse cx="24" cy="26" rx="13" ry="5" stroke={g} strokeWidth="1.2"/>
+    <path d="M11 26 A13 5 0 0 0 37 26" stroke={c} strokeWidth="1.6"/>
+    <Arrow x={37} y={22.5} dx={0} dy={-1} c={c} len={4.5}/>
+  </>}</SketchIcon>
 }
 
-// ── INCLUDE EDGE ────────────────────────────────────────────────────────────
-// x=c*3, y=r*3 from original raw pixel array
+export function IconTrace({ active }) {
+  return <SketchIcon label="TRACE" color={SK.draw} active={active}>{({ c, g }) => <>
+    {/* the photo: frame, sun, solid hills */}
+    <rect x="4" y="5" width="36" height="30" rx="2" stroke={g} strokeWidth={SWG}/>
+    <circle cx="31" cy="13" r="3" fill={g}/>
+    <path d="M4 33 L15 18 L22 27 L28 20 L40 33 Z" fill={g} fillOpacity="0.5"/>
+    {/* the traced outline drawn over it, and the pencil drawing it */}
+    <path d="M6 31 L15 18 L22 27 L28 20" stroke={c} strokeWidth={SW} strokeLinejoin="round" strokeLinecap="round"/>
+    <path d="M28 20 L35 28.5" stroke={c} strokeWidth="1.2" strokeDasharray="2 2"/>
+    <path d="M37 31 L44 41 L41 43 L34 33 Z" stroke={c} strokeWidth="1.5" strokeLinejoin="round" fill="#0a0020"/>
+    <path d="M37 31 L34 33 L35 28.5 Z" fill={c}/>
+  </>}</SketchIcon>
+}
+
 export function IconIncludeEdge({ active }) {
-  return (
-    <I label="EDGE" active={active}>
-      {/* r=0 */}
-      <P x={45} y={0} c="#00ff33"/>
-      {/* r=1 */}
-      <P x={45} y={3} c="#00ff33"/>
-      {/* r=2 */}
-      <P x={45} y={6} c="#00ff33"/>
-      {/* r=3 */}
-      <P x={18} y={9} c="#000000"/><P x={21} y={9} c="#000000"/><P x={24} y={9} c="#000000"/><P x={27} y={9} c="#000000"/><P x={42} y={9} c="#000000"/><P x={45} y={9} c="#00ff33"/>
-      {/* r=4 */}
-      <P x={0} y={12} c="#000000"/><P x={3} y={12} c="#000000"/><P x={6} y={12} c="#000000"/><P x={9} y={12} c="#000000"/><P x={12} y={12} c="#000000"/><P x={18} y={12} c="#000000"/><P x={21} y={12} c="#ff0000"/><P x={24} y={12} c="#ff0000"/><P x={27} y={12} c="#ff8800"/><P x={30} y={12} c="#000000"/><P x={45} y={12} c="#00ff33"/>
-      {/* r=5 */}
-      <P x={3} y={15} c="#000000"/><P x={6} y={15} c="#000000"/><P x={9} y={15} c="#000000"/><P x={12} y={15} c="#000000"/><P x={21} y={15} c="#000000"/><P x={24} y={15} c="#ff0000"/><P x={27} y={15} c="#ff0000"/><P x={30} y={15} c="#ff8800"/><P x={33} y={15} c="#000000"/><P x={45} y={15} c="#00ff33"/>
-      {/* r=6 */}
-      <P x={6} y={18} c="#000000"/><P x={9} y={18} c="#000000"/><P x={12} y={18} c="#000000"/><P x={15} y={18} c="#000000"/><P x={24} y={18} c="#000000"/><P x={27} y={18} c="#ff0000"/><P x={30} y={18} c="#ff0000"/><P x={33} y={18} c="#ff8800"/><P x={36} y={18} c="#000000"/><P x={45} y={18} c="#00ff33"/>
-      {/* r=7 */}
-      <P x={0} y={21} c="#000000"/><P x={3} y={21} c="#000000"/><P x={6} y={21} c="#000000"/><P x={9} y={21} c="#000000"/><P x={12} y={21} c="#000000"/><P x={15} y={21} c="#000000"/><P x={18} y={21} c="#000000"/><P x={21} y={21} c="#000000"/><P x={24} y={21} c="#000000"/><P x={27} y={21} c="#000000"/><P x={30} y={21} c="#ff0000"/><P x={33} y={21} c="#ff0000"/><P x={36} y={21} c="#ff8800"/><P x={39} y={21} c="#000000"/><P x={45} y={21} c="#00ff33"/>
-      {/* r=8 */}
-      <P x={0} y={24} c="#000000"/><P x={3} y={24} c="#f70202"/><P x={6} y={24} c="#f70202"/><P x={9} y={24} c="#f70202"/><P x={12} y={24} c="#f70202"/><P x={15} y={24} c="#f70202"/><P x={18} y={24} c="#f70202"/><P x={21} y={24} c="#f70202"/><P x={24} y={24} c="#f70202"/><P x={27} y={24} c="#f70202"/><P x={30} y={24} c="#f70202"/><P x={33} y={24} c="#ff0000"/><P x={36} y={24} c="#ff0000"/><P x={39} y={24} c="#ff8800"/><P x={42} y={24} c="#000000"/><P x={45} y={24} c="#00ff33"/>
-      {/* r=9 */}
-      <P x={0} y={27} c="#000000"/><P x={3} y={27} c="#000000"/><P x={6} y={27} c="#000000"/><P x={9} y={27} c="#000000"/><P x={12} y={27} c="#000000"/><P x={15} y={27} c="#000000"/><P x={18} y={27} c="#000000"/><P x={21} y={27} c="#000000"/><P x={24} y={27} c="#000000"/><P x={27} y={27} c="#000000"/><P x={30} y={27} c="#ff0000"/><P x={33} y={27} c="#ff0000"/><P x={36} y={27} c="#ff8800"/><P x={39} y={27} c="#000000"/><P x={45} y={27} c="#00ff33"/>
-      {/* r=10 */}
-      <P x={6} y={30} c="#000000"/><P x={9} y={30} c="#000000"/><P x={12} y={30} c="#000000"/><P x={15} y={30} c="#000000"/><P x={18} y={30} c="#000000"/><P x={24} y={30} c="#000000"/><P x={27} y={30} c="#ff0000"/><P x={30} y={30} c="#ff0000"/><P x={33} y={30} c="#ff8800"/><P x={36} y={30} c="#000000"/><P x={45} y={30} c="#00ff33"/>
-      {/* r=11 */}
-      <P x={3} y={33} c="#000000"/><P x={6} y={33} c="#000000"/><P x={9} y={33} c="#000000"/><P x={12} y={33} c="#000000"/><P x={21} y={33} c="#000000"/><P x={24} y={33} c="#ff0000"/><P x={27} y={33} c="#ff0000"/><P x={30} y={33} c="#ff8800"/><P x={33} y={33} c="#000000"/><P x={45} y={33} c="#00ff33"/>
-      {/* r=12 */}
-      <P x={0} y={36} c="#000000"/><P x={3} y={36} c="#000000"/><P x={6} y={36} c="#000000"/><P x={9} y={36} c="#000000"/><P x={18} y={36} c="#000000"/><P x={21} y={36} c="#ff0000"/><P x={24} y={36} c="#ff0000"/><P x={27} y={36} c="#ff8800"/><P x={30} y={36} c="#000000"/><P x={45} y={36} c="#00ff33"/>
-      {/* r=13 */}
-      <P x={0} y={39} c="#000000"/><P x={3} y={39} c="#000000"/><P x={6} y={39} c="#000000"/><P x={9} y={39} c="#000000"/><P x={18} y={39} c="#000000"/><P x={21} y={39} c="#0a0a0a"/><P x={24} y={39} c="#0a0a0a"/><P x={27} y={39} c="#000000"/><P x={45} y={39} c="#00ff33"/>
-      {/* r=14 */}
-      <P x={6} y={42} c="#000000"/><P x={18} y={42} c="#000000"/><P x={21} y={42} c="#000000"/><P x={24} y={42} c="#000000"/><P x={45} y={42} c="#00ff33"/>
-      {/* r=15 */}
-      <P x={45} y={45} c="#00ff33"/>
-    </I>
-  )
+  return <SketchIcon label="EDGE" color={SK.draw} active={active}>{({ c, g }) => <>
+    {/* a block with its front-top edge picked */}
+    <path d="M8 16 L28 16 L38 9 L18 9 Z M8 16 V34 H28 V16 M28 34 L38 27 V9" stroke={g} strokeWidth={SWG} strokeLinejoin="round"/>
+    <line x1="8" y1="16" x2="28" y2="16" stroke={c} strokeWidth={SW + 0.5} strokeLinecap="round"/>
+    <Pt x={8} y={16} c={c}/><Pt x={28} y={16} c={c}/>
+    {/* … copied down into the sketch */}
+    <line x1="18" y1="20" x2="18" y2="37" stroke={c} strokeWidth="1"/>
+    <Arrow x={18} y={40} dx={0} dy={1} c={c}/>
+    <line x1="6" y1="43.5" x2="42" y2="43.5" stroke={c} strokeWidth={SW} strokeDasharray={DASH}/>
+  </>}</SketchIcon>
 }
+
+// ── Edit ─────────────────────────────────────────────────────────────────────
+export function IconTrim({ active }) {
+  return <SketchIcon label="TRIM" color={SK.edit} active={active}>{({ c, g }) => <>
+    <line x1="28" y1="6" x2="28" y2="42" stroke={g} strokeWidth={SW}/>
+    <line x1="6" y1="24" x2="28" y2="24" stroke={c} strokeWidth={SW} strokeLinecap="round"/>
+    <line x1="28" y1="24" x2="43" y2="24" stroke={c} strokeWidth={SW} strokeDasharray={DASH} opacity="0.7"/>
+    <path d="M32 18 L40 30 M40 18 L32 30" stroke={c} strokeWidth="2" strokeLinecap="round"/>
+  </>}</SketchIcon>
+}
+
+export function IconDelete({ active }) {
+  return <SketchIcon label="DELETE" color={SK.edit} active={active}>{({ c }) => <>
+    <circle cx="24" cy="24" r="17" stroke={c} strokeWidth={SW} fill={c} fillOpacity="0.1"/>
+    <path d="M16 16 L32 32 M32 16 L16 32" stroke={c} strokeWidth="3" strokeLinecap="round"/>
+  </>}</SketchIcon>
+}
+
+export function IconExtend({ active }) {
+  return <SketchIcon label="EXTEND" color={SK.edit} active={active}>{({ c, g }) => <>
+    <line x1="40" y1="6" x2="40" y2="42" stroke={g} strokeWidth={SW}/>
+    <line x1="6" y1="24" x2="21" y2="24" stroke={c} strokeWidth={SW} strokeLinecap="round"/>
+    <line x1="21" y1="24" x2="34" y2="24" stroke={c} strokeWidth={SW} strokeDasharray={DASH}/>
+    <Arrow x={39} y={24} dx={1} dy={0} c={c}/>
+  </>}</SketchIcon>
+}
+
+export function IconJoin({ active }) {
+  return <SketchIcon label="JOIN" color={SK.edit} active={active}>{({ c }) => <>
+    <line x1="5" y1="34" x2="19" y2="34" stroke={c} strokeWidth={SW} strokeLinecap="round"/>
+    <line x1="29" y1="14" x2="43" y2="14" stroke={c} strokeWidth={SW} strokeLinecap="round"/>
+    <line x1="19" y1="34" x2="29" y2="14" stroke={c} strokeWidth={SW} strokeDasharray={DASH}/>
+    <Pt x={19} y={34} c={c}/><Pt x={29} y={14} c={c}/>
+  </>}</SketchIcon>
+}
+
+export function IconFillet({ active }) {
+  return <SketchIcon label="FILLET" color={SK.edit} active={active}>{({ c, g }) => <>
+    <path d="M10 24 L10 10 L24 10" stroke={g} strokeWidth={SWG} strokeDasharray={DASH}/>
+    <path d="M10 42 L10 24 M24 10 L40 10" stroke={c} strokeWidth={SW} strokeLinecap="round"/>
+    <path d="M10 24 A14 14 0 0 1 24 10" stroke={c} strokeWidth={SW + 0.5} strokeLinecap="round"/>
+    <line x1="24" y1="24" x2="15" y2="15" stroke={g} strokeWidth="1"/>
+    <Arrow x={14.3} y={14.3} dx={-1} dy={-1} c={g}/>
+    <text x="27" y="34" fill={c} fontSize="9" fontFamily="monospace" fontWeight="bold">R</text>
+  </>}</SketchIcon>
+}
+
+export function IconOffset({ active }) {
+  return <SketchIcon label="OFFSET" color={SK.edit} active={active}>{({ c }) => <>
+    <rect x="16" y="16" width="16" height="16" stroke={c} strokeWidth={SW}/>
+    <rect x="8" y="8" width="32" height="32" rx="8" stroke={c} strokeWidth={SW}/>
+    <line x1="34" y1="24" x2="38" y2="24" stroke={c} strokeWidth="1"/>
+    <Arrow x={39} y={24} dx={1} dy={0} c={c}/><Arrow x={33} y={24} dx={-1} dy={0} c={c}/>
+  </>}</SketchIcon>
+}
+
+// ── Move / rotate / scale / mirror ───────────────────────────────────────────
+export function IconMove({ active }) {
+  return <SketchIcon label="MOVE" color={SK.transform} active={active}>{({ c, g }) => <>
+    <rect x="5" y="25" width="16" height="16" stroke={g} strokeWidth="1.7" strokeDasharray={DASH}/>
+    <rect x="27" y="7" width="16" height="16" stroke={c} strokeWidth={SW} fill={c} fillOpacity="0.1"/>
+    <line x1="15" y1="31" x2="29" y2="19" stroke={c} strokeWidth="1.5"/>
+    <Arrow x={31.5} y={17} dx={1} dy={-0.86} c={c}/>
+  </>}</SketchIcon>
+}
+
+export function IconRotate({ active }) {
+  return <SketchIcon label="ROTATE" color={SK.transform} active={active}>{({ c, g }) => <>
+    <rect x="10" y="32" width="24" height="7" stroke={g} strokeWidth="1.7" strokeDasharray={DASH}/>
+    <rect x="10" y="32" width="24" height="7" stroke={c} strokeWidth={SW} fill={c} fillOpacity="0.1" transform="rotate(-40 10 39)"/>
+    <path d="M40 39 A30 30 0 0 0 33 19.7" stroke={c} strokeWidth="1.5"/>
+    <Arrow x={32} y={18.5} dx={-0.64} dy={-0.77} c={c}/>
+    <Pt x={10} y={39} c={c}/>
+  </>}</SketchIcon>
+}
+
+export function IconScale({ active }) {
+  return <SketchIcon label="SCALE" color={SK.transform} active={active}>{({ c, g }) => <>
+    <rect x="7" y="27" width="13" height="13" stroke={g} strokeWidth="1.7" strokeDasharray={DASH}/>
+    <rect x="7" y="9" width="31" height="31" stroke={c} strokeWidth={SW} fill={c} fillOpacity="0.08"/>
+    <line x1="20" y1="27" x2="32" y2="15" stroke={c} strokeWidth="1.5"/>
+    <Arrow x={34} y={13} dx={1} dy={-1} c={c}/>
+    <Pt x={7} y={40} c={c}/>
+  </>}</SketchIcon>
+}
+
+export function IconMirror({ active }) {
+  return <SketchIcon label="MIRROR" color={SK.transform} active={active}>{({ c, g }) => <>
+    <line x1="24" y1="4" x2="24" y2="44" stroke={g} strokeWidth="1.7" strokeDasharray="6 2 1.5 2"/>
+    <path d="M7 36 L20 36 L20 13 Z" stroke={c} strokeWidth={SW} strokeLinejoin="round"/>
+    <path d="M41 36 L28 36 L28 13 Z" stroke={c} strokeWidth={SW} strokeLinejoin="round" fill={c} fillOpacity="0.12"/>
+  </>}</SketchIcon>
+}
+
+export function IconCenter({ active }) {
+  return <SketchIcon label="CENTRE" color={SK.transform} active={active}>{({ c, g }) => <>
+    <path d="M24 3 V45 M3 24 H45" stroke={g} strokeWidth="1" strokeDasharray="6 2 1.5 2"/>
+    <rect x="31" y="3" width="13" height="13" stroke={g} strokeWidth="1.7" strokeDasharray={DASH}/>
+    <rect x="15" y="15" width="18" height="18" stroke={c} strokeWidth={SW} fill={c} fillOpacity="0.1"/>
+    <line x1="35" y1="13" x2="31" y2="17" stroke={c} strokeWidth="1.5"/>
+    <Arrow x={29.5} y={18.5} dx={-1} dy={1} c={c} len={4} w={2.2}/>
+    <circle cx="24" cy="24" r="2" fill={c}/>
+  </>}</SketchIcon>
+}
+
+// ── Dimension / help ─────────────────────────────────────────────────────────
+export function IconDim({ active }) {
+  return <SketchIcon label="DIM" color={SK.annotate} active={active}>{({ c, g }) => <>
+    <line x1="6" y1="40" x2="42" y2="40" stroke={g} strokeWidth={SW}/>
+    <path d="M10 37 V15 M38 37 V15" stroke={c} strokeWidth="1.2"/>
+    <line x1="10" y1="22" x2="38" y2="22" stroke={c} strokeWidth="1.3"/>
+    <Arrow x={10} y={22} dx={-1} dy={0} c={c}/><Arrow x={38} y={22} dx={1} dy={0} c={c}/>
+    <text x="24" y="17" textAnchor="middle" fill={c} fontSize="10" fontFamily="monospace" fontWeight="bold">25</text>
+  </>}</SketchIcon>
+}
+
+export function IconGuide({ active }) {
+  return <SketchIcon label="GUIDE" color={SK.annotate} active={active}>{({ c }) => <>
+    <circle cx="24" cy="24" r="17" stroke={c} strokeWidth={SW}/>
+    <path d="M18 19 A6 6 0 1 1 26 24.6 Q24 25.5 24 28.5 V30" stroke={c} strokeWidth="2.5" strokeLinecap="round"/>
+    <circle cx="24" cy="35.5" r="1.8" fill={c}/>
+  </>}</SketchIcon>
+}
+
+// ── ALIASES for App.jsx which uses old names ──────────────────────────────────
+// These let App.jsx keep its existing imports without changes
+export const IconMoveCopy    = IconMove
+export const IconRotateCopy  = IconRotate
+export const IconResize      = IconScale
+
+// ── Utility / vector icons (kept at 28×28 for bottom toolbar) ─────────────────
+const V = (props) => (
+  <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" {...props}/>
+)
+
 
 // ── 3D-ENVIRONMENT VECTOR ICONS ─────────────────────────────────────────────
 // 80s vector-arcade style (Star Wars/Battlezone) — thin glowing lines, no
@@ -542,358 +589,6 @@ export function IconPattern3D({ color = '#4DB6AC', size = 70 }) {
   )
 }
 
-// ── MOVE ──────────────────────────────────────────────────────────────────────
-// x=c*3, y=r*3 from original raw pixel array
-export function IconMove({ active }) {
-  return (
-    <I label="MOVE" active={active}>
-      {/* r=1 */}
-      <P x={21} y={3} c="#78d21e"/><P x={27} y={3} c="#b5f575"/><P x={30} y={3} c="#59e859"/><P x={33} y={3} c="#59e859"/><P x={36} y={3} c="#b5f575"/>
-      {/* r=2 */}
-      <P x={21} y={6} c="#59e859"/><P x={27} y={6} c="#d21e1e"/><P x={30} y={6} c="#65fb65"/><P x={33} y={6} c="#65fb65"/><P x={36} y={6} c="#d21e1e"/><P x={42} y={6} c="#59e859"/><P x={45} y={6} c="#78d21e"/>
-      {/* r=3 */}
-      <P x={21} y={9} c="#59e859"/><P x={24} y={9} c="#59e859"/><P x={27} y={9} c="#59e859"/><P x={30} y={9} c="#65fb65"/><P x={33} y={9} c="#65fb65"/><P x={36} y={9} c="#59e859"/><P x={39} y={9} c="#59e859"/><P x={42} y={9} c="#59e859"/>
-      {/* r=4 */}
-      <P x={27} y={12} c="#65fb65"/><P x={30} y={12} c="#b5f575"/><P x={33} y={12} c="#b5f575"/><P x={36} y={12} c="#59e859"/>
-      {/* r=5 */}
-      <P x={24} y={15} c="#59e859"/><P x={27} y={15} c="#59e859"/><P x={30} y={15} c="#59e859"/><P x={33} y={15} c="#b5f575"/><P x={36} y={15} c="#59e859"/><P x={39} y={15} c="#59e859"/>
-      {/* r=6 */}
-      <P x={24} y={18} c="#59e859"/><P x={30} y={18} c="#59e859"/><P x={33} y={18} c="#59e859"/><P x={39} y={18} c="#59e859"/>
-      {/* r=7 */}
-      <P x={21} y={21} c="#9ef24a"/><P x={24} y={21} c="#59e859"/><P x={39} y={21} c="#59e859"/><P x={42} y={21} c="#9ef24a"/>
-      {/* r=9 */}
-      <P x={0} y={27} c="#59e859"/><P x={6} y={27} c="#b5f575"/><P x={9} y={27} c="#49fb09"/><P x={12} y={27} c="#49fb09"/><P x={15} y={27} c="#b5f575"/>
-      {/* r=10 */}
-      <P x={0} y={30} c="#49fb09"/><P x={6} y={30} c="#d21e1e"/><P x={9} y={30} c="#59e859"/><P x={12} y={30} c="#49fb09"/><P x={15} y={30} c="#d21e1e"/><P x={21} y={30} c="#49fb09"/><P x={24} y={30} c="#59e859"/>
-      {/* r=11 */}
-      <P x={0} y={33} c="#49fb09"/><P x={3} y={33} c="#49fb09"/><P x={6} y={33} c="#49fb09"/><P x={9} y={33} c="#49fb09"/><P x={12} y={33} c="#49fb09"/><P x={15} y={33} c="#49fb09"/><P x={18} y={33} c="#49fb09"/><P x={21} y={33} c="#49fb09"/>
-      {/* r=12 */}
-      <P x={6} y={36} c="#49fb09"/><P x={9} y={36} c="#b5f575"/><P x={12} y={36} c="#b5f575"/><P x={15} y={36} c="#49fb09"/>
-      {/* r=13 */}
-      <P x={3} y={39} c="#49fb09"/><P x={6} y={39} c="#49fb09"/><P x={9} y={39} c="#49fb09"/><P x={12} y={39} c="#b5f575"/><P x={15} y={39} c="#49fb09"/><P x={18} y={39} c="#49fb09"/>
-      {/* r=14 */}
-      <P x={3} y={42} c="#49fb09"/><P x={9} y={42} c="#49fb09"/><P x={12} y={42} c="#49fb09"/><P x={18} y={42} c="#49fb09"/>
-      {/* r=15 */}
-      <P x={0} y={45} c="#49fb09"/><P x={3} y={45} c="#49fb09"/><P x={18} y={45} c="#49fb09"/><P x={21} y={45} c="#49fb09"/>
-    </I>
-  )
-}
-
-// ── MIRROR ────────────────────────────────────────────────────────────────────
-export function IconMirror({ active }) {
-  return (
-    <I label="MIRROR" active={active}>
-      <P x={18} y={0} c="#050505"/><P x={21} y={0} c="#050505"/><P x={24} y={0} c="#050505"/><P x={27} y={0} c="#050505"/>
-      <P x={15} y={3} c="#050505"/><P x={18} y={3} c="#ffd500"/><P x={21} y={3} c="#ffd500"/><P x={24} y={3} c="#ffd500"/><P x={27} y={3} c="#ffd500"/><P x={30} y={3} c="#050505"/>
-      <P x={12} y={6} c="#050505"/><P x={15} y={6} c="#ffd500"/><P x={18} y={6} c="#7ef7fb"/><P x={21} y={6} c="#7ef7fb"/><P x={24} y={6} c="#7ef7fb"/><P x={27} y={6} c="#7ef7fb"/><P x={30} y={6} c="#ffd500"/><P x={33} y={6} c="#050505"/>
-      <P x={9} y={9} c="#050505"/><P x={12} y={9} c="#ffd500"/><P x={15} y={9} c="#7ef7fb"/><P x={18} y={9} c="#7ef7fb"/><P x={21} y={9} c="#7ef7fb"/><P x={24} y={9} c="#7ef7fb"/><P x={27} y={9} c="#7ef7fb"/><P x={30} y={9} c="#dbfeff"/><P x={33} y={9} c="#ffd500"/><P x={36} y={9} c="#050505"/>
-      <P x={9} y={12} c="#050505"/><P x={12} y={12} c="#ffd500"/><P x={15} y={12} c="#7ef7fb"/><P x={18} y={12} c="#7ef7fb"/><P x={21} y={12} c="#7ef7fb"/><P x={24} y={12} c="#7ef7fb"/><P x={27} y={12} c="#dbfeff"/><P x={30} y={12} c="#7ef7fb"/><P x={33} y={12} c="#ffd500"/><P x={36} y={12} c="#050505"/>
-      <P x={9} y={15} c="#050505"/><P x={12} y={15} c="#ffd500"/><P x={15} y={15} c="#7ef7fb"/><P x={18} y={15} c="#7ef7fb"/><P x={21} y={15} c="#7ef7fb"/><P x={24} y={15} c="#dbfeff"/><P x={27} y={15} c="#7ef7fb"/><P x={30} y={15} c="#dbfeff"/><P x={33} y={15} c="#ffd500"/><P x={36} y={15} c="#050505"/>
-      <P x={9} y={18} c="#050505"/><P x={12} y={18} c="#ffd500"/><P x={15} y={18} c="#7ef7fb"/><P x={18} y={18} c="#7ef7fb"/><P x={21} y={18} c="#dbfeff"/><P x={24} y={18} c="#7ef7fb"/><P x={27} y={18} c="#dbfeff"/><P x={30} y={18} c="#dbfeff"/><P x={33} y={18} c="#ffd500"/><P x={36} y={18} c="#050505"/>
-      <P x={9} y={21} c="#050505"/><P x={12} y={21} c="#ffd500"/><P x={15} y={21} c="#7ef7fb"/><P x={18} y={21} c="#dbfeff"/><P x={21} y={21} c="#7ef7fb"/><P x={24} y={21} c="#dbfeff"/><P x={27} y={21} c="#dbfeff"/><P x={30} y={21} c="#7ef7fb"/><P x={33} y={21} c="#ffd500"/><P x={36} y={21} c="#050505"/>
-      <P x={12} y={24} c="#050505"/><P x={15} y={24} c="#ffd500"/><P x={18} y={24} c="#7ef7fb"/><P x={21} y={24} c="#dbfeff"/><P x={24} y={24} c="#dbfeff"/><P x={27} y={24} c="#7ef7fb"/><P x={30} y={24} c="#ffd500"/><P x={33} y={24} c="#050505"/>
-      <P x={15} y={27} c="#050505"/><P x={18} y={27} c="#ffd500"/><P x={21} y={27} c="#ffd500"/><P x={24} y={27} c="#ffd500"/><P x={27} y={27} c="#ffd500"/><P x={30} y={27} c="#050505"/>
-      <P x={18} y={30} c="#050505"/><P x={21} y={30} c="#d6b300"/><P x={24} y={30} c="#d6b300"/><P x={27} y={30} c="#050505"/>
-      <P x={18} y={33} c="#050505"/><P x={21} y={33} c="#ffd500"/><P x={24} y={33} c="#ffd500"/><P x={27} y={33} c="#050505"/>
-      <P x={18} y={36} c="#050505"/><P x={21} y={36} c="#ffd500"/><P x={24} y={36} c="#ffd500"/><P x={27} y={36} c="#050505"/>
-      <P x={18} y={39} c="#050505"/><P x={21} y={39} c="#ffd500"/><P x={24} y={39} c="#ffd500"/><P x={27} y={39} c="#050505"/>
-      <P x={18} y={42} c="#050505"/><P x={21} y={42} c="#ffd500"/><P x={24} y={42} c="#ffd500"/><P x={27} y={42} c="#050505"/>
-      <P x={21} y={45} c="#050505"/><P x={24} y={45} c="#050505"/>
-    </I>
-  )
-}
-
-// ── CENTRE ────────────────────────────────────────────────────────────────────
-export function IconCenter({ active }) {
-  return (
-    <I label="CENTRE" active={active}>
-      {/* octagonal ring */}
-      <P x={33} y={24} c="#7ef7fb"/>
-      <P x={30} y={15} c="#7ef7fb"/>
-      <P x={24} y={12} c="#7ef7fb"/>
-      <P x={18} y={15} c="#7ef7fb"/>
-      <P x={15} y={24} c="#7ef7fb"/>
-      <P x={18} y={33} c="#7ef7fb"/>
-      <P x={24} y={36} c="#7ef7fb"/>
-      <P x={30} y={33} c="#7ef7fb"/>
-      {/* crosshair ticks, one step outside the ring */}
-      <P x={24} y={9}  c="#ffd500"/>
-      <P x={24} y={39} c="#ffd500"/>
-      <P x={36} y={24} c="#ffd500"/>
-      <P x={12} y={24} c="#ffd500"/>
-      {/* center dot */}
-      <P x={24} y={24} c="#ffd500"/>
-    </I>
-  )
-}
-
-// ── SCALE ─────────────────────────────────────────────────────────────────────
-// x=c*3, y=r*3 from original raw pixel array
-export function IconScale({ active }) {
-  return (
-    <I label="SCALE" active={active}>
-      {/* r=2 */}
-      <P x={30} y={6} c="#f60404"/><P x={33} y={6} c="#f60404"/><P x={36} y={6} c="#f60404"/>
-      {/* r=3 */}
-      <P x={27} y={9} c="#f60404"/><P x={30} y={9} c="#f67904"/><P x={33} y={9} c="#f67904"/><P x={36} y={9} c="#f67904"/><P x={39} y={9} c="#f60404"/>
-      {/* r=4 */}
-      <P x={24} y={12} c="#f60404"/><P x={27} y={12} c="#f67904"/><P x={30} y={12} c="#f67904"/><P x={33} y={12} c="#f2f604"/><P x={36} y={12} c="#f2f604"/><P x={39} y={12} c="#f67904"/><P x={42} y={12} c="#f60404"/>
-      {/* r=5 */}
-      <P x={24} y={15} c="#f60404"/><P x={27} y={15} c="#f67904"/><P x={30} y={15} c="#f2f604"/><P x={33} y={15} c="#f2f604"/><P x={36} y={15} c="#f2f604"/><P x={39} y={15} c="#f67904"/><P x={42} y={15} c="#f60404"/>
-      {/* r=6 */}
-      <P x={24} y={18} c="#f60404"/><P x={27} y={18} c="#f67904"/><P x={30} y={18} c="#f2f604"/><P x={33} y={18} c="#f2f604"/><P x={36} y={18} c="#f2f604"/><P x={39} y={18} c="#f67904"/><P x={42} y={18} c="#f60404"/>
-      {/* r=7 */}
-      <P x={27} y={21} c="#f60404"/><P x={30} y={21} c="#f67904"/><P x={33} y={21} c="#f67904"/><P x={36} y={21} c="#f67904"/><P x={39} y={21} c="#f60404"/>
-      {/* r=8 */}
-      <P x={18} y={24} c="#f60404"/><P x={21} y={24} c="#f60404"/><P x={30} y={24} c="#f60404"/><P x={33} y={24} c="#f60404"/><P x={36} y={24} c="#f60404"/>
-      {/* r=9 */}
-      <P x={15} y={27} c="#f60404"/><P x={18} y={27} c="#f69104"/><P x={21} y={27} c="#f69104"/><P x={24} y={27} c="#f60404"/>
-      {/* r=10 */}
-      <P x={15} y={30} c="#f60404"/><P x={18} y={30} c="#f69104"/><P x={21} y={30} c="#f69104"/><P x={24} y={30} c="#f60404"/>
-      {/* r=11 */}
-      <P x={6} y={33} c="#f60404"/><P x={18} y={33} c="#f60404"/><P x={21} y={33} c="#f60404"/>
-      {/* r=12 */}
-      <P x={3} y={36} c="#f60404"/><P x={6} y={36} c="#f69104"/><P x={9} y={36} c="#f60404"/>
-      {/* r=13 */}
-      <P x={6} y={39} c="#f60404"/>
-    </I>
-  )
-}
-
-// ── ROTATE ────────────────────────────────────────────────────────────────────
-// x=c*3, y=r*3 from original raw pixel array
-export function IconRotate({ active }) {
-  return (
-    <I label="ROTATE" active={active}>
-      {/* r=0 */}
-      <P x={18} y={0} c="#788991"/><P x={21} y={0} c="#788991"/><P x={24} y={0} c="#788991"/><P x={27} y={0} c="#788991"/>
-      {/* r=1 */}
-      <P x={21} y={3} c="#03d843"/><P x={24} y={3} c="#03d843"/><P x={27} y={3} c="#03d843"/><P x={30} y={3} c="#788991"/>
-      {/* r=2 */}
-      <P x={18} y={6} c="#fff700"/><P x={24} y={6} c="#03d843"/><P x={27} y={6} c="#03d843"/><P x={30} y={6} c="#03d843"/><P x={33} y={6} c="#788991"/><P x={36} y={6} c="#788991"/><P x={39} y={6} c="#788991"/>
-      {/* r=3 */}
-      <P x={18} y={9} c="#ff0000"/><P x={21} y={9} c="#03d843"/><P x={24} y={9} c="#03d843"/><P x={27} y={9} c="#8bbcda"/><P x={30} y={9} c="#8bbcda"/><P x={33} y={9} c="#8bbcda"/><P x={36} y={9} c="#8bbcda"/><P x={39} y={9} c="#788991"/><P x={42} y={9} c="#788991"/><P x={45} y={9} c="#788991"/>
-      {/* r=4 */}
-      <P x={18} y={12} c="#fff700"/><P x={24} y={12} c="#03d843"/><P x={27} y={12} c="#03d843"/><P x={30} y={12} c="#03d843"/><P x={33} y={12} c="#788991"/><P x={36} y={12} c="#788991"/><P x={39} y={12} c="#788991"/>
-      {/* r=5 */}
-      <P x={21} y={15} c="#03d843"/><P x={24} y={15} c="#03d843"/><P x={27} y={15} c="#03d843"/><P x={30} y={15} c="#788991"/>
-      {/* r=6 */}
-      <P x={9} y={18} c="#788991"/><P x={18} y={18} c="#788991"/><P x={21} y={18} c="#788991"/><P x={24} y={18} c="#788991"/><P x={27} y={18} c="#788991"/>
-      {/* r=7 */}
-      <P x={9} y={21} c="#788991"/>
-      {/* r=8 */}
-      <P x={6} y={24} c="#788991"/><P x={9} y={24} c="#788991"/><P x={12} y={24} c="#788991"/>
-      {/* r=9 */}
-      <P x={6} y={27} c="#788991"/><P x={9} y={27} c="#8bbcda"/><P x={12} y={27} c="#788991"/>
-      {/* r=10 */}
-      <P x={6} y={30} c="#788991"/><P x={9} y={30} c="#8bbcda"/><P x={12} y={30} c="#788991"/>
-      {/* r=11 */}
-      <P x={3} y={33} c="#788991"/><P x={6} y={33} c="#03d843"/><P x={9} y={33} c="#8bbcda"/><P x={12} y={33} c="#03d843"/><P x={15} y={33} c="#788991"/>
-      {/* r=12 */}
-      <P x={0} y={36} c="#788991"/><P x={3} y={36} c="#03d843"/><P x={6} y={36} c="#03d843"/><P x={9} y={36} c="#8bbcda"/><P x={12} y={36} c="#03d843"/><P x={15} y={36} c="#03d843"/><P x={18} y={36} c="#788991"/>
-      {/* r=13 */}
-      <P x={0} y={39} c="#788991"/><P x={3} y={39} c="#03d843"/><P x={6} y={39} c="#03d843"/><P x={9} y={39} c="#03d843"/><P x={12} y={39} c="#03d843"/><P x={15} y={39} c="#03d843"/><P x={18} y={39} c="#788991"/>
-      {/* r=14 */}
-      <P x={0} y={42} c="#788991"/><P x={3} y={42} c="#03d843"/><P x={9} y={42} c="#03d843"/><P x={15} y={42} c="#03d843"/><P x={18} y={42} c="#788991"/>
-      {/* r=15 */}
-      <P x={0} y={45} c="#788991"/><P x={6} y={45} c="#fff700"/><P x={9} y={45} c="#ff0000"/><P x={12} y={45} c="#fff700"/><P x={18} y={45} c="#788991"/>
-    </I>
-  )
-}
-
-// ── FILLET ────────────────────────────────────────────────────────────────────
-// x=c*3, y=r*3 from original raw pixel array
-export function IconFillet({ active }) {
-  return (
-    <I label="FILLET" active={active}>
-      {/* r=0 */}
-      <P x={15} y={0} c="#03dffc"/><P x={18} y={0} c="#000000"/><P x={21} y={0} c="#03dffc"/>
-      {/* r=1 */}
-      <P x={15} y={3} c="#03dffc"/><P x={18} y={3} c="#000000"/><P x={21} y={3} c="#03dffc"/>
-      {/* r=2 */}
-      <P x={15} y={6} c="#03dffc"/><P x={18} y={6} c="#000000"/><P x={21} y={6} c="#03dffc"/><P x={30} y={6} c="#f70820"/><P x={33} y={6} c="#f70820"/><P x={36} y={6} c="#f70820"/>
-      {/* r=3 */}
-      <P x={15} y={9} c="#03dffc"/><P x={18} y={9} c="#000000"/><P x={21} y={9} c="#03dffc"/><P x={27} y={9} c="#f70820"/><P x={30} y={9} c="#f70820"/><P x={33} y={9} c="#f70820"/><P x={36} y={9} c="#f70820"/><P x={39} y={9} c="#f70820"/>
-      {/* r=4 */}
-      <P x={15} y={12} c="#03dffc"/><P x={18} y={12} c="#000000"/><P x={21} y={12} c="#03dffc"/><P x={27} y={12} c="#f70820"/><P x={30} y={12} c="#ffffff"/><P x={33} y={12} c="#f70820"/><P x={36} y={12} c="#ffffff"/><P x={39} y={12} c="#f70820"/>
-      {/* r=5 */}
-      <P x={15} y={15} c="#03dffc"/><P x={18} y={15} c="#000000"/><P x={21} y={15} c="#03dffc"/><P x={27} y={15} c="#f70820"/><P x={30} y={15} c="#f70820"/><P x={33} y={15} c="#f70820"/><P x={36} y={15} c="#f70820"/><P x={39} y={15} c="#f70820"/>
-      {/* r=6 */}
-      <P x={15} y={18} c="#03dffc"/><P x={18} y={18} c="#000000"/><P x={21} y={18} c="#03dffc"/><P x={27} y={18} c="#f70820"/><P x={30} y={18} c="#f70820"/><P x={33} y={18} c="#f70820"/><P x={36} y={18} c="#f70820"/><P x={39} y={18} c="#f70820"/>
-      {/* r=7 */}
-      <P x={15} y={21} c="#03dffc"/><P x={18} y={21} c="#000000"/><P x={21} y={21} c="#03dffc"/><P x={27} y={21} c="#f70820"/><P x={33} y={21} c="#f70820"/><P x={39} y={21} c="#f70820"/>
-      {/* r=8 */}
-      <P x={15} y={24} c="#03dffc"/><P x={18} y={24} c="#000000"/><P x={21} y={24} c="#03dffc"/>
-      {/* r=9 */}
-      <P x={15} y={27} c="#03dffc"/><P x={18} y={27} c="#0d0d0d"/><P x={21} y={27} c="#03dffc"/><P x={24} y={27} c="#00e1ff"/>
-      {/* r=10 */}
-      <P x={15} y={30} c="#03dffc"/><P x={18} y={30} c="#0d0d0d"/><P x={21} y={30} c="#0d0d0d"/><P x={24} y={30} c="#03dffc"/><P x={27} y={30} c="#00e1ff"/>
-      {/* r=11 */}
-      <P x={15} y={33} c="#03dffc"/><P x={18} y={33} c="#03dffc"/><P x={21} y={33} c="#0d0d0d"/><P x={24} y={33} c="#000000"/><P x={27} y={33} c="#03dffc"/><P x={30} y={33} c="#03dffc"/><P x={33} y={33} c="#03dffc"/><P x={36} y={33} c="#03dffc"/><P x={39} y={33} c="#03dffc"/><P x={42} y={33} c="#03dffc"/><P x={45} y={33} c="#03dffc"/>
-      {/* r=12 */}
-      <P x={18} y={36} c="#03dffc"/><P x={21} y={36} c="#03dffc"/><P x={24} y={36} c="#0d0d0d"/><P x={27} y={36} c="#000000"/><P x={30} y={36} c="#000000"/><P x={33} y={36} c="#000000"/><P x={36} y={36} c="#000000"/><P x={39} y={36} c="#000000"/><P x={42} y={36} c="#000000"/><P x={45} y={36} c="#000000"/>
-      {/* r=13 */}
-      <P x={21} y={39} c="#03dffc"/><P x={24} y={39} c="#03dffc"/><P x={27} y={39} c="#03dffc"/><P x={30} y={39} c="#03dffc"/><P x={33} y={39} c="#03dffc"/><P x={36} y={39} c="#03dffc"/><P x={39} y={39} c="#03dffc"/><P x={42} y={39} c="#03dffc"/><P x={45} y={39} c="#03dffc"/>
-    </I>
-  )
-}
-
-// ── EXTEND ────────────────────────────────────────────────────────────────────
-// x=c*3, y=r*3 from original raw pixel array
-export function IconExtend({ active }) {
-  return (
-    <I label="EXTEND" active={active}>
-      {/* r=0 */}
-      <P x={6} y={0} c="#f02828"/><P x={21} y={0} c="#ff0000"/><P x={36} y={0} c="#f02828"/>
-      {/* r=1 */}
-      <P x={3} y={3} c="#ff0000"/><P x={9} y={3} c="#ff0000"/><P x={18} y={3} c="#ff0000"/><P x={24} y={3} c="#ff0000"/><P x={33} y={3} c="#ff0000"/><P x={39} y={3} c="#ff0000"/>
-      {/* r=2 */}
-      <P x={6} y={6} c="#ff0000"/><P x={21} y={6} c="#ff0000"/><P x={36} y={6} c="#f02828"/>
-      {/* r=3 */}
-      <P x={6} y={9} c="#ff0000"/><P x={36} y={9} c="#ff0000"/>
-      {/* r=4 */}
-      <P x={6} y={12} c="#ff0000"/><P x={21} y={12} c="#a6a6a6"/><P x={36} y={12} c="#f02828"/>
-      {/* r=5 */}
-      <P x={21} y={15} c="#a6a6a6"/>
-      {/* r=6 */}
-      <P x={6} y={18} c="#f90b96"/><P x={18} y={18} c="#f90b96"/><P x={21} y={18} c="#a6a6a6"/><P x={24} y={18} c="#f90b96"/><P x={36} y={18} c="#f90b96"/>
-      {/* r=7 */}
-      <P x={6} y={21} c="#a6a6a6"/><P x={15} y={21} c="#a6a6a6"/><P x={18} y={21} c="#a6a6a6"/><P x={21} y={21} c="#174be8"/><P x={24} y={21} c="#a6a6a6"/><P x={27} y={21} c="#a6a6a6"/><P x={36} y={21} c="#a6a6a6"/>
-      {/* r=8 */}
-      <P x={6} y={24} c="#a6a6a6"/><P x={12} y={24} c="#d6d6d6"/><P x={15} y={24} c="#a6a6a6"/><P x={18} y={24} c="#174be8"/><P x={21} y={24} c="#174be8"/><P x={24} y={24} c="#174be8"/><P x={27} y={24} c="#a6a6a6"/><P x={30} y={24} c="#d6d6d6"/><P x={36} y={24} c="#a6a6a6"/>
-      {/* r=9 */}
-      <P x={6} y={27} c="#a6a6a6"/><P x={9} y={27} c="#d6d6d6"/><P x={12} y={27} c="#d6d6d6"/><P x={15} y={27} c="#a6a6a6"/><P x={18} y={27} c="#707275"/><P x={21} y={27} c="#707275"/><P x={24} y={27} c="#707275"/><P x={27} y={27} c="#a6a6a6"/><P x={30} y={27} c="#d6d6d6"/><P x={33} y={27} c="#d6d6d6"/><P x={36} y={27} c="#a6a6a6"/>
-      {/* r=10 */}
-      <P x={6} y={30} c="#a6a6a6"/><P x={9} y={30} c="#d6d6d6"/><P x={12} y={30} c="#d6d6d6"/><P x={15} y={30} c="#a6a6a6"/><P x={18} y={30} c="#a6a6a6"/><P x={21} y={30} c="#707275"/><P x={24} y={30} c="#a6a6a6"/><P x={27} y={30} c="#a6a6a6"/><P x={30} y={30} c="#d6d6d6"/><P x={33} y={30} c="#d6d6d6"/><P x={36} y={30} c="#a6a6a6"/>
-      {/* r=11 */}
-      <P x={6} y={33} c="#a6a6a6"/><P x={9} y={33} c="#d6d6d6"/><P x={12} y={33} c="#a6a6a6"/><P x={15} y={33} c="#a6a6a6"/><P x={18} y={33} c="#707275"/><P x={21} y={33} c="#8d8b8b"/><P x={24} y={33} c="#707275"/><P x={27} y={33} c="#a6a6a6"/><P x={30} y={33} c="#a6a6a6"/><P x={33} y={33} c="#d6d6d6"/><P x={36} y={33} c="#a6a6a6"/>
-      {/* r=12 */}
-      <P x={6} y={36} c="#a6a6a6"/><P x={9} y={36} c="#a6a6a6"/><P x={12} y={36} c="#a6a6a6"/><P x={18} y={36} c="#8d8b8b"/><P x={21} y={36} c="#8d8b8b"/><P x={24} y={36} c="#8d8b8b"/><P x={30} y={36} c="#a6a6a6"/><P x={33} y={36} c="#a6a6a6"/><P x={36} y={36} c="#a6a6a6"/>
-      {/* r=13 */}
-      <P x={6} y={39} c="#a6a6a6"/><P x={18} y={39} c="#e9f90b"/><P x={21} y={39} c="#ff4d00"/><P x={24} y={39} c="#e9f90b"/><P x={36} y={39} c="#a6a6a6"/>
-      {/* r=14 */}
-      <P x={18} y={42} c="#e9f90b"/><P x={21} y={42} c="#ff4d00"/><P x={24} y={42} c="#e9f90b"/>
-      {/* r=15 */}
-      <P x={18} y={45} c="#e9f90b"/><P x={21} y={45} c="#f1f50a"/><P x={24} y={45} c="#e9f90b"/>
-    </I>
-  )
-}
-
-// ── OFFSET (pixel art) ────────────────────────────────────────────────────────
-// x=c*3, y=r*3 from original raw pixel array
-export function IconOffset({ active }) {
-  return (
-    <I label="OFFSET" active={active}>
-      {/* r=2 */}
-      <P x={18} y={6} c="#f5ed05"/><P x={21} y={6} c="#f5ed05"/><P x={24} y={6} c="#f5ed05"/>
-      {/* r=3 */}
-      <P x={15} y={9} c="#f5ed05"/><P x={27} y={9} c="#f5ed05"/><P x={33} y={9} c="#f5ed05"/><P x={36} y={9} c="#f5ed05"/>
-      {/* r=4 */}
-      <P x={3} y={12} c="#f5ed05"/><P x={6} y={12} c="#f5ed05"/><P x={9} y={12} c="#f5ed05"/><P x={12} y={12} c="#f5ed05"/><P x={30} y={12} c="#f5ed05"/><P x={39} y={12} c="#f5ed05"/>
-      {/* r=5 */}
-      <P x={3} y={15} c="#f5ed05"/><P x={18} y={15} c="#3981f3"/><P x={21} y={15} c="#3981f3"/><P x={24} y={15} c="#3981f3"/><P x={39} y={15} c="#f5ed05"/>
-      {/* r=6 */}
-      <P x={3} y={18} c="#f5ed05"/><P x={15} y={18} c="#3981f3"/><P x={18} y={18} c="#3981f3"/><P x={21} y={18} c="#3981f3"/><P x={24} y={18} c="#3981f3"/><P x={27} y={18} c="#3981f3"/><P x={33} y={18} c="#3981f3"/><P x={39} y={18} c="#f5ed05"/>
-      {/* r=7 */}
-      <P x={3} y={21} c="#f5ed05"/><P x={9} y={21} c="#3981f3"/><P x={12} y={21} c="#3981f3"/><P x={15} y={21} c="#3981f3"/><P x={21} y={21} c="#3981f3"/><P x={27} y={21} c="#3981f3"/><P x={30} y={21} c="#3981f3"/><P x={33} y={21} c="#3981f3"/><P x={39} y={21} c="#f5ed05"/>
-      {/* r=8 */}
-      <P x={3} y={24} c="#f5ed05"/><P x={9} y={24} c="#3981f3"/><P x={15} y={24} c="#3981f3"/><P x={18} y={24} c="#3981f3"/><P x={21} y={24} c="#3981f3"/><P x={24} y={24} c="#3981f3"/><P x={27} y={24} c="#3981f3"/><P x={39} y={24} c="#f5ed05"/>
-      {/* r=9 */}
-      <P x={3} y={27} c="#f5ed05"/><P x={18} y={27} c="#3981f3"/><P x={24} y={27} c="#3981f3"/><P x={36} y={27} c="#f5ed05"/><P x={39} y={27} c="#f5ed05"/>
-      {/* r=10 */}
-      <P x={3} y={30} c="#f5ed05"/><P x={6} y={30} c="#f5ed05"/><P x={15} y={30} c="#3981f3"/><P x={18} y={30} c="#3981f3"/><P x={24} y={30} c="#3981f3"/><P x={27} y={30} c="#3981f3"/><P x={33} y={30} c="#f5ed05"/>
-      {/* r=11 */}
-      <P x={9} y={33} c="#f5ed05"/><P x={33} y={33} c="#f5ed05"/>
-      {/* r=12 */}
-      <P x={9} y={36} c="#f5ed05"/><P x={21} y={36} c="#f5ed05"/><P x={33} y={36} c="#f5ed05"/>
-      {/* r=13 */}
-      <P x={9} y={39} c="#f5ed05"/><P x={12} y={39} c="#f5ed05"/><P x={15} y={39} c="#f5ed05"/><P x={18} y={39} c="#f5ed05"/><P x={24} y={39} c="#f5ed05"/><P x={27} y={39} c="#f5ed05"/><P x={30} y={39} c="#f5ed05"/>
-    </I>
-  )
-}
-
-// ── GUIDE ─────────────────────────────────────────────────────────────────────
-export function IconGuide({ active }) {
-  return (
-    <I label="GUIDE" active={active}>
-      {/* r=1 */}
-      <P x={15} y={3} c="#f7fb04"/><P x={18} y={3} c="#f7fb04"/><P x={21} y={3} c="#f7fb04"/><P x={24} y={3} c="#f7fb04"/><P x={27} y={3} c="#f7fb04"/>
-      {/* r=2 */}
-      <P x={15} y={6} c="#f7fb04"/><P x={18} y={6} c="#f7fb04"/><P x={21} y={6} c="#f7fb04"/><P x={24} y={6} c="#f7fb04"/><P x={27} y={6} c="#f7fb04"/><P x={30} y={6} c="#f7fb04"/>
-      {/* r=3 */}
-      <P x={12} y={9} c="#f7fb04"/><P x={15} y={9} c="#f7fb04"/><P x={30} y={9} c="#f7fb04"/><P x={33} y={9} c="#f7fb04"/>
-      {/* r=4 */}
-      <P x={12} y={12} c="#f7fb04"/><P x={15} y={12} c="#f7fb04"/><P x={30} y={12} c="#f7fb04"/><P x={33} y={12} c="#f7fb04"/>
-      {/* r=5 */}
-      <P x={12} y={15} c="#f7fb04"/><P x={15} y={15} c="#f7fb04"/><P x={30} y={15} c="#f7fb04"/><P x={33} y={15} c="#f7fb04"/>
-      {/* r=6 */}
-      <P x={12} y={18} c="#f7fb04"/><P x={15} y={18} c="#f7fb04"/><P x={30} y={18} c="#f7fb04"/><P x={33} y={18} c="#f7fb04"/>
-      {/* r=7 */}
-      <P x={27} y={21} c="#f7fb04"/><P x={30} y={21} c="#f7fb04"/>
-      {/* r=8 */}
-      <P x={21} y={24} c="#f7fb04"/><P x={24} y={24} c="#f7fb04"/><P x={27} y={24} c="#f7fb04"/><P x={30} y={24} c="#f7fb04"/>
-      {/* r=9 */}
-      <P x={21} y={27} c="#f7fb04"/><P x={24} y={27} c="#f7fb04"/>
-      {/* r=10 */}
-      <P x={21} y={30} c="#f7fb04"/><P x={24} y={30} c="#f7fb04"/>
-      {/* r=11 */}
-      <P x={21} y={33} c="#f7fb04"/><P x={24} y={33} c="#f7fb04"/>
-      {/* r=12 */}
-      <P x={21} y={36} c="#f7fb04"/><P x={24} y={36} c="#f7fb04"/>
-      {/* r=14 */}
-      <P x={21} y={42} c="#f7fb04"/><P x={24} y={42} c="#f7fb04"/>
-      {/* r=15 */}
-      <P x={21} y={45} c="#f7fb04"/><P x={24} y={45} c="#f7fb04"/>
-    </I>
-  )
-}
-
-// ── ALIASES for App.jsx which uses old names ──────────────────────────────────
-// These let App.jsx keep its existing imports without changes
-export const IconMoveCopy    = IconMove
-export const IconRotateCopy  = IconRotate
-export const IconResize      = IconScale
-
-// ── Utility / vector icons (kept at 28×28 for bottom toolbar) ─────────────────
-const V = (props) => (
-  <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" {...props}/>
-)
-
-// ── TRACE (pixel art) ─────────────────────────────────────────────────────────
-// x=c*3, y=r*3 from original raw pixel array
-export function IconTrace({ active }) {
-  return (
-    <I label="TRACE" active={active}>
-      {/* r=2 */}
-      <P x={9} y={6} c="#f50000"/><P x={12} y={6} c="#f50000"/><P x={15} y={6} c="#f50000"/><P x={18} y={6} c="#f50000"/><P x={21} y={6} c="#f50000"/><P x={24} y={6} c="#f50000"/><P x={27} y={6} c="#f50000"/><P x={30} y={6} c="#f50000"/><P x={33} y={6} c="#f50000"/><P x={36} y={6} c="#f50000"/>
-      {/* r=3 */}
-      <P x={6} y={9} c="#f50000"/><P x={9} y={9} c="#f50000"/><P x={12} y={9} c="#e4f500"/><P x={15} y={9} c="#e4f500"/><P x={18} y={9} c="#e4f500"/><P x={21} y={9} c="#e4f500"/><P x={24} y={9} c="#e4f500"/><P x={27} y={9} c="#e4f500"/><P x={30} y={9} c="#e4f500"/><P x={33} y={9} c="#e4f500"/><P x={36} y={9} c="#f50000"/><P x={39} y={9} c="#f50000"/>
-      {/* r=4 */}
-      <P x={3} y={12} c="#f50000"/><P x={6} y={12} c="#f50000"/><P x={9} y={12} c="#e4f500"/><P x={12} y={12} c="#e4f500"/><P x={15} y={12} c="#007ef5"/><P x={18} y={12} c="#007ef5"/><P x={21} y={12} c="#007ef5"/><P x={24} y={12} c="#007ef5"/><P x={27} y={12} c="#007ef5"/><P x={30} y={12} c="#007ef5"/><P x={33} y={12} c="#e4f500"/><P x={36} y={12} c="#e4f500"/><P x={39} y={12} c="#f50000"/><P x={42} y={12} c="#f50000"/>
-      {/* r=5 */}
-      <P x={3} y={15} c="#f50000"/><P x={6} y={15} c="#e4f500"/><P x={9} y={15} c="#e4f500"/><P x={12} y={15} c="#007ef5"/><P x={15} y={15} c="#007ef5"/><P x={18} y={15} c="#00fa32"/><P x={21} y={15} c="#00fa32"/><P x={24} y={15} c="#00fa32"/><P x={27} y={15} c="#00fa32"/><P x={30} y={15} c="#007ef5"/><P x={33} y={15} c="#007ef5"/><P x={36} y={15} c="#e4f500"/><P x={39} y={15} c="#e4f500"/><P x={42} y={15} c="#f50000"/>
-      {/* r=6 */}
-      <P x={3} y={18} c="#f50000"/><P x={6} y={18} c="#e4f500"/><P x={9} y={18} c="#007ef5"/><P x={12} y={18} c="#007ef5"/><P x={15} y={18} c="#10f500"/><P x={18} y={18} c="#00fa32"/><P x={21} y={18} c="#00fa32"/><P x={24} y={18} c="#00fa32"/><P x={27} y={18} c="#00fa32"/><P x={30} y={18} c="#00fa32"/><P x={33} y={18} c="#007ef5"/><P x={36} y={18} c="#007ef5"/><P x={39} y={18} c="#e4f500"/><P x={42} y={18} c="#f50000"/>
-      {/* r=7 */}
-      <P x={3} y={21} c="#f50000"/><P x={6} y={21} c="#e4f500"/><P x={9} y={21} c="#007ef5"/><P x={12} y={21} c="#00fa32"/><P x={15} y={21} c="#00fa32"/><P x={18} y={21} c="#007ef5"/><P x={21} y={21} c="#00fa32"/><P x={24} y={21} c="#00fa32"/><P x={27} y={21} c="#007ef5"/><P x={30} y={21} c="#00fa32"/><P x={33} y={21} c="#00fa32"/><P x={36} y={21} c="#007ef5"/><P x={39} y={21} c="#e4f500"/><P x={42} y={21} c="#f50000"/>
-      {/* r=8 */}
-      <P x={0} y={24} c="#f50000"/><P x={3} y={24} c="#f50000"/><P x={6} y={24} c="#e4f500"/><P x={9} y={24} c="#007ef5"/><P x={12} y={24} c="#00fa32"/><P x={15} y={24} c="#00fa32"/><P x={18} y={24} c="#00fa32"/><P x={21} y={24} c="#00fa32"/><P x={24} y={24} c="#00fa32"/><P x={27} y={24} c="#00fa32"/><P x={30} y={24} c="#00fa32"/><P x={33} y={24} c="#00fa32"/><P x={36} y={24} c="#007ef5"/><P x={39} y={24} c="#e4f500"/><P x={42} y={24} c="#f50000"/><P x={45} y={24} c="#f50000"/>
-      {/* r=9 */}
-      <P x={0} y={27} c="#f50000"/><P x={3} y={27} c="#e4f500"/><P x={6} y={27} c="#e4f500"/><P x={9} y={27} c="#007ef5"/><P x={12} y={27} c="#007ef5"/><P x={15} y={27} c="#00fa32"/><P x={18} y={27} c="#007ef5"/><P x={21} y={27} c="#00fa32"/><P x={24} y={27} c="#00fa32"/><P x={27} y={27} c="#007ef5"/><P x={30} y={27} c="#00fa32"/><P x={33} y={27} c="#007ef5"/><P x={36} y={27} c="#007ef5"/><P x={39} y={27} c="#e4f500"/><P x={42} y={27} c="#e4f500"/><P x={45} y={27} c="#f50000"/>
-      {/* r=10 */}
-      <P x={0} y={30} c="#f50000"/><P x={3} y={30} c="#e4f500"/><P x={6} y={30} c="#007ef5"/><P x={9} y={30} c="#007ef5"/><P x={12} y={30} c="#00fa32"/><P x={15} y={30} c="#007ef5"/><P x={18} y={30} c="#007ef5"/><P x={21} y={30} c="#007ef5"/><P x={24} y={30} c="#007ef5"/><P x={27} y={30} c="#007ef5"/><P x={30} y={30} c="#007ef5"/><P x={33} y={30} c="#00fa32"/><P x={36} y={30} c="#007ef5"/><P x={39} y={30} c="#007ef5"/><P x={42} y={30} c="#e4f500"/><P x={45} y={30} c="#f50000"/>
-      {/* r=11 */}
-      <P x={0} y={33} c="#f50000"/><P x={3} y={33} c="#e4f500"/><P x={6} y={33} c="#007ef5"/><P x={9} y={33} c="#00fa32"/><P x={12} y={33} c="#00fa32"/><P x={15} y={33} c="#007ef5"/><P x={18} y={33} c="#e4f500"/><P x={21} y={33} c="#e4f500"/><P x={24} y={33} c="#e4f500"/><P x={27} y={33} c="#e4f500"/><P x={30} y={33} c="#007ef5"/><P x={33} y={33} c="#00fa32"/><P x={36} y={33} c="#00fa32"/><P x={39} y={33} c="#007ef5"/><P x={42} y={33} c="#e4f500"/><P x={45} y={33} c="#f50000"/>
-      {/* r=12 */}
-      <P x={0} y={36} c="#f50000"/><P x={3} y={36} c="#e4f500"/><P x={6} y={36} c="#007ef5"/><P x={9} y={36} c="#007ef5"/><P x={12} y={36} c="#007ef5"/><P x={15} y={36} c="#007ef5"/><P x={18} y={36} c="#e4f500"/><P x={21} y={36} c="#f50000"/><P x={24} y={36} c="#f50000"/><P x={27} y={36} c="#e4f500"/><P x={30} y={36} c="#007ef5"/><P x={33} y={36} c="#007ef5"/><P x={36} y={36} c="#007ef5"/><P x={39} y={36} c="#007ef5"/><P x={42} y={36} c="#e4f500"/><P x={45} y={36} c="#f50000"/>
-      {/* r=13 */}
-      <P x={0} y={39} c="#f50000"/><P x={3} y={39} c="#e4f500"/><P x={6} y={39} c="#e4f500"/><P x={9} y={39} c="#e4f500"/><P x={12} y={39} c="#e4f500"/><P x={15} y={39} c="#e4f500"/><P x={18} y={39} c="#e4f500"/><P x={21} y={39} c="#f50000"/><P x={24} y={39} c="#f50000"/><P x={27} y={39} c="#e4f500"/><P x={30} y={39} c="#e4f500"/><P x={33} y={39} c="#e4f500"/><P x={36} y={39} c="#e4f500"/><P x={39} y={39} c="#e4f500"/><P x={42} y={39} c="#e4f500"/><P x={45} y={39} c="#f50000"/>
-      {/* r=14 */}
-      <P x={0} y={42} c="#f50000"/><P x={3} y={42} c="#f50000"/><P x={6} y={42} c="#f50000"/><P x={9} y={42} c="#f50000"/><P x={12} y={42} c="#f50000"/><P x={15} y={42} c="#f50000"/><P x={18} y={42} c="#f50000"/><P x={21} y={42} c="#f50000"/><P x={24} y={42} c="#f50000"/><P x={27} y={42} c="#f50000"/><P x={30} y={42} c="#f50000"/><P x={33} y={42} c="#f50000"/><P x={36} y={42} c="#f50000"/><P x={39} y={42} c="#f50000"/><P x={42} y={42} c="#f50000"/><P x={45} y={42} c="#f50000"/>
-    </I>
-  )
-}
-
 export function IconUndo({ active }) {
   const c = active ? '#fff' : '#888'
   return (
@@ -1000,179 +695,5 @@ export function IconDXF() {
       <line x1="21" y1="18" x2="26" y2="18" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round"/>
       <polygon points="23,15 27,18 23,21" fill="#fbbf24"/>
     </V>
-  )
-}
-
-export function IconSpline({ active }) {
-  return (
-    <I label="SPLINE" active={active}>
-      {/* r=2 */}
-      <P x={12} y={6} c="#eaed45"/><P x={15} y={6} c="#eaed45"/><P x={18} y={6} c="#eaed45"/><P x={21} y={6} c="#eaed45"/><P x={24} y={6} c="#eaed45"/><P x={27} y={6} c="#eaed45"/>
-      <P x={42} y={6} c="#45be19"/>
-      {/* r=3 */}
-      <P x={9} y={9} c="#eaed45"/><P x={12} y={9} c="#45be19"/><P x={15} y={9} c="#45be19"/><P x={18} y={9} c="#45be19"/><P x={21} y={9} c="#45be19"/><P x={24} y={9} c="#45be19"/><P x={27} y={9} c="#45be19"/><P x={30} y={9} c="#eaed45"/><P x={39} y={9} c="#eaed45"/><P x={42} y={9} c="#45be19"/>
-      {/* r=4 */}
-      <P x={3} y={12} c="#eaed45"/><P x={6} y={12} c="#eaed45"/><P x={9} y={12} c="#45be19"/><P x={30} y={12} c="#45be19"/><P x={33} y={12} c="#eaed45"/><P x={39} y={12} c="#45be19"/>
-      {/* r=5 */}
-      <P x={0} y={15} c="#eaed45"/><P x={3} y={15} c="#45be19"/><P x={6} y={15} c="#45be19"/><P x={30} y={15} c="#45be19"/><P x={33} y={15} c="#45be19"/><P x={36} y={15} c="#eaed45"/><P x={39} y={15} c="#45be19"/>
-      {/* r=6 */}
-      <P x={0} y={18} c="#eaed45"/><P x={3} y={18} c="#45be19"/><P x={12} y={18} c="#45be19"/><P x={15} y={18} c="#45be19"/><P x={18} y={18} c="#45be19"/><P x={21} y={18} c="#45be19"/><P x={24} y={18} c="#45be19"/><P x={36} y={18} c="#45be19"/><P x={39} y={18} c="#45be19"/>
-      {/* r=7 */}
-      <P x={3} y={21} c="#eaed45"/><P x={6} y={21} c="#45be19"/><P x={9} y={21} c="#45be19"/><P x={12} y={21} c="#45be19"/><P x={15} y={21} c="#eaed45"/><P x={18} y={21} c="#eaed45"/><P x={21} y={21} c="#eaed45"/><P x={24} y={21} c="#45be19"/><P x={27} y={21} c="#45be19"/>
-      {/* r=8 */}
-      <P x={6} y={24} c="#eaed45"/><P x={9} y={24} c="#eaed45"/><P x={12} y={24} c="#eaed45"/><P x={24} y={24} c="#eaed45"/><P x={27} y={24} c="#45be19"/><P x={30} y={24} c="#45be19"/><P x={33} y={24} c="#45be19"/>
-      {/* r=9 */}
-      <P x={24} y={27} c="#eaed45"/><P x={27} y={27} c="#eaed45"/><P x={30} y={27} c="#eaed45"/><P x={33} y={27} c="#45be19"/><P x={36} y={27} c="#45be19"/>
-      {/* r=10 */}
-      <P x={3} y={30} c="#eaed45"/><P x={6} y={30} c="#45be19"/><P x={9} y={30} c="#45be19"/><P x={12} y={30} c="#45be19"/><P x={15} y={30} c="#eaed45"/><P x={33} y={30} c="#eaed45"/><P x={36} y={30} c="#45be19"/>
-      {/* r=11 */}
-      <P x={0} y={33} c="#000000"/><P x={3} y={33} c="#45be19"/><P x={6} y={33} c="#eaed45"/><P x={9} y={33} c="#eaed45"/><P x={12} y={33} c="#45be19"/><P x={15} y={33} c="#eaed45"/><P x={33} y={33} c="#eaed45"/><P x={36} y={33} c="#45be19"/>
-      {/* r=12 */}
-      <P x={0} y={36} c="#2ec230"/><P x={3} y={36} c="#2ec230"/><P x={6} y={36} c="#2ec230"/><P x={12} y={36} c="#45be19"/><P x={15} y={36} c="#45be19"/><P x={27} y={36} c="#eaed45"/><P x={30} y={36} c="#eaed45"/><P x={33} y={36} c="#eaed45"/><P x={36} y={36} c="#45be19"/>
-      {/* r=13 */}
-      <P x={0} y={39} c="#2ec230"/><P x={3} y={39} c="#2ec230"/><P x={6} y={39} c="#000000"/><P x={12} y={39} c="#45be19"/><P x={15} y={39} c="#45be19"/><P x={18} y={39} c="#eaed45"/><P x={21} y={39} c="#eaed45"/><P x={24} y={39} c="#eaed45"/><P x={27} y={39} c="#45be19"/><P x={30} y={39} c="#45be19"/><P x={33} y={39} c="#45be19"/>
-      {/* r=14 */}
-      <P x={12} y={42} c="#45be19"/><P x={15} y={42} c="#45be19"/><P x={18} y={42} c="#45be19"/><P x={21} y={42} c="#45be19"/><P x={24} y={42} c="#45be19"/>
-    </I>
-  )
-}
-
-// ── TEXT (pixel art) ──────────────────────────────────────────────────────────
-// x=c*3, y=r*3 from original raw pixel array
-export function IconText({ active }) {
-  return (
-    <I label="TEXT" active={active}>
-      {/* r=2 */}
-      <P x={9} y={6} c="#f7f255"/><P x={12} y={6} c="#f7f255"/><P x={15} y={6} c="#f7f255"/><P x={18} y={6} c="#f7f255"/><P x={21} y={6} c="#f7f255"/><P x={24} y={6} c="#f7f255"/><P x={27} y={6} c="#f7f255"/><P x={30} y={6} c="#f7f255"/><P x={33} y={6} c="#f7f255"/>
-      {/* r=3 */}
-      <P x={9} y={9} c="#f7f255"/><P x={12} y={9} c="#f7f255"/><P x={15} y={9} c="#f7f255"/><P x={18} y={9} c="#f7f255"/><P x={21} y={9} c="#f7f255"/><P x={24} y={9} c="#f7f255"/><P x={27} y={9} c="#f7f255"/><P x={30} y={9} c="#f7f255"/><P x={33} y={9} c="#f7f255"/><P x={36} y={9} c="#f75555"/>
-      {/* r=4 */}
-      <P x={9} y={12} c="#f7f255"/><P x={12} y={12} c="#f7f255"/><P x={15} y={12} c="#f7f255"/><P x={18} y={12} c="#f7f255"/><P x={21} y={12} c="#f7f255"/><P x={24} y={12} c="#f7f255"/><P x={27} y={12} c="#f7f255"/><P x={30} y={12} c="#f7f255"/><P x={33} y={12} c="#f7f255"/><P x={36} y={12} c="#f75555"/>
-      {/* r=5 */}
-      <P x={12} y={15} c="#f75555"/><P x={15} y={15} c="#f75555"/><P x={18} y={15} c="#f7f255"/><P x={21} y={15} c="#f7f255"/><P x={24} y={15} c="#f7f255"/><P x={27} y={15} c="#f75555"/><P x={30} y={15} c="#f75555"/><P x={33} y={15} c="#f75555"/><P x={36} y={15} c="#f75555"/>
-      {/* r=6 */}
-      <P x={18} y={18} c="#f7f255"/><P x={21} y={18} c="#f7f255"/><P x={24} y={18} c="#f7f255"/><P x={27} y={18} c="#f75555"/>
-      {/* r=7 */}
-      <P x={18} y={21} c="#f7f255"/><P x={21} y={21} c="#f7f255"/><P x={24} y={21} c="#f7f255"/><P x={27} y={21} c="#f75555"/>
-      {/* r=8 */}
-      <P x={18} y={24} c="#f7f255"/><P x={21} y={24} c="#f7f255"/><P x={24} y={24} c="#f7f255"/><P x={27} y={24} c="#f75555"/>
-      {/* r=9 */}
-      <P x={18} y={27} c="#f7f255"/><P x={21} y={27} c="#f7f255"/><P x={24} y={27} c="#f7f255"/><P x={27} y={27} c="#f75555"/>
-      {/* r=10 */}
-      <P x={18} y={30} c="#f7f255"/><P x={21} y={30} c="#f7f255"/><P x={24} y={30} c="#f7f255"/><P x={27} y={30} c="#f75555"/>
-      {/* r=11 */}
-      <P x={18} y={33} c="#f7f255"/><P x={21} y={33} c="#f7f255"/><P x={24} y={33} c="#f7f255"/><P x={27} y={33} c="#f75555"/>
-      {/* r=12 */}
-      <P x={18} y={36} c="#f7f255"/><P x={21} y={36} c="#f7f255"/><P x={24} y={36} c="#f7f255"/><P x={27} y={36} c="#f75555"/>
-      {/* r=13 */}
-      <P x={18} y={39} c="#f7f255"/><P x={21} y={39} c="#f7f255"/><P x={24} y={39} c="#f7f255"/><P x={27} y={39} c="#f75555"/>
-      {/* r=14 */}
-      <P x={21} y={42} c="#f75555"/><P x={24} y={42} c="#f75555"/><P x={27} y={42} c="#f75555"/>
-    </I>
-  )
-}
-
-// ── SELECT (pixel art) ────────────────────────────────────────────────────────
-// x=c*3, y=r*3 from original raw pixel array
-export function IconSelect({ active }) {
-  return (
-    <I label="SELECT" active={active}>
-      {/* r=1 */}
-      <P x={3} y={3} c="#1c00f0"/><P x={6} y={3} c="#f03000"/><P x={9} y={3} c="#f03000"/><P x={12} y={3} c="#f03000"/><P x={15} y={3} c="#f03000"/><P x={18} y={3} c="#f03000"/><P x={21} y={3} c="#1c00f0"/><P x={24} y={3} c="#f03000"/><P x={27} y={3} c="#f03000"/><P x={30} y={3} c="#f03000"/><P x={33} y={3} c="#f03000"/><P x={36} y={3} c="#f03000"/><P x={39} y={3} c="#f03000"/><P x={42} y={3} c="#1c00f0"/>
-      {/* r=2 */}
-      <P x={3} y={6} c="#f03000"/><P x={42} y={6} c="#f03000"/>
-      {/* r=3 */}
-      <P x={3} y={9} c="#f03000"/><P x={42} y={9} c="#f03000"/>
-      {/* r=4 */}
-      <P x={3} y={12} c="#f03000"/><P x={42} y={12} c="#f03000"/>
-      {/* r=5 */}
-      <P x={3} y={15} c="#f03000"/><P x={18} y={15} c="#00fa32"/><P x={21} y={15} c="#00fa32"/><P x={24} y={15} c="#00fa32"/><P x={27} y={15} c="#00fa32"/><P x={42} y={15} c="#f03000"/>
-      {/* r=6 */}
-      <P x={3} y={18} c="#f03000"/><P x={15} y={18} c="#00fa32"/><P x={18} y={18} c="#00fa32"/><P x={21} y={18} c="#00fa32"/><P x={24} y={18} c="#00fa32"/><P x={27} y={18} c="#00fa32"/><P x={30} y={18} c="#00fa32"/><P x={42} y={18} c="#f03000"/>
-      {/* r=7 */}
-      <P x={3} y={21} c="#fa0000"/><P x={12} y={21} c="#00fa32"/><P x={15} y={21} c="#00fa32"/><P x={21} y={21} c="#00fa32"/><P x={24} y={21} c="#00fa32"/><P x={30} y={21} c="#00fa32"/><P x={33} y={21} c="#00fa32"/><P x={42} y={21} c="#fa0000"/>
-      {/* r=8 */}
-      <P x={3} y={24} c="#1c00f0"/><P x={12} y={24} c="#00fa32"/><P x={15} y={24} c="#00fa32"/><P x={18} y={24} c="#00fa32"/><P x={21} y={24} c="#00fa32"/><P x={24} y={24} c="#00fa32"/><P x={27} y={24} c="#00fa32"/><P x={30} y={24} c="#00fa32"/><P x={33} y={24} c="#00fa32"/><P x={42} y={24} c="#1c00f0"/>
-      {/* r=9 */}
-      <P x={3} y={27} c="#f03000"/><P x={15} y={27} c="#00fa32"/><P x={21} y={27} c="#00fa32"/><P x={24} y={27} c="#00fa32"/><P x={30} y={27} c="#00fa32"/><P x={42} y={27} c="#f03000"/>
-      {/* r=10 */}
-      <P x={3} y={30} c="#f03000"/><P x={12} y={30} c="#00fa32"/><P x={33} y={30} c="#00fa32"/><P x={42} y={30} c="#f03000"/>
-      {/* r=11 */}
-      <P x={3} y={33} c="#f03000"/><P x={9} y={33} c="#00fa32"/><P x={12} y={33} c="#00fa32"/><P x={33} y={33} c="#00fa32"/><P x={36} y={33} c="#00fa32"/><P x={42} y={33} c="#f03000"/>
-      {/* r=12 */}
-      <P x={3} y={36} c="#f03000"/><P x={42} y={36} c="#f03000"/>
-      {/* r=13 */}
-      <P x={3} y={39} c="#f03000"/><P x={42} y={39} c="#f03000"/>
-      {/* r=14 */}
-      <P x={3} y={42} c="#1c00f0"/><P x={6} y={42} c="#f03000"/><P x={9} y={42} c="#f03000"/><P x={12} y={42} c="#f03000"/><P x={15} y={42} c="#f03000"/><P x={18} y={42} c="#f03000"/><P x={21} y={42} c="#1c00f0"/><P x={24} y={42} c="#f03000"/><P x={27} y={42} c="#f03000"/><P x={30} y={42} c="#f03000"/><P x={33} y={42} c="#f03000"/><P x={36} y={42} c="#f03000"/><P x={39} y={42} c="#f03000"/><P x={42} y={42} c="#1c00f0"/>
-    </I>
-  )
-}
-
-export function IconDim({ active }) {
-  return (
-    <I label="DIM" active={active}>
-      {/* r=1 */}
-      <P x={36} y={3} c="#f50000"/><P x={39} y={3} c="#f50000"/><P x={42} y={3} c="#f50000"/>
-      {/* r=2 */}
-      <P x={39} y={6} c="#f50000"/><P x={42} y={6} c="#f50000"/>
-      {/* r=3 */}
-      <P x={36} y={9} c="#f50000"/><P x={42} y={9} c="#f50000"/>
-      {/* r=4 */}
-      <P x={33} y={12} c="#f50000"/>
-      {/* r=5 */}
-      <P x={30} y={15} c="#f50000"/>
-      {/* r=6 */}
-      <P x={27} y={18} c="#f50000"/>
-      {/* r=7 */}
-      <P x={24} y={21} c="#f50000"/>
-      {/* r=8 */}
-      <P x={21} y={24} c="#f50000"/>
-      {/* r=9 */}
-      <P x={18} y={27} c="#f50000"/>
-      {/* r=10 */}
-      <P x={15} y={30} c="#f50000"/>
-      {/* r=11 */}
-      <P x={12} y={33} c="#f50000"/>
-      {/* r=12 */}
-      <P x={3} y={36} c="#f50000"/><P x={9} y={36} c="#f50000"/>
-      {/* r=13 */}
-      <P x={3} y={39} c="#f50000"/><P x={6} y={39} c="#f50000"/>
-      {/* r=14 */}
-      <P x={3} y={42} c="#f50000"/><P x={6} y={42} c="#f50000"/><P x={9} y={42} c="#f50000"/>
-    </I>
-  )
-}
-
-// ── AXIS (revolve axis) ─────────────────────────────────────────────────────
-// x=c*3, y=r*3 from original raw pixel array
-export function IconAxis({ active }) {
-  return (
-    <I label="REV AXIS" active={active}>
-      {/* r=2 */}
-      <P x={18} y={6} c="#000000"/><P x={21} y={6} c="#000000"/><P x={24} y={6} c="#000000"/><P x={27} y={6} c="#000000"/><P x={36} y={6} c="#000000"/>
-      {/* r=3 */}
-      <P x={15} y={9} c="#000000"/><P x={18} y={9} c="#ff0000"/><P x={21} y={9} c="#ff0000"/><P x={24} y={9} c="#ff0000"/><P x={27} y={9} c="#ff0000"/><P x={30} y={9} c="#000000"/><P x={33} y={9} c="#000000"/><P x={36} y={9} c="#ff0000"/><P x={39} y={9} c="#000000"/>
-      {/* r=4 */}
-      <P x={12} y={12} c="#000000"/><P x={15} y={12} c="#ff0000"/><P x={18} y={12} c="#000000"/><P x={21} y={12} c="#000000"/><P x={24} y={12} c="#000000"/><P x={27} y={12} c="#000000"/><P x={30} y={12} c="#ff0000"/><P x={33} y={12} c="#000000"/><P x={36} y={12} c="#ff0000"/><P x={39} y={12} c="#000000"/>
-      {/* r=5 */}
-      <P x={9} y={15} c="#000000"/><P x={12} y={15} c="#ff0000"/><P x={15} y={15} c="#000000"/><P x={24} y={15} c="#000000"/><P x={27} y={15} c="#000000"/><P x={30} y={15} c="#000000"/><P x={33} y={15} c="#ff0000"/><P x={36} y={15} c="#ff0000"/><P x={39} y={15} c="#000000"/>
-      {/* r=6 */}
-      <P x={6} y={18} c="#000000"/><P x={9} y={18} c="#ff0000"/><P x={12} y={18} c="#000000"/><P x={24} y={18} c="#000000"/><P x={27} y={18} c="#ff0000"/><P x={30} y={18} c="#ff0000"/><P x={33} y={18} c="#ff0000"/><P x={36} y={18} c="#ff0000"/><P x={39} y={18} c="#000000"/><P x={42} y={18} c="#000000"/><P x={45} y={18} c="#000000"/>
-      {/* r=7 */}
-      <P x={6} y={21} c="#000000"/><P x={9} y={21} c="#ff0000"/><P x={12} y={21} c="#000000"/><P x={27} y={21} c="#000000"/><P x={30} y={21} c="#000000"/><P x={33} y={21} c="#000000"/><P x={36} y={21} c="#000000"/>
-      {/* r=8 */}
-      <P x={0} y={24} c="#00ff00"/><P x={3} y={24} c="#00ff00"/><P x={6} y={24} c="#000000"/><P x={9} y={24} c="#ff0000"/><P x={12} y={24} c="#000000"/><P x={15} y={24} c="#00ff00"/><P x={18} y={24} c="#00ff00"/><P x={24} y={24} c="#00ff00"/><P x={27} y={24} c="#00ff00"/><P x={33} y={24} c="#00ff00"/><P x={36} y={24} c="#00ff00"/><P x={42} y={24} c="#00ff00"/><P x={45} y={24} c="#00ff00"/>
-      {/* r=9 */}
-      <P x={6} y={27} c="#000000"/><P x={9} y={27} c="#ff0000"/><P x={12} y={27} c="#000000"/><P x={33} y={27} c="#000000"/><P x={36} y={27} c="#000000"/>
-      {/* r=10 */}
-      <P x={9} y={30} c="#000000"/><P x={12} y={30} c="#ff0000"/><P x={15} y={30} c="#000000"/><P x={30} y={30} c="#000000"/><P x={33} y={30} c="#ff0000"/><P x={36} y={30} c="#000000"/>
-      {/* r=11 */}
-      <P x={12} y={33} c="#000000"/><P x={15} y={33} c="#ff0000"/><P x={18} y={33} c="#000000"/><P x={21} y={33} c="#000000"/><P x={24} y={33} c="#000000"/><P x={27} y={33} c="#000000"/><P x={30} y={33} c="#ff0000"/><P x={33} y={33} c="#000000"/>
-      {/* r=12 */}
-      <P x={15} y={36} c="#000000"/><P x={18} y={36} c="#ff0000"/><P x={21} y={36} c="#ff0000"/><P x={24} y={36} c="#ff0000"/><P x={27} y={36} c="#ff0000"/><P x={30} y={36} c="#000000"/>
-      {/* r=13 */}
-      <P x={18} y={39} c="#000000"/><P x={21} y={39} c="#000000"/><P x={24} y={39} c="#000000"/><P x={27} y={39} c="#000000"/>
-    </I>
   )
 }

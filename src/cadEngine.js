@@ -313,3 +313,5 @@ class CadEngine {
 
 // Singleton — one worker for the whole app
 export const cadEngine = new CadEngine()
+// Dev only: a handle for profiling / debugging from the browser console.
+if (import.meta.env.DEV) window.__cadEngine = cadEngine

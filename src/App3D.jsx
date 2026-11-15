@@ -9049,6 +9049,12 @@ const App3D = forwardRef(function App3D(props, ref) {
   function mirrorSourceTransform(mirrorFeat, sourceSolid) {
     return 'sourceTransform' in mirrorFeat ? mirrorFeat.sourceTransform : sourceSolid.transform
   }
+  // The source's stored shape can stand in for a cold rebuild only when it sits
+  // where this mirror expects it: the mirror's snapshotted source move equals the
+  // source's current one (a source moved AFTER mirroring is mirrored as it was).
+  function mirrorCanReuseSource(mirrorFeat, sourceSolid) {
+    return JSON.stringify(mirrorSourceTransform(mirrorFeat, sourceSolid) ?? null) === JSON.stringify(sourceSolid.transform ?? null)
+  }
 
   async function rebuildDependentMirrors(solid) {
     const dependents = features.filter(f => f.operation === 'mirror' && f.sourceSolidId === solid.id)
@@ -9059,7 +9065,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     const ops = buildSolidOpsForWorker(solid, features)
     for (const mirrorFeat of dependents) {
       try {
-        let meshData = await cadEngine.mirrorShape({ solidId: mirrorFeat.solidId, sourceSolidId: solid.id, base, ops, sourceTransform: mirrorSourceTransform(mirrorFeat, solid), plane: mirrorFeat.mirrorPlane })
+        let meshData = await cadEngine.mirrorShape({ solidId: mirrorFeat.solidId, sourceSolidId: solid.id, base, ops, sourceTransform: mirrorSourceTransform(mirrorFeat, solid), plane: mirrorFeat.mirrorPlane, useStoredSource: mirrorCanReuseSource(mirrorFeat, solid) })
         // The mirror's own Move/Rotate, if it has one (as rebuildFeatureSolid does).
         if (mirrorFeat.transform) meshData = await cadEngine.transformShape({ solidId: mirrorFeat.solidId, position: mirrorFeat.transform.position, rotation: mirrorFeat.transform.rotation })
         const group = replicadMeshToThree(meshData, mirrorFeat.color, mirrorFeat.solidId)
@@ -9122,7 +9128,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (!sourceSolid) throw new Error('Mirror source solid not found')
       const base = buildBaseWorkerParams(sourceSolid)
       const ops = buildSolidOpsForWorker(sourceSolid, feats)
-      let meshData = await cadEngine.mirrorShape({ solidId: feat.solidId, sourceSolidId: sourceSolid.id, base, ops, sourceTransform: mirrorSourceTransform(feat, sourceSolid), plane: feat.mirrorPlane })
+      let meshData = await cadEngine.mirrorShape({ solidId: feat.solidId, sourceSolidId: sourceSolid.id, base, ops, sourceTransform: mirrorSourceTransform(feat, sourceSolid), plane: feat.mirrorPlane, useStoredSource: mirrorCanReuseSource(feat, sourceSolid) })
       // A moved/copied mirror result — mirrorShape bypasses rebuildSolidChain
       // entirely (it's a special case right here, not routed through it), so
       // its own baked-transform bake-in has to happen right after, same as

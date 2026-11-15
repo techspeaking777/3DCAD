@@ -35,8 +35,10 @@ function ownProblems(r) {
     const flat = b.faceTypes?.PLANE || 0
     if (flat > 60 && flat > b.faces * 0.8) p.push(['amber', `${b.name}: ${flat} flat faces (facets?)`])
   }
+  // 'slow step' entries are timings (one heavy step over 1 s), not fallbacks —
+  // they're listed in the row's detail, not as problems.
   const kinds = {}
-  for (const d of r.fallbacks || []) kinds[d.kind] = (kinds[d.kind] || 0) + 1
+  for (const d of r.fallbacks || []) if (d.kind !== 'slow step') kinds[d.kind] = (kinds[d.kind] || 0) + 1
   for (const [k, n] of Object.entries(kinds)) p.push(['amber', `fallback: ${k}${n > 1 ? ' ×' + n : ''}`])
   if (r.totalMs > SLOW_MS) p.push(['amber', `slow: ${(r.totalMs / 1000).toFixed(1)} s`])
   return p
@@ -66,7 +68,8 @@ function vsBaseline(r, b) {
   }
   if (r.totalMs > 2 * b.totalMs && r.totalMs > 1000) out.push(['amber', `slower: ${(b.totalMs / 1000).toFixed(1)} → ${(r.totalMs / 1000).toFixed(1)} s`])
   const kindsThen = new Set((b.fallbacks || []).map(d => d.kind))
-  for (const k of new Set((r.fallbacks || []).map(d => d.kind))) if (!kindsThen.has(k)) out.push(['amber', `new fallback: ${k}`])
+  for (const k of new Set((r.fallbacks || []).map(d => d.kind))) if (k !== 'slow step' && !kindsThen.has(k)) out.push(['amber', `new fallback: ${k}`])
+  if (b.totalMs > 1.5 * r.totalMs && b.totalMs > 1000) out.push(['green', `faster: ${(b.totalMs / 1000).toFixed(1)} → ${(r.totalMs / 1000).toFixed(1)} s`])
   return out
 }
 
@@ -110,6 +113,15 @@ export default function ReplayPanel({ onReplay, onClose }) {
       .catch(() => setBaselineNote('that baseline file could not be read'))
   }
 
+  async function runOne(f) {
+    setRunning(f.name)
+    let rep
+    try { rep = await onReplay(await f.load()) }
+    catch (err) { rep = { error: err.message || String(err) } }
+    setResults(prev => ({ ...prev, [f.name]: rep }))
+    setRunning(null)
+  }
+
   async function runAll() {
     stopRef.current = false
     setResults({})
@@ -124,6 +136,9 @@ export default function ReplayPanel({ onReplay, onClose }) {
     }
     setRunning(null)
   }
+
+  // Dev only: read the results / set a baseline from the browser console.
+  if (import.meta.env.DEV) { window.__replayResults = results; window.__setReplayBaseline = (b, note = 'console') => { setBaseline(b.results || b); setBaselineNote(note) } }
 
   const done = Object.keys(results).length
   const totals = { red: 0, amber: 0, reg: 0 }
@@ -181,7 +196,10 @@ export default function ReplayPanel({ onReplay, onClose }) {
               <tr key={f.name} onClick={() => r && setOpen(open === f.name ? null : f.name)}
                 style={{ cursor: r ? 'pointer' : 'default', verticalAlign: 'top', borderBottom: '1px solid #2a2050',
                   background: running === f.name ? '#1d1450' : 'transparent' }}>
-                <td style={{ padding: '4px 6px', color: '#fff' }}>{r ? (open === f.name ? '▾ ' : '▸ ') : ''}{f.name}</td>
+                <td style={{ padding: '4px 6px', color: '#fff' }}>
+                  <button title='Replay just this project' disabled={!!running} onClick={e => { e.stopPropagation(); runOne(f) }}
+                    style={{ background: 'none', border: 'none', color: '#53D3E4', cursor: 'pointer', padding: '0 4px 0 0', fontFamily: 'monospace' }}>▶</button>
+                  {r ? (open === f.name ? '▾ ' : '▸ ') : ''}{f.name}</td>
                 <td style={{ padding: '4px 6px' }}>{r?.featureCount ?? ''}</td>
                 <td style={{ padding: '4px 6px' }}>{r?.bodies?.length ?? ''}</td>
                 <td style={{ padding: '4px 6px' }}>{r?.totalMs != null ? (r.totalMs / 1000).toFixed(1) + ' s' : running === f.name ? '…' : ''}</td>
@@ -197,7 +215,7 @@ export default function ReplayPanel({ onReplay, onClose }) {
                     {(r.bodies || []).map((b, i) => <div key={'b' + i} style={{ color: '#999' }}>
                       ◦ {b.name}: {b.error ? 'could not measure' : `${b.faces} faces · ${b.edges} edges · ${Math.round(b.volume).toLocaleString()} mm³${b.valid ? '' : ' · INVALID'}`}
                     </div>)}
-                    {(r.fallbacks || []).map((d, i) => <div key={'d' + i} style={{ color: C.amber }}>↺ {d.kind}{d.detail ? ` (${d.detail})` : ''}</div>)}
+                    {(r.fallbacks || []).map((d, i) => <div key={'d' + i} style={{ color: d.kind === 'slow step' ? C.dim : C.amber }}>{d.kind === 'slow step' ? '⏱' : '↺'} {d.kind}{d.detail ? ` (${d.detail})` : ''}</div>)}
                   </td>
                 </tr>
               ),

@@ -10,6 +10,10 @@ const SCALE = 2
 // to use a rougher or retry method. Read and cleared by 'takeDiagnostics'.
 const diagLog = []
 function diag(kind, detail = '') { if (diagLog.length < 500) diagLog.push({ kind, detail: String(detail) }) }
+// Any heavy step taking over a second is logged too, so the harness shows WHICH
+// step made a project slow (see the timed wrappers below).
+function slowStep(label, t0) { const ms = performance.now() - t0; if (ms > 1000) diag('slow step', label + ' ' + Math.round(ms) + ' ms') }
+function timed(label, fn) { return (...args) => { const t0 = performance.now(); try { return fn(...args) } finally { slowStep(label, t0) } } }
 // Tolerance (mm) for matching a picked screen point to the actual OCC edge —
 // generous enough for mesh-tessellation slop, tight enough to avoid grabbing
 // a neighboring edge. Shared by the fillet3d handler and STL export's fallback replay.
@@ -20,7 +24,8 @@ const EDGE_PICK_TOL = 0.75
 // accepts, just picking which OCC call to make based on the op's own
 // `operation` field (defaults to 'fillet' for ops saved before chamfer
 // support existed).
-function applyFilletOrChamfer(shape, op) {
+const applyFilletOrChamfer = timed('fillet/chamfer', applyFilletOrChamferUntimed)
+function applyFilletOrChamferUntimed(shape, op) {
   const edgeFilter = e => e.either(op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt)))
   return op.operation === 'chamfer' ? shape.chamfer(op.radius, edgeFilter) : shape.fillet(op.radius, edgeFilter)
 }
@@ -53,7 +58,8 @@ const FUSE_FUZZY_TOL = 0.05
 // Fuse two shapes with a fuzzy tolerance so near-coincident (but not exactly
 // touching) faces still merge into one Solid instead of silently degrading to
 // a Compound of two disjoint bodies — see FUSE_FUZZY_TOL above.
-function fuseTolerant(a, b) {
+const fuseTolerant = timed('join (fuse)', fuseTolerantUntimed)
+function fuseTolerantUntimed(a, b) {
   const [r, gc] = localGC()
   const oc = getOC()
   const progress = r(new oc.Message_ProgressRange_1())
@@ -123,7 +129,8 @@ function ocVolume(wrapped) {
 }
 
 // How much of `a` the tool `b` overlaps (mm³), judged at a given fuzzy value.
-function overlapVolume(a, b, fuzzy) {
+const overlapVolume = timed('overlap check', overlapVolumeUntimed)
+function overlapVolumeUntimed(a, b, fuzzy) {
   const [r, gc] = localGC()
   const oc = getOC()
   const progress = r(new oc.Message_ProgressRange_1())
@@ -151,7 +158,8 @@ const CUT_RETRY_FUZZY_TOL = 0.5
 // tools that overlap each other) instead of one full boolean per shape. If
 // that combined cut fails, the tools are cut one at a time as before, so a
 // batch is never worse than the old way.
-function cutTolerant(a, b) {
+const cutTolerant = timed('cut', cutTolerantUntimed)
+function cutTolerantUntimed(a, b) {
   if (Array.isArray(b)) {
     if (b.length === 1) return cutTolerant(a, b[0])
     try {
@@ -168,7 +176,13 @@ function cutTolerant(a, b) {
   try {
     const vA = ocVolume(a.wrapped)
     const removed = vA - ocVolume(result.wrapped)
-    if (vA > 0 && removed < 0.02 * vA) {
+    // A retry needs removed < ¼ of the overlap, and the overlap can't exceed the
+    // cutter's (or the target's) own volume — so a cut that already removed ¼ of
+    // the smaller of the two can't be a silent no-op, and the (slow, ~2 s on a
+    // detailed body) overlap measurements below are skipped. An ordinary hole
+    // removes about its own volume; this used to cost a shelled mouse ~5 s a hole.
+    const vB = ocVolume(b.wrapped)
+    if (vA > 0 && removed < 0.02 * vA && removed < 0.25 * Math.min(vA, vB)) {
       // Two retries, each judged against the overlap measured at ITS OWN
       // tolerance: looser (0.5 mm — a cutter just touching a wall), then
       // exact (0 — some shapes make every fuzzy boolean see NO overlap at
@@ -176,7 +190,11 @@ function cutTolerant(a, b) {
       // and 0.5 mm but 13,063 mm³ exactly, and silently cut nothing).
       for (const fuzzy of [CUT_RETRY_FUZZY_TOL, 0]) {
         const expected = overlapVolume(a, b, fuzzy)
-        if (!(removed < 0.25 * expected && expected - removed > Math.max(0.001 * vA, 1))) continue
+        const minGap = Math.max(0.001 * vA, 1)
+        // This tolerance sees real overlap and the cut removed it — the cut is fine;
+        // the exact (0) measurement only matters when a fuzzy one sees NO overlap.
+        if (expected > minGap && removed >= 0.25 * expected) break
+        if (!(removed < 0.25 * expected && expected - removed > minGap)) continue
         try {
           const retry = cutWithFuzzy(a, b, fuzzy)
           const removed2 = vA - ocVolume(retry.wrapped)
@@ -1859,7 +1877,15 @@ self.onmessage = async function(e) {
       // an earlier, awaited replay step for a project reload (see
       // rebuildProjectFromFeatures' ordering guarantee).
       let base
-      if (params.base) {
+      // useStoredSource: the app knows the source body was JUST built (a project
+      // replay, or a dependent-mirror rebuild right after the source changed)
+      // and still sits where the mirror expects it — reuse that finished shape
+      // (its cuts, fillets and move already applied) instead of rebuilding the
+      // source from its sketch, which doubled the time of every mirror on load.
+      const stored = params.useStoredSource ? shapeStore.get(params.sourceSolidId) : null
+      if (stored) {
+        base = stored.clone()   // mirror() frees its input — never the cached shape itself
+      } else if (params.base) {
         base = await buildBase(params.base)
         // A plain extrude's own inner-loop holes (profilePts.holes — see
         // resolveNestedHoles in extrudeMath.js) are punched by App3D.jsx's
@@ -1897,7 +1923,7 @@ self.onmessage = async function(e) {
         // trap, same fix as transformShape's Copy branch: work on a clone.
         base = base.clone()
       }
-      for (const op of params.ops || []) {
+      for (const op of stored ? [] : params.ops || []) {
         if (op.type === 'fillet') {
           base = applyFilletOrChamfer(base, op)
         } else if (op.type === 'shell') {
@@ -1912,7 +1938,7 @@ self.onmessage = async function(e) {
       // a full rebuild (rotate about the pristine shape's own centre, then
       // translate). Without this a moved body mirrored as if it had never
       // moved. A source read from shapeStore already has its moves baked in.
-      if (params.base && params.sourceTransform) {
+      if (!stored && params.base && params.sourceTransform) {
         const { position, rotation } = params.sourceTransform
         if (rotation) base = base.rotate(rotation.angleDeg, rotation.pivot ?? base.boundingBox.center, rotation.axis)
         if (position && position.some(v => v)) base = base.translate(position)
@@ -1939,6 +1965,7 @@ self.onmessage = async function(e) {
       for (const m of params.members) {
         let s = shapeStore.get(m.solidId)
         if (!s) {
+          const tMember = performance.now()
           s = await buildBase(m.base)
           for (const op of m.ops || []) {
             if (op.type === 'fillet') {
@@ -1949,6 +1976,7 @@ self.onmessage = async function(e) {
               s = cutTolerant(s, buildCutShape(clampCutDepth(op.params, m.base)))
             }
           }
+          slowStep('join member rebuild', tMember)
         }
         shapes.push(s)
       }
@@ -1957,17 +1985,20 @@ self.onmessage = async function(e) {
         // First member is the target; every later one is a hole body cut out of it.
         shape = shapes[0]
         for (let i = 1; i < shapes.length; i++) {
-          if (overlapVolume(shape, shapes[i], FUSE_FUZZY_TOL) < 1e-6) {
-            throw new Error('A hole body doesn’t overlap the body it’s cutting — move it so it passes into the solid.')
-          }
+          // Cut first; the (slow) overlap measurement only runs when the cut fails
+          // or removes nothing, to pick the right message. Measuring it up front
+          // cost ~2.5 s per hole body on every rebuild.
+          const noOverlap = 'A hole body doesn’t overlap the body it’s cutting — move it so it passes into the solid.'
+          const target = shape
           const before = ocVolume(shape.wrapped)
           try {
             shape = cutTolerant(shape, shapes[i])
           } catch (err) {
+            if (overlapVolume(target, shapes[i], FUSE_FUZZY_TOL) < 1e-6) throw new Error(noOverlap, { cause: err })
             throw new Error('The cut left the body in separate pieces or couldn’t be resolved — try nudging the hole body so its faces aren’t exactly flush with the solid.', { cause: err })
           }
           if (before - ocVolume(shape.wrapped) < 1e-6) {
-            throw new Error('The hole body didn’t remove anything — move it so it passes into the solid.')
+            throw new Error(overlapVolume(target, shapes[i], FUSE_FUZZY_TOL) < 1e-6 ? noOverlap : 'The hole body didn’t remove anything — move it so it passes into the solid.')
           }
         }
         {

@@ -19,6 +19,52 @@ import { sampleSpline } from './splineMath.js'
 
 const CLOSE_TOL = 4   // world units — endpoints within this distance are "connected"
 
+// A POLYLINE spline (Trim output, DXF import) has no Catmull-Rom control points,
+// so its solid used to be its points joined by straight lines — dozens of thin
+// flat faces (seam lines, hard to fillet). Its smooth stretches are now sent as
+// spline curve segments THROUGH every point (the same shape, one smooth edge
+// each); a sharp corner (> POLY_CORNER_DEG) splits it, and a straight stretch
+// stays plain lines (a DXF rectangle is still four lines).
+// points: the piece's points in order, both ends included. Returns [{i0, i1}].
+const POLY_CORNER_DEG = 30
+export function polylineCurveRuns(points) {
+  const n = points.length
+  if (n < 3) return []
+  const cosMax = Math.cos(POLY_CORNER_DEG * Math.PI / 180)
+  const breaks = [0]
+  for (let i = 1; i < n - 1; i++) {
+    const ax = points[i].x - points[i-1].x, ay = points[i].y - points[i-1].y
+    const bx = points[i+1].x - points[i].x, by = points[i+1].y - points[i].y
+    const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by)
+    if (la < 0.05 || lb < 0.05 || (ax*bx + ay*by) / (la*lb) < cosMax) breaks.push(i)
+  }
+  breaks.push(n - 1)
+  const runs = []
+  for (let k = 0; k < breaks.length - 1; k++) {
+    const i0 = breaks[k], i1 = breaks[k+1]
+    if (i1 - i0 < 2) continue
+    const a = points[i0], b = points[i1], L = Math.hypot(b.x - a.x, b.y - a.y)
+    let off = 0
+    for (let i = i0 + 1; i < i1; i++) {
+      const q = points[i]
+      off = Math.max(off, L > 1e-9 ? Math.abs((b.x - a.x) * (a.y - q.y) - (a.x - q.x) * (b.y - a.y)) / L : Math.hypot(q.x - a.x, q.y - a.y))
+    }
+    if (off > 0.05) runs.push({ i0, i1 })
+  }
+  return runs
+}
+
+// Adds polylineCurveRuns' smooth stretches of one polyline-spline piece to
+// pts.curveSegments. full = the piece's points (entry … exit, exit included),
+// whose first point sits at pts[startIdx].
+function pushPolylineRuns(pts, full, startIdx) {
+  for (const { i0, i1 } of polylineCurveRuns(full)) {
+    if (!pts.curveSegments) pts.curveSegments = []
+    pts.curveSegments.push({ type:'spline', startIdx: startIdx + i0, count: i1 - i0,
+      controlPoints: full.slice(i0, i1 + 1).map(q => ({ x: q.x, y: q.y })) })
+  }
+}
+
 // ── profile detection ─────────────────────────────────────────────────────────
 
 /**
@@ -237,6 +283,8 @@ export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
           controlPoints[0] = forward ? {...nodes[na]} : {...nodes[nb]}
           controlPoints[controlPoints.length-1] = forward ? {...nodes[nb]} : {...nodes[na]}
           pts.curveSegments.push({ type:'spline', startIdx, count: ordered.length-1, controlPoints })
+        } else if (!sp.textId) {
+          pushPolylineRuns(pts, [...ordered, forward ? {...nodes[nb]} : {...nodes[na]}], startIdx)
         }
       } else {
         // Arc — sample intermediate points
@@ -311,8 +359,9 @@ export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
   // App3D.jsx) since nothing currently depends on removing it.
   planeSplines.forEach(sp => {
     if (sp.points.length < 2) return
-    const pts = sp.polyline ? sp.points.map(p=>({...p})) : sampleSpline(sp.points, true, 16)
+    let pts = sp.polyline ? sp.points.map(p=>({...p})) : sampleSpline(sp.points, true, 16)
     if (pts.length < 3) return
+    if (sp.polyline && !sp.textId) pts = closedPolylineWithCurves(pts)
     if (sp.textId) pts.textId = sp.textId
     // Real curve metadata (see the mixed-loop walker above for the full
     // rationale) — the whole profile is one closed hand-drawn curve, so it's
@@ -328,6 +377,33 @@ export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
   })
 
   return resolveNestedHoles(profiles)
+}
+
+// A closed polyline spline with smooth stretches (see polylineCurveRuns): if it
+// has a sharp corner the loop is restarted AT that corner, so no smooth stretch
+// wraps round the start; with none it is one closed smooth curve.
+function closedPolylineWithCurves(points) {
+  let pts = points
+  const a = pts[0], z = pts[pts.length - 1]
+  if (Math.hypot(a.x - z.x, a.y - z.y) < 0.05) pts = pts.slice(0, -1)   // drop a repeated start
+  const n = pts.length
+  if (n < 3) return points
+  const cosMax = Math.cos(POLY_CORNER_DEG * Math.PI / 180)
+  let corner = -1
+  for (let i = 0; i < n && corner < 0; i++) {
+    const p0 = pts[(i - 1 + n) % n], p1 = pts[i], p2 = pts[(i + 1) % n]
+    const ax = p1.x - p0.x, ay = p1.y - p0.y, bx = p2.x - p1.x, by = p2.y - p1.y
+    const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by)
+    if (la < 0.05 || lb < 0.05 || (ax*bx + ay*by) / (la*lb) < cosMax) corner = i
+  }
+  if (corner < 0) {
+    const out = pts.map(q => ({ x: q.x, y: q.y }))
+    out.curveSegments = [{ type:'spline', closed: true, startIdx: 0, count: n, controlPoints: out.map(q => ({ x: q.x, y: q.y })) }]
+    return out
+  }
+  const out = [...pts.slice(corner), ...pts.slice(0, corner)].map(q => ({ x: q.x, y: q.y }))
+  pushPolylineRuns(out, [...out, out[0]], 0)
+  return out
 }
 
 /**
@@ -486,6 +562,8 @@ export function detectPath(lines, arcs, planeId, circles=[], splines=[]) {
         controlPoints[0] = forward ? {...nodes[na]} : {...nodes[nb]}
         controlPoints[controlPoints.length-1] = forward ? {...nodes[nb]} : {...nodes[na]}
         pts.curveSegments.push({ type:'spline', startIdx, count: ordered.length-1, controlPoints })
+      } else if (!sp.textId) {
+        pushPolylineRuns(pts, [...ordered, forward ? {...nodes[nb]} : {...nodes[na]}], startIdx)
       }
     } else {
       const arc = seg.ref

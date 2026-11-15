@@ -5,6 +5,11 @@ import { projectedProfilePlane, dedupePoints3d } from './tools/sweepProject.js'
 import { springFrame } from './tools/springMath.js'
 
 const SCALE = 2
+
+// Fallback log for the replay harness (App3D ?replay): every time a build had
+// to use a rougher or retry method. Read and cleared by 'takeDiagnostics'.
+const diagLog = []
+function diag(kind, detail = '') { if (diagLog.length < 500) diagLog.push({ kind, detail: String(detail) }) }
 // Tolerance (mm) for matching a picked screen point to the actual OCC edge —
 // generous enough for mesh-tessellation slop, tight enough to avoid grabbing
 // a neighboring edge. Shared by the fillet3d handler and STL export's fallback replay.
@@ -153,6 +158,7 @@ function cutTolerant(a, b) {
       return cutWithFuzzy(a, b, FUSE_FUZZY_TOL)
     } catch (e) {
       console.warn('[cadWorker] combined cut failed — cutting the shapes one at a time', e)
+      diag('cut done one shape at a time')
       let s = a
       for (const t of b) s = cutTolerant(s, t)
       return s
@@ -176,6 +182,7 @@ function cutTolerant(a, b) {
           const removed2 = vA - ocVolume(retry.wrapped)
           if (Math.abs(removed2 - expected) <= 0.05 * expected && shapeIsValid(retry)) {
             console.warn(`[cadWorker] cut removed almost nothing at the normal tolerance — used the retry at ${fuzzy} mm`, { removed, expected })
+            diag('cut retried at another tolerance', fuzzy + ' mm')
             return retry
           }
         } catch { /* try the next tolerance */ }
@@ -840,7 +847,7 @@ function roundEdges(base, edgePoints, radius, isChamfer, quick = false) {
   for (const tryCfg of (quick ? FILLET_TRIES.slice(0, 1) : FILLET_TRIES)) {
     const out = filletOnce(base, edges, radius, tryCfg)
     if (out) {
-      if (tryCfg !== FILLET_TRIES[0]) console.warn('[cadWorker] fillet needed a different setting:', tryCfg)
+      if (tryCfg !== FILLET_TRIES[0]) { console.warn('[cadWorker] fillet needed a different setting:', tryCfg); diag('fillet needed a looser setting', tryCfg?.name || JSON.stringify(tryCfg)) }
       return out
     }
   }
@@ -1347,6 +1354,18 @@ self.onmessage = async function(e) {
       self.postMessage({ type:'result', id, snapshots: items })
       return
     }
+    // Replay harness: the fallback log since the last call, and a clean slate
+    // between projects (every stored shape freed).
+    if (type==='takeDiagnostics') {
+      self.postMessage({ type:'result', id, diagnostics: diagLog.splice(0) })
+      return
+    }
+    if (type==='clearShapes') {
+      for (const s of shapeStore.values()) { try { s.delete() } catch { /* already freed */ } }
+      shapeStore.clear()
+      self.postMessage({ type:'result', id, cleared: true })
+      return
+    }
     if (type==='shapeHealth') {
       const health = []
       for (const solidId of params.solidIds) {
@@ -1642,6 +1661,7 @@ self.onmessage = async function(e) {
       if (!base) {
         if (!params.base) throw new Error(`Fillet-MISS: base not in store and no fallback params`)
         console.warn('[cadWorker] shapeStore miss — rebuilding base from params')
+        diag('body rebuilt from its recipe (cache miss)')
         base = await buildBase(params.base)
       }
       // operation defaults to 'fillet' for older callers/saved ops that
@@ -1662,6 +1682,7 @@ self.onmessage = async function(e) {
         let part = null
         if (params.partial && params.edgePoints.length > 1) {
           part = roundEdgesPartial(base, params.edgePoints, params.radius, isChamferOp, Date.now() + 15000, true)
+          diag('fillet only partly possible')
         }
         if (!part?.shape) {
           // OCC often throws a bare number here (no .message) when the radius won't fit.
@@ -1700,6 +1721,7 @@ self.onmessage = async function(e) {
       if (!base) {
         if (!params.base) throw new Error('Soften-MISS: base not in store and no fallback params')
         console.warn('[cadWorker] shapeStore miss — rebuilding base from params')
+        diag('body rebuilt from its recipe (cache miss)')
         base = await buildBase(params.base)
       }
       const res = softenShape(base, { ...params, picks: params.edges })
@@ -1715,6 +1737,7 @@ self.onmessage = async function(e) {
       if (!base) {
         if (!params.base) throw new Error(`Shell-MISS: base not in store and no fallback params`)
         console.warn('[cadWorker] shapeStore miss — rebuilding base from params')
+        diag('body rebuilt from its recipe (cache miss)')
         base = await buildBase(params.base)
       }
       try {
@@ -1739,6 +1762,7 @@ self.onmessage = async function(e) {
       if (!base) {
         if (!params.base) throw new Error(`Step1-MISS: base not in store and no fallback params`)
         console.warn('[cadWorker] shapeStore miss — rebuilding base from params')
+        diag('body rebuilt from its recipe (cache miss)')
         try { base = await buildBase(params.base) }
         catch(e) { throw new Error(`Step1-BASE: ${e.message} | planeId=${params.base.planeId} dir=${params.base.direction}`, { cause: e }) }
       }
@@ -1800,6 +1824,7 @@ self.onmessage = async function(e) {
             if (match) {
               shape = match.out
               console.warn(`[cadWorker] circle cut failed as one full circle — cut it as ${match.label} instead (${label} agrees)`)
+              diag('circle cut re-cut', match.label)
               break
             }
             tried.push({ label, out, vol })
@@ -1808,6 +1833,7 @@ self.onmessage = async function(e) {
         if (!shape && tried.length) {
           shape = tried[0].out
           console.warn(`[cadWorker] circle cut failed as one full circle — cut it as ${tried[0].label} instead (no second form to confirm it)`)
+          diag('circle cut re-cut (unconfirmed)', tried[0].label)
         }
         if (!shape) throw new Error(`Step3-BOOL: ${e.message} | store=${fromStore}`, { cause: e })
       }
@@ -2270,6 +2296,7 @@ function emitBezierSegs(sketcher, segs, endsAtStart=false) {
       return
     } catch (e) {
       console.warn('[cadWorker] single-curve spline failed, using segments:', e)
+      diag('spline built in pieces')
     }
   }
   for (const { start, end, cp1, cp2 } of segs) {
@@ -2559,7 +2586,7 @@ function buildSweep(params) {
     // that, so retry once as the smooth spline it started as.
     const p = params.pathPts
     if (p && p.length >= 12 && !(p.curveSegments && p.curveSegments.length)) {
-      try { return sweepAlongPath({ ...params, pathPts: pathPointsAsSpline(p) }) } catch { /* report the original error */ }
+      try { const r = sweepAlongPath({ ...params, pathPts: pathPointsAsSpline(p) }); diag('sweep path re-fitted'); return r } catch { /* report the original error */ }
     }
     throw err
   }

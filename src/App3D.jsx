@@ -25,6 +25,7 @@ import { loadJSON, exportDXF, parseDXF, centreDxfResult, saveProjectAs, canPickS
 import { getAuthState, fetchMyClasses, saveNewCloudProject, updateCloudProject, loadCloudProject, saveFeedbackCopy, updateFeedbackCopy } from './tools/cloudSave.js'
 import { detectProfiles, detectPath, buildSolid, openEnds } from './tools/extrudeMath.js'
 import { cadEngine } from './cadEngine.js'
+import ReplayPanel from './tools/ReplayPanel.jsx'
 import { replicadMeshToThree } from './cadMesh.js'
 import TracerPanel from './tools/TracerPanel.jsx'
 import TextPanel from './tools/TextPanel.jsx'
@@ -2151,6 +2152,8 @@ const App3D = forwardRef(function App3D(props, ref) {
   // Model health readout (Ctrl+Shift+H) — a developer view of how each body is
   // built; see the worker's shapeHealthOf. Never saved.
   const [healthOpen,setHealthOpen]=useState(false)
+  // Replay harness — opened by adding ?replay to the URL (ReplayPanel).
+  const [replayOpen,setReplayOpen]=useState(()=>new URLSearchParams(window.location.search).has('replay'))
   const [health,setHealth]=useState(null)
   const [navMode,setNavMode]=useState(null)
   useEffect(()=>{ viewport3dRef.current?.setNavMode(navMode) },[navMode])
@@ -2748,6 +2751,28 @@ const App3D = forwardRef(function App3D(props, ref) {
   // this sequence. Callers are responsible for resetAllToolState() and
   // clearing whichever file-handle/cloud-id ref no longer applies BEFORE
   // calling this, same as handleOpenProject already did inline.
+  // Replay harness (?replay — ReplayPanel): opens one project's text from its
+  // RECIPE only (cached shapes ignored, the worker cleared first) and reports
+  // how each body rebuilt, its health and every fallback the worker used.
+  async function replayForTest(text) {
+    const data = parseProjectData(JSON.parse(text))
+    resetAllToolState()
+    await cadEngine.clearShapes()
+    await cadEngine.takeDiagnostics()
+    setFeatures(data.features)
+    const report = { features: [] }
+    const t0 = performance.now()
+    const newSolids = await rebuildProjectFromFeatures(data.features, null, report)
+    const totalMs = Math.round(performance.now() - t0)
+    setSolids(newSolids)
+    const ids = newSolids.map(s => s.id)
+    const health = ids.length ? (await cadEngine.shapeHealth({ solidIds: ids })).health : []
+    const fallbacks = (await cadEngine.takeDiagnostics()).diagnostics
+    const nameOf = id => data.features.find(f => f.solidId === id && f.type === 'extrude' && !f.joinedInto)?.name || 'Body'
+    return { totalMs, featureCount: data.features.length, rebuilt: report.features,
+      bodies: health.map(h => ({ ...h, name: nameOf(h.solidId) })), fallbacks }
+  }
+
   async function applyLoadedProject({ features: newFeatures, sheet, snapshots }) {
     setFeatures(newFeatures)
     props.onSheetLoaded?.(sheet)
@@ -10664,7 +10689,9 @@ const App3D = forwardRef(function App3D(props, ref) {
   // these features — see parseProjectData) are the bodies' finished shapes: they are
   // loaded straight into the worker, and only a body with no usable snapshot is
   // replayed from its features. Snapshots are a cache, never the source of truth.
-  async function rebuildProjectFromFeatures(loadedFeatures, snapshots = null) {
+  // report (replay harness only): gets one {name, op, ms, featureCount} or
+  // {name, op, error} entry per body rebuilt.
+  async function rebuildProjectFromFeatures(loadedFeatures, snapshots = null, report = null) {
     const newSolids = []
     const failed = []
     const t0 = performance.now()
@@ -10690,6 +10717,8 @@ const App3D = forwardRef(function App3D(props, ref) {
           meshData = await rebuildFeatureSolid(feat, loadedFeatures, newSolids)
           rebuiltCount++
           console.info(`[load] rebuilt "${feat.name || feat.id}" from its features in ${Math.round(performance.now() - tFeat)} ms`)
+          report?.features.push({ name: feat.name || String(feat.id), op: feat.operation || feat.type,
+            ms: Math.round(performance.now() - tFeat), featureCount: loadedFeatures.filter(f => f.solidId === feat.solidId).length })
         }
         const group = replicadMeshToThree(meshData, feat.color, feat.solidId)
         newSolids.push({
@@ -10700,6 +10729,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       } catch (err) {
         console.error('Rebuild failed for', feat.name, err)
         failed.push(`${feat.name || feat.id}: ${err.message || String(err)}`)
+        report?.features.push({ name: feat.name || String(feat.id), op: feat.operation || feat.type, error: err.message || String(err) })
       }
     }
     if (failed.length) {
@@ -13917,6 +13947,8 @@ const App3D = forwardRef(function App3D(props, ref) {
           <span style={{opacity:0.6,fontSize:11,marginLeft:10}}>✕</span>
         </div>
       )}
+
+      {replayOpen && <ReplayPanel onReplay={replayForTest} onClose={() => setReplayOpen(false)} />}
 
       {healthOpen && <ModelHealthPanel health={health} onClose={() => setHealthOpen(false)}
         nameOf={id => baseFeatureForSolid(id)?.name || 'Body'} />}

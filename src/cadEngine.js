@@ -30,7 +30,7 @@ class CadEngine {
       )
 
       this._worker.onmessage = (e) => {
-        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, soften, softenEdges, filletEdges, filletMax, snapshots, restored, health, message } = e.data
+        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, soften, softenEdges, filletEdges, filletMax, snapshots, restored, health, diagnostics, cleared, message } = e.data
         const { chain, filletPartial } = e.data
 
         if (type === 'ready') {
@@ -68,6 +68,8 @@ class CadEngine {
             snapshots ? { snapshots } :
             restored ? { restored } :
             health ? { health } :
+            diagnostics ? { diagnostics } :
+            cleared ? { cleared } :
             { faces, edges, ...(soften ? { soften } : {}), ...(filletPartial ? { filletPartial } : {}) }
           )
         } else if (type === 'error') {
@@ -129,6 +131,14 @@ class CadEngine {
   /** Model health readout — params: {solidIds}. Resolves {health:[{solidId, faces, edges, faceTypes, edgeTypes, tinyEdges, minEdge, tinyFaces, minFace, solids, valid, volume} | {solidId, error}]}. */
   async shapeHealth(params) {
     return this._send('shapeHealth', params)
+  }
+  /** Replay harness: the worker's fallback log since the last call — resolves {diagnostics:[{kind, detail}]}. */
+  async takeDiagnostics() {
+    return this._send('takeDiagnostics', {})
+  }
+  /** Replay harness: frees every stored shape (a clean slate between projects). */
+  async clearShapes() {
+    return this._send('clearShapes', {})
   }
   async softenAll(params) {
     return this._send('softenAll', params)

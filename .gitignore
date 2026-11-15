@@ -23,3 +23,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Student projects for the replay harness (App3D ?replay) — never committed
+replay-projects/

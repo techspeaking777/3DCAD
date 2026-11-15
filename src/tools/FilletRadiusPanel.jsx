@@ -4,16 +4,17 @@ import { useDraggablePanel, DragHandle } from './useDraggablePanel.jsx'
 // Kid-friendly popover shown next to the Fillet toolbar button once both lines
 // are picked. A real, visible input box for the radius — no blind keystrokes —
 // Enter or the Apply button rounds the corner.
-// mode: 'fillet' | 'chamfer' (onMode switches it); corners: how many corners
-// the preview will change (more than 1 for a whole shape); needLines: Chamfer
-// was asked for on an arc.
-export default function FilletRadiusPanel({ toolColor, value, onChange, onApply, tooLarge, mode = 'fillet', onMode, corners = 0, needLines = false }){
+// mode: 'fillet' | 'chamfer' | 'corner' (onMode switches it); corners: how many
+// corners the preview will change (more than 1 for a whole shape); needLines:
+// Chamfer / Corner was asked for on an arc; parallel: Corner on two lines that
+// never meet. Corner (Solid Edge's Trim Corner) takes no number.
+export default function FilletRadiusPanel({ toolColor, value, onChange, onApply, tooLarge, mode = 'fillet', onMode, corners = 0, needLines = false, parallel = false }){
   const { panelRef, panelStyle, handleProps } = useDraggablePanel()
   const inputRef = useRef(null)
   useEffect(()=>{ inputRef.current?.focus() }, [])
 
-  const canApply = parseFloat(value)>0 && !tooLarge && !needLines
-  const chamfer = mode === 'chamfer'
+  const chamfer = mode === 'chamfer', corner = mode === 'corner'
+  const canApply = corner ? !needLines && !parallel : parseFloat(value)>0 && !tooLarge && !needLines
 
   return (
     <div ref={panelRef} style={{
@@ -27,12 +28,12 @@ export default function FilletRadiusPanel({ toolColor, value, onChange, onApply,
         borderTop:'8px solid transparent',borderBottom:'8px solid transparent',
         borderRight:`9px solid ${toolColor}`}}/>
 
-      <DragHandle {...handleProps}>{chamfer ? 'Chamfer Distance' : 'Fillet Radius'}</DragHandle>
+      <DragHandle {...handleProps}>{corner ? 'Join Corner' : chamfer ? 'Chamfer Distance' : 'Fillet Radius'}</DragHandle>
 
       {onMode && (
         <div style={{display:'flex',gap:4,marginBottom:8}}>
-          {[['fillet','ROUND'],['chamfer','CHAMFER']].map(([m,label])=>(
-            <button key={m} onClick={()=>onMode(m)} title={m==='fillet'?'Round the corner':'Cut the corner off straight'}
+          {[['fillet','ROUND'],['chamfer','CHAMFER'],['corner','CORNER']].map(([m,label])=>(
+            <button key={m} onClick={()=>onMode(m)} title={m==='fillet'?'Round the corner':m==='chamfer'?'Cut the corner off straight':'Trim or extend both lines so they meet in a sharp corner'}
               style={{flex:1,padding:'4px 0',borderRadius:5,cursor:'pointer',fontFamily:'monospace',fontSize:9,
                 letterSpacing:'0.05em',fontWeight:'bold',background:mode===m?toolColor+'33':'#0d0d1a',
                 border:`2px solid ${mode===m?toolColor:'#3a3a5a'}`,color:mode===m?toolColor:'#666'}}>
@@ -42,7 +43,7 @@ export default function FilletRadiusPanel({ toolColor, value, onChange, onApply,
         </div>
       )}
 
-      <div style={{display:'flex',alignItems:'center',gap:6,justifyContent:'center'}}>
+      {!corner && <div style={{display:'flex',alignItems:'center',gap:6,justifyContent:'center'}}>
         <input
           ref={inputRef}
           value={value}
@@ -59,11 +60,13 @@ export default function FilletRadiusPanel({ toolColor, value, onChange, onApply,
           }}
         />
         <span style={{color:'#888',fontSize:11}}>mm</span>
-      </div>
+      </div>}
+      {corner && <div style={{textAlign:'center',fontSize:10,color:'#aaa',lineHeight:1.4}}>Both lines are trimmed or stretched to meet.</div>}
 
       {corners > 1 && !tooLarge && <div style={{marginTop:6,textAlign:'center',fontSize:9,color:toolColor}}>{corners} corners</div>}
       {tooLarge && <div style={{marginTop:6,textAlign:'center',fontSize:9,color:'#F44336'}}>Too big for {corners > 1 ? 'these corners' : 'this corner'}</div>}
-      {needLines && <div style={{marginTop:6,textAlign:'center',fontSize:9,color:'#F44336'}}>Chamfer needs two straight lines</div>}
+      {needLines && <div style={{marginTop:6,textAlign:'center',fontSize:9,color:'#F44336'}}>{corner ? 'Corner' : 'Chamfer'} needs two straight lines</div>}
+      {corner && parallel && <div style={{marginTop:6,textAlign:'center',fontSize:9,color:'#F44336'}}>These lines never meet</div>}
 
       <button
         onClick={onApply}
@@ -77,7 +80,7 @@ export default function FilletRadiusPanel({ toolColor, value, onChange, onApply,
       </button>
 
       <div style={{marginTop:8,textAlign:'center',fontSize:9,color:'#666'}}>
-        👉 Type a number, then Enter
+        👉 {corner ? 'Enter or Tab to join' : 'Type a number, then Enter'}
       </div>
     </div>
   )

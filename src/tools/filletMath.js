@@ -345,10 +345,42 @@ export function computeCornerSet(lines, startIdx, r, mode = 'fillet') {
   return { lineUpdates, arcUpdates: [], newArcs, newLines, marks, count: newArcs.length + newLines.length }
 }
 
+// ── Trim corner (Solid Edge's "Trim Corner") ────────────────────────────────
+// Two lines meet at a sharp corner: each is cut back — or extended — to where
+// the two lines cross, keeping the side that was clicked. No radius.
+export function computeTrimCorner(l1, l2, clickPt1, clickPt2) {
+  const P = infLineIntersect(l1.x1, l1.y1, l1.x2, l1.y2, l2.x1, l2.y1, l2.x2, l2.y2)
+  if (!P) return null   // parallel — they never meet
+  const toCorner = (l, click) => {
+    const dx = l.x2 - l.x1, dy = l.y2 - l.y1, L2 = dx * dx + dy * dy
+    if (L2 < 1e-10) return null
+    const t = v => ((v.x - l.x1) * dx + (v.y - l.y1) * dy) / L2
+    const tP = t(P), tC = t(click || { x: (l.x1 + l.x2) / 2, y: (l.y1 + l.y2) / 2 })
+    // The clicked side is kept: the far end on that side stays, the other
+    // end moves to the corner (trimming the bit past it, or extending to it).
+    return tC < tP ? { ...l, x2: P.x, y2: P.y } : { ...l, x1: P.x, y1: P.y }
+  }
+  const n1 = toCorner(l1, clickPt1), n2 = toCorner(l2, clickPt2)
+  if (!n1 || !n2) return null
+  return { newL1: n1, newL2: n2, P }
+}
+
 // ── One entry point for the Fillet tool ─────────────────────────────────────
 // sel: [pick, pick] (two lines / arcs) or [{kind:'chain', idx}] (every corner
-// of the shape that line belongs to). mode: 'fillet' | 'chamfer'.
+// of the shape that line belongs to). mode: 'fillet' | 'chamfer' | 'corner'
+// ('corner' = trim/extend both lines to meet; it takes no radius).
 export function computeFilletOp(sel, lines, arcs, r, mode = 'fillet') {
+  if (mode === 'corner') {
+    if (sel?.[0]?.kind === 'chain' || sel?.length !== 2) return null
+    const [p1, p2] = sel
+    if (p1.kind !== 'line' || p2.kind !== 'line') return { needLines: true }
+    const g1 = lines[p1.idx], g2 = lines[p2.idx]
+    if (!g1 || !g2) return null
+    const res = computeTrimCorner(g1, g2, p1.clickPt, p2.clickPt)
+    if (!res) return { parallel: true }
+    return { lineUpdates: [{ idx: p1.idx, geom: res.newL1 }, { idx: p2.idx, geom: res.newL2 }],
+      arcUpdates: [], newArcs: [], newLines: [], marks: [res.P], count: 1 }
+  }
   if (!(r > 0) || !sel?.length) return null
   if (sel[0].kind === 'chain') return computeCornerSet(lines, sel[0].idx, r, mode)
   if (sel.length < 2) return null

@@ -564,7 +564,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   // Shared by Enter, the panel's Apply and a click.
   function applyFillet(){
     const res=filletPreview
-    if (!res||res.tooLarge||res.needLines||!res.count) return
+    if (!res||res.tooLarge||res.needLines||res.parallel||!res.count) return
     commit(snapshot())
     const tag={}
     const lu=new Map(res.lineUpdates.map(u=>[u.idx,u.geom]))
@@ -1134,7 +1134,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     const ready=filletSel[0]?.kind==='chain'||filletSel.length===2
     if (tool!=='fillet'||!filletAccepted||!ready){setFilletPreview(null);return}
     const r=mmToPx(parseFloat(filletRadiusInput)||0)
-    if (r<=0){setFilletPreview(null);return}
+    if (r<=0&&filletMode!=='corner'){setFilletPreview(null);return}
     setFilletPreview(computeFilletOp(filletSel,lines,arcs,r,filletMode))
   },[tool,filletAccepted,filletSel,filletRadiusInput,filletMode,lines,arcs])
 
@@ -1472,7 +1472,10 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     if (tool==='extend'&&extendPreview){
       ctx.save()
       ctx.strokeStyle='#00BCD4';ctx.lineWidth=2/sc;ctx.setLineDash([6/sc,3/sc])
-      ctx.beginPath();ctx.moveTo(extendPreview.extStart.x,extendPreview.extStart.y);ctx.lineTo(extendPreview.extEnd.x,extendPreview.extEnd.y);ctx.stroke()
+      ctx.beginPath()
+      if (extendPreview.extArc){ const xa=extendPreview.extArc; ctx.arc(xa.cx,xa.cy,xa.r,xa.startAngle,xa.startAngle+norm2pi(xa.endAngle-xa.startAngle),false) }
+      else { ctx.moveTo(extendPreview.extStart.x,extendPreview.extStart.y);ctx.lineTo(extendPreview.extEnd.x,extendPreview.extEnd.y) }
+      ctx.stroke()
       ctx.setLineDash([])
       ctx.translate(extendPreview.extEnd.x,extendPreview.extEnd.y);ctx.scale(1/sc,1/sc)
       ctx.beginPath();ctx.arc(0,0,5,0,Math.PI*2);ctx.fillStyle='#00BCD4';ctx.fill()
@@ -1943,8 +1946,9 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     // Fillet preview
     if (tool==='fillet'&&filletAccepted&&filletPreview){
       const fp=filletPreview
-      if (fp.tooLarge||fp.needLines){
-        if (mousePos) drawLabel(ctx,fp.needLines?'Chamfer needs two straight lines':(filletMode==='chamfer'?'Distance':'Radius')+' too large',mousePos.x,mousePos.y-20/sc,'#F44336',sc)
+      if (fp.tooLarge||fp.needLines||fp.parallel){
+        const msg=fp.parallel?'These lines never meet':fp.needLines?(filletMode==='corner'?'Corner':'Chamfer')+' needs two straight lines':(filletMode==='chamfer'?'Distance':'Radius')+' too large'
+        if (mousePos) drawLabel(ctx,msg,mousePos.x,mousePos.y-20/sc,'#F44336',sc)
       } else if (fp.count){
         ctx.save();ctx.setLineDash([6/sc,3/sc])
         ctx.strokeStyle='#4CAF50';ctx.lineWidth=2/sc
@@ -1956,7 +1960,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         ctx.setLineDash([])
         fp.marks.forEach(t=>{ctx.save();ctx.translate(t.x,t.y);ctx.scale(1/sc,1/sc);ctx.beginPath();ctx.arc(0,0,4,0,Math.PI*2);ctx.fillStyle='#4CAF50';ctx.fill();ctx.restore()})
         const at=fp.marks[0]
-        const what=(filletMode==='chamfer'?'Chamfer ':'R ')+(parseFloat(filletRadiusInput)||0)+' mm'+(fp.count>1?' · '+fp.count+' corners':'')
+        const what=filletMode==='corner'?'Corner':(filletMode==='chamfer'?'Chamfer ':'R ')+(parseFloat(filletRadiusInput)||0)+' mm'+(fp.count>1?' · '+fp.count+' corners':'')
         drawLabel(ctx,what+' · Enter or click to apply',at.x,at.y-24/sc,'#4CAF50',sc)
         ctx.restore()
       }
@@ -2520,7 +2524,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     if (tool==='extend'){
       if (extendPreview){
         commit(snapshot())
-        setLines(p=>p.map((l,i)=>i===extendPreview.idx?extendPreview.newLine:l))
+        if (extendPreview.kind==='arc') setArcs(p=>p.map((a,i)=>i===extendPreview.idx?extendPreview.newArc:a))
+        else setLines(p=>p.map((l,i)=>i===extendPreview.idx?extendPreview.newLine:l))
       }
       return
     }
@@ -3216,8 +3221,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         if (e.key==='Tab'){e.preventDefault();if(filletSel.length===2)setFilletAccepted(true);return}
         return
       }
-      // Accepted — type radius then Enter/click/panel-Apply to apply
-      if (e.key==='Enter'){
+      // Accepted — type radius then Enter/click to apply (Tab too, as in Solid Edge)
+      if (e.key==='Enter'||e.key==='Tab'){
         e.preventDefault()
         applyFillet()
         return
@@ -3475,6 +3480,9 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           action:'2 picked',
           hints:[K('Tab','accept'), K('Esc')] }
       }
+      if (filletMode==='corner') return { step:3, total:3, color:c,
+        action: filletPreview?.parallel ? 'These lines never meet' : 'Join the lines at their corner',
+        hints:[K('Enter','apply'), K('Tab','apply')] }
       if (filletPreview?.tooLarge) return { step:3, total:3, color:'#EF9A9A',
         action:`R ${filletRadiusInput} mm — too large`,
         hints:[K('type','smaller radius')] }
@@ -3489,7 +3497,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       hints:[K('click','trim'), K('Esc','exit')] }
 
     if (tool==='extend') return { step:null, total:null, color:c,
-      action: extendPreview ? 'Click to extend' : 'Hover near endpoint',
+      action: extendPreview ? 'Click to extend' : 'Hover near the end of a line or arc',
       hints:[K('click','extend'), K('Esc','exit')] }
 
     if (tool==='delete') return { step:null, total:null, color:c,
@@ -3716,6 +3724,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
                 onMode={setFilletMode}
                 corners={filletPreview?.count||0}
                 needLines={!!filletPreview?.needLines}
+                parallel={!!filletPreview?.parallel}
               />
             )}
             {t==='offset'&&tool==='offset'&&offsetEntity&&(

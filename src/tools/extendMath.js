@@ -62,6 +62,66 @@ function extendedIntersections(lineIdx, lines, circles, arcs, splines = []) {
   return results
 }
 
+// ── Arcs ─────────────────────────────────────────────────────────────────────
+// An arc extends round its own circle until it meets something. Every place
+// the circle crosses another line / circle / arc / spline, as an angle.
+function circleHitAngles(arcIdx, lines, circles, arcs, splines) {
+  const { cx, cy, r } = arcs[arcIdx]
+  const out = []
+  const ang = (x, y) => Math.atan2(y - cy, x - cx)
+  const segHits = (ax, ay, bx, by) => {
+    const dx = bx - ax, dy = by - ay, A = dx * dx + dy * dy
+    if (A < 1e-12) return
+    const fx = ax - cx, fy = ay - cy
+    const B = 2 * (fx * dx + fy * dy), C = fx * fx + fy * fy - r * r
+    const disc = B * B - 4 * A * C
+    if (disc < 0) return
+    const sq = Math.sqrt(disc)
+    for (const t of [(-B - sq) / (2 * A), (-B + sq) / (2 * A)]) {
+      if (t >= -1e-8 && t <= 1 + 1e-8) out.push(ang(ax + t * dx, ay + t * dy))
+    }
+  }
+  const circHits = (ox, oy, or_, keep) => {
+    const dx = ox - cx, dy = oy - cy, d = Math.hypot(dx, dy)
+    if (d < 1e-9 || d > r + or_ || d < Math.abs(r - or_)) return
+    const a = (r * r - or_ * or_ + d * d) / (2 * d), h = Math.sqrt(Math.max(0, r * r - a * a))
+    const mx = cx + a * dx / d, my = cy + a * dy / d
+    for (const [x, y] of [[mx + h * dy / d, my - h * dx / d], [mx - h * dy / d, my + h * dx / d]]) {
+      if (!keep || keep(x, y)) out.push(ang(x, y))
+    }
+  }
+  lines.forEach(l => { if (!l.ghostRef) segHits(l.x1, l.y1, l.x2, l.y2) })
+  circles.forEach(c => circHits(c.cx, c.cy, c.r))
+  arcs.forEach((o, i) => {
+    if (i === arcIdx || o.ghostRef) return
+    circHits(o.cx, o.cy, o.r, (x, y) => angleOnArc(norm2pi(Math.atan2(y - o.cy, x - o.cx)), o.startAngle, o.endAngle))
+  })
+  splines.forEach(sp => {
+    if (!sp?.points || sp.points.length < 2) return
+    const pts = splineToPolyline(sp.points, sp.closed, 48)
+    for (let i = 0; i < pts.length - 1; i++) segHits(pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y)
+  })
+  return out
+}
+
+// Arc `idx`, end 'start' or 'end' → the extended arc, or null if nothing is
+// in the way before the arc would close into a full circle.
+function extendArcEnd(idx, which, lines, circles, arcs, splines) {
+  const a = arcs[idx]
+  const sweep = norm2pi(a.endAngle - a.startAngle) || 2 * Math.PI
+  const room = 2 * Math.PI - sweep - 1e-4    // never grow into a full circle
+  const EPS = 1e-4
+  let best = null
+  for (const th of circleHitAngles(idx, lines, circles, arcs, splines)) {
+    const d = which === 'end' ? norm2pi(th - a.endAngle) : norm2pi(a.startAngle - th)
+    if (d > EPS && d <= room && (best === null || d < best)) best = d
+  }
+  if (best === null) return null
+  return which === 'end'
+    ? { ...a, endAngle: a.endAngle + best }
+    : { ...a, startAngle: a.startAngle - best }
+}
+
 export function computeExtendPreview(mouse, lines, circles, arcs, splines = []) {
   const td = TRIM_DIST / zoomRef.scale
   const END_THRESH = td * 2
@@ -73,6 +133,28 @@ export function computeExtendPreview(mouse, lines, circles, arcs, splines = []) 
     const d = Math.min(d1, d2)
     if (d < bestDist) { bestDist = d; target = { idx, end: d1 < d2 ? 1 : 2 } }
   })
+  // Arc ends too: whichever end (line or arc) is nearest the cursor wins.
+  let arcTarget = null
+  arcs.forEach((a, idx) => {
+    if (a.ghostRef) return
+    for (const which of ['start', 'end']) {
+      const ang = which === 'start' ? a.startAngle : a.endAngle
+      const d = Math.hypot(mouse.x - (a.cx + Math.cos(ang) * a.r), mouse.y - (a.cy + Math.sin(ang) * a.r))
+      if (d < bestDist) { bestDist = d; arcTarget = { idx, which }; target = null }
+    }
+  })
+  if (arcTarget) {
+    const newArc = extendArcEnd(arcTarget.idx, arcTarget.which, lines, circles, arcs, splines)
+    if (!newArc) return null
+    const old = arcs[arcTarget.idx]
+    // extArc = just the added piece, for the dashed preview.
+    const extArc = arcTarget.which === 'end'
+      ? { cx: old.cx, cy: old.cy, r: old.r, startAngle: old.endAngle, endAngle: newArc.endAngle }
+      : { cx: old.cx, cy: old.cy, r: old.r, startAngle: newArc.startAngle, endAngle: old.startAngle }
+    const tipAng = arcTarget.which === 'end' ? newArc.endAngle : newArc.startAngle
+    const tip = { x: old.cx + Math.cos(tipAng) * old.r, y: old.cy + Math.sin(tipAng) * old.r }
+    return { kind: 'arc', idx: arcTarget.idx, newArc, extArc, extStart: tip, extEnd: tip }
+  }
   if (!target) return null
   const l = lines[target.idx]
   const dx = l.x2 - l.x1, dy = l.y2 - l.y1

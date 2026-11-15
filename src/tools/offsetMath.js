@@ -1,7 +1,8 @@
 import { SELECT_DIST, norm2pi, zoomRef } from '../constants.js'
 import { angleOnArc } from '../geometry/intersections.js'
 import { distToSeg } from './trimDelete.js'
-import { distToSpline } from './splineMath.js'
+import { distToSpline, sampleSpline } from './splineMath.js'
+import { fitSplineToPoints } from './splineFit.js'
 
 // Needed by filletMath.js
 export function infLineIntersect(ax1,ay1,ax2,ay2,bx1,by1,bx2,by2) {
@@ -105,48 +106,103 @@ export function computeOffsetPreview(entity, kind, distPx, mouse) {
   }
 
   if (kind === 'spline') {
-    // Move each control point along its local normal
-    const pts = entity.points
-    const n = pts.length
-    if (n < 2) return null
-
-    // Determine which side of the spline the mouse is on
-    // Use the closest segment's normal
-    let minD = Infinity, closestNormal = { x: 0, y: -1 }
-    for (let i = 0; i < n - 1; i++) {
-      const dx = pts[i+1].x - pts[i].x, dy = pts[i+1].y - pts[i].y
-      const len = Math.hypot(dx, dy)
-      if (len < 1e-10) continue
-      const d = distToSeg(mouse.x, mouse.y, pts[i].x, pts[i].y, pts[i+1].x, pts[i+1].y)
-      if (d < minD) {
-        minD = d
-        // Normal pointing to the right of the segment direction
-        closestNormal = { x: dy / len, y: -dx / len }
-      }
-    }
-    const dot = (mouse.x - pts[0].x) * closestNormal.x + (mouse.y - pts[0].y) * closestNormal.y
-    const side = dot >= 0 ? 1 : -1
-
-    // Offset each point along averaged segment normals
-    const newPts = pts.map((p, i) => {
-      let nx = 0, ny = 0, count = 0
-      if (i > 0) {
-        const dx = p.x - pts[i-1].x, dy = p.y - pts[i-1].y
-        const len = Math.hypot(dx, dy)
-        if (len > 1e-10) { nx += dy / len; ny += -dx / len; count++ }
-      }
-      if (i < n - 1) {
-        const dx = pts[i+1].x - p.x, dy = pts[i+1].y - p.y
-        const len = Math.hypot(dx, dy)
-        if (len > 1e-10) { nx += dy / len; ny += -dx / len; count++ }
-      }
-      if (count > 0) { nx /= count; ny /= count }
-      const nlen = Math.hypot(nx, ny)
-      if (nlen > 1e-10) { nx /= nlen; ny /= nlen }
-      return { x: p.x + nx * distPx * side, y: p.y + ny * distPx * side }
-    })
-    return { kind: 'spline', points: newPts, closed: entity.closed, polyline: entity.polyline }
+    const pts = offsetSplinePoints(entity, distPx, mouse)
+    if (!pts) return null
+    const closed = !!entity.closed
+    const style = entity.style && entity.style !== 'construction' ? { style: entity.style } : {}
+    // The preview is the exact offset curve (dense points — fitting is too slow
+    // for every mouse move); finalOffsetSpline turns it into the stored entity.
+    // refitMax set = a drawn spline, to be fitted back to an editable spline.
+    return { kind: 'spline', points: pts, closed, polyline: true, ...style,
+      ...(entity.polyline ? {} : { refitMax: Math.max(40, entity.points.length * 3) }) }
   }
 
   return null
+}
+
+// The spline entity an offset preview becomes. A trimmed / imported (polyline)
+// spline stays a polyline — it may have real corners. A drawn spline gets an
+// editable spline fitted back through the offset curve (within 0.1 mm, else 0.2 mm);
+// if no fit is that close (a loop was cut out, leaving a corner) the dense curve
+// is kept — it still builds as one smooth curve in 3D (polylineCurveRuns).
+export function finalOffsetSpline(prev) {
+  const style = prev.style ? { style: prev.style } : {}
+  if (prev.refitMax) {
+    const fit = fitSplineToPoints(prev.points, prev.closed, 0.2, prev.refitMax)
+      || fitSplineToPoints(prev.points, prev.closed, 0.4, prev.refitMax)   // closed curves: 0.2 mm
+    if (fit) return { points: fit.points, closed: prev.closed, ...style }
+  }
+  return { points: prev.points, closed: prev.closed, polyline: true, ...style }
+}
+
+// The TRUE offset of a spline: the curve itself (a drawn spline sampled finely,
+// a polyline spline's own points) moved sideways by exactly distPx — each point
+// along the bisector of its two neighbouring spans, stretched by 1/cos(half the
+// turn) so corners keep the full distance too. Offsetting the control points
+// instead (the old way) was only right AT them: a 3 mm offset of a wavy line
+// came out thinner and thicker in between. The side is the one the mouse is on,
+// judged against the span nearest the mouse (it used to use the first point,
+// which could flip it). Small loops an inside offset forms at a bend tighter
+// than the distance are cut out, as other CAD programs do.
+export function offsetSplinePoints(entity, distPx, mouse) {
+  const closed = !!entity.closed
+  let P = entity.polyline ? entity.points.map(q => ({ x: q.x, y: q.y })) : sampleSpline(entity.points, closed, 16)
+  P = P.filter((q, i) => i === 0 || Math.hypot(q.x - P[i-1].x, q.y - P[i-1].y) > 1e-6)
+  if (closed && P.length > 2 && Math.hypot(P[0].x - P[P.length-1].x, P[0].y - P[P.length-1].y) < 1e-6) P.pop()
+  const n = P.length
+  if (n < 2) return null
+  const spanNormal = i => {
+    const a = P[(i + n) % n], b = P[(i + 1) % n]
+    const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy)
+    return L < 1e-9 ? null : { x: dy / L, y: -dx / L }
+  }
+  const spans = closed ? n : n - 1
+  let best = Infinity, side = 1
+  for (let i = 0; i < spans; i++) {
+    const a = P[i], b = P[(i + 1) % n]
+    const d = distToSeg(mouse.x, mouse.y, a.x, a.y, b.x, b.y)
+    const nm = spanNormal(i)
+    if (nm && d < best) { best = d; side = (mouse.x - a.x) * nm.x + (mouse.y - a.y) * nm.y >= 0 ? 1 : -1 }
+  }
+  const d = distPx * side
+  const out = P.map((q, i) => {
+    const nA = (i > 0 || closed) ? spanNormal(i - 1) : null
+    const nB = (i < n - 1 || closed) ? spanNormal(i) : null
+    if (nA && nB) {
+      let nx = nA.x + nB.x, ny = nA.y + nB.y
+      const L = Math.hypot(nx, ny)
+      if (L < 1e-9) return { x: q.x + nB.x * d, y: q.y + nB.y * d }
+      nx /= L; ny /= L
+      const k = 1 / Math.max(nx * nB.x + ny * nB.y, 0.25)   // mitre, capped at 4×
+      return { x: q.x + nx * d * k, y: q.y + ny * d * k }
+    }
+    const nm = nA || nB
+    return nm ? { x: q.x + nm.x * d, y: q.y + nm.y * d } : { x: q.x, y: q.y }
+  })
+  return removeOffsetLoops(out, P, Math.abs(d) * 4)
+}
+
+// Cuts out self-crossing loops that only span a short stretch of the original
+// curve (window = that much original length) — an inside offset round a bend
+// tighter than the distance; a far-apart crossing is left alone.
+function removeOffsetLoops(pts, orig, window) {
+  const cum = [0]
+  for (let i = 1; i < orig.length; i++) cum.push(cum[i-1] + Math.hypot(orig[i].x - orig[i-1].x, orig[i].y - orig[i-1].y))
+  const seg = (a, b, c, e) => {
+    const r = { x: b.x - a.x, y: b.y - a.y }, s2 = { x: e.x - c.x, y: e.y - c.y }
+    const den = r.x * s2.y - r.y * s2.x
+    if (Math.abs(den) < 1e-12) return null
+    const t = ((c.x - a.x) * s2.y - (c.y - a.y) * s2.x) / den
+    const u = ((c.x - a.x) * r.y - (c.y - a.y) * r.x) / den
+    return t > 1e-9 && t < 1 - 1e-9 && u > 1e-9 && u < 1 - 1e-9 ? { x: a.x + t * r.x, y: a.y + t * r.y } : null
+  }
+  const o = pts.slice(), idx = orig.map((_, i) => i)   // idx: which original point each offset point came from
+  for (let i = 0; i < o.length - 1; i++) {
+    for (let j = o.length - 2; j > i + 1; j--) {
+      if (cum[idx[j]] - cum[idx[i]] > window) continue
+      const X = seg(o[i], o[i+1], o[j], o[j+1])
+      if (X) { o.splice(i + 1, j - i, X); idx.splice(i + 1, j - i, idx[i]); break }
+    }
+  }
+  return o
 }

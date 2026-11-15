@@ -7,7 +7,7 @@ import { pxToMm, mmToPx, ALIGN_SNAP_DIST, ACQUIRE_DIST, SELECT_DIST, LINE_SNAP_D
 import { angleOnArc, computeAllIntersections, circleCircleIntersect } from './geometry/intersections.js'
 import { getGeoSnap, getAllSnapPoints, checkAngle, checkAngleTight, getAngleSnap, applyTracking, computeLiveAngle, getTanPtsOnCircle, getExternalTangentPairs, nearestPt, nearestOnSegment } from './geometry/snap.js'
 import { computeTrimPreview, performTrim, computeDeletePreview, distToSeg } from './tools/trimDelete.js'
-import { nearestOffsetEntity, computeOffsetPreview, distToEntity } from './tools/offsetMath.js'
+import { nearestOffsetEntity, computeOffsetPreview, finalOffsetSpline, distToEntity } from './tools/offsetMath.js'
 import { nearestMirrorEntity, buildMirror } from './tools/mirrorMath.js'
 import { nearestMoveCopyEntity, buildCopies, removeSelected } from './tools/moveCopyMath.js'
 import { nearestRotateCopyEntity, buildRotatedCopies } from './tools/rotateCopyMath.js'
@@ -12300,7 +12300,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         if (offsetPreview.kind==='line')   setLines(p=>[...p,{x1:offsetPreview.x1,y1:offsetPreview.y1,x2:offsetPreview.x2,y2:offsetPreview.y2,...(offsetPreview.style?{style:offsetPreview.style}:{}),...ofPt}])
         if (offsetPreview.kind==='circle') setCircles(p=>[...p,{cx:offsetPreview.cx,cy:offsetPreview.cy,r:offsetPreview.r,...(offsetPreview.style?{style:offsetPreview.style}:{}),...ofPt}])
         if (offsetPreview.kind==='arc')    setArcs(p=>[...p,{cx:offsetPreview.cx,cy:offsetPreview.cy,r:offsetPreview.r,startAngle:offsetPreview.startAngle,endAngle:offsetPreview.endAngle,...(offsetPreview.style?{style:offsetPreview.style}:{}),...ofPt}])
-        if (offsetPreview.kind==='spline') setSplines(p=>[...p,{points:offsetPreview.points,closed:offsetPreview.closed,polyline:offsetPreview.polyline,...(offsetPreview.style?{style:offsetPreview.style}:{}),...ofPt}])
+        if (offsetPreview.kind==='spline'){const sp=finalOffsetSpline(offsetPreview);setSplines(p=>[...p,{...sp,...ofPt}])}
         resetOffset()
       }
       return

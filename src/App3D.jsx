@@ -155,7 +155,7 @@ function linearCutBoxPx(pts, planeId, facePlane, cutDepthMm, cutDirection) {
     const w = facePlane ? facePlane.sketchToWorld(pt.x, pt.y) : sketchToWorld(pt.x, pt.y, planeId)
     return new THREE.Vector3(w.x, w.y, w.z)
   })
-  const [minMm, maxMm] = cutExtentRangeMm(cutDepthMm, cutDirection, planeId)
+  const [minMm, maxMm] = cutExtentRangeMm(cutDepthMm, cutDirection, facePlane?.free ? 'free' : planeId)
   const profBox = new THREE.Box3().setFromPoints(worldPts)
   const box = profBox.clone()
   box.union(profBox.clone().translate(normalVec.clone().multiplyScalar(mmToPx(minMm))))
@@ -414,7 +414,7 @@ function buildCutWorkerParams(cutFeat) {
 
 function buildCutWorkerParamsBase(cutFeat) {
   const facePlaneParams = fp => fp ? {
-    normal: [fp.normal.x, fp.normal.y, fp.normal.z],
+    normal: [fp.normal.x, fp.normal.y, fp.normal.z], ...(fp.free ? { freePlane: true } : {}),
     origin: [pxToMm(fp.origin.x), pxToMm(fp.origin.y), pxToMm(fp.origin.z)],
     uAxis:  [fp.uAxis.x, fp.uAxis.y, fp.uAxis.z],
   } : {}
@@ -468,7 +468,7 @@ function buildCutWorkerParamsBase(cutFeat) {
 // the identical conversion rather than duplicating it.
 function facePlaneParams(fp) {
   return fp ? {
-    normal: [fp.normal.x, fp.normal.y, fp.normal.z],
+    normal: [fp.normal.x, fp.normal.y, fp.normal.z], ...(fp.free ? { freePlane: true } : {}),
     origin: [pxToMm(fp.origin.x), pxToMm(fp.origin.y), pxToMm(fp.origin.z)],
     uAxis:  [fp.uAxis.x, fp.uAxis.y, fp.uAxis.z],
   } : {}
@@ -1014,8 +1014,11 @@ function offsetFacePlane(base, distInput) {
   const distMm = parseFloat(distInput) || 0
   const origin = basis.origin.clone().addScaledVector(basis.normal, mmToPx(distMm))
   const vAxis = new THREE.Vector3().crossVectors(basis.normal, basis.uAxis).normalize()
-  return new FacePlane(origin, basis.normal, basis.uAxis, vAxis,
+  const plane = new FacePlane(origin, basis.normal, basis.uAxis, vAxis,
     basis.viewCenter ? basis.viewCenter.clone().addScaledVector(basis.normal, mmToPx(distMm)) : undefined)
+  // Not on a body face — a cut here may go either side (FacePlane.free).
+  plane.free = true
+  return plane
 }
 
 // ── SmartStep Bar ─────────────────────────────────────────────────────────────
@@ -9515,7 +9518,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // so a face out in the open air on the outward side can't be cut up to.
   function toFaceOk(s, both) {
     const st = extrudeStateRef.current || extrudeState
-    const faceCut = extrudeTool === 'cutout' && st?.planeId === 'face'
+    const faceCut = extrudeTool === 'cutout' && st?.planeId === 'face' && !st?.facePlane?.free
     return !(faceCut && !both && s > -0.05)
   }
 
@@ -9839,7 +9842,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             eased = t*t*(3-2*t)   // smoothstep
           }
           drawExtrudePreview(p.vp, p.profilePts, p.planeId, dir, centScreen,
-            p.depthMm, p.direction, p.opType, p.color, p.facePlane, eased)
+            p.depthMm, p.direction, p.opType, p.color, p.facePlane, eased, p.otherProfiles)
           if (extrudeSnapRef.current) drawExtrudeSnapDot(p.vp, extrudeSnapRef.current.point)
         }
       }
@@ -9879,9 +9882,12 @@ const App3D = forwardRef(function App3D(props, ref) {
     // computeExtrudeDirScreen — see that function's comment for why.
     extrudeAnimParamsRef.current = {
       vp, profilePts: prof, planeId, facePlane, centroid: st.centroid, depthMm,
+      // The other shapes in the sketch — commit extrudes / cuts them all, so
+      // their ghosts move too (the arrow stays on the picked one).
+      otherProfiles: (st.profiles || []).filter(p => p && p !== prof),
       // A cut sketched on a body's face only ever goes INTO the body, whichever
       // side is picked (cadWorker's buildExtrude), so the ghost must point inward too.
-      direction: (isCutout && planeId === 'face' && st.direction !== 'both') ? 'back' : (st.direction || 'front'),
+      direction: (isCutout && planeId === 'face' && !facePlane?.free && st.direction !== 'both') ? 'back' : (st.direction || 'front'),
       opType: extrudeTool,
       color: isCutout ? '#e05a4e' : extrudeColor,
     }
@@ -9899,13 +9905,26 @@ const App3D = forwardRef(function App3D(props, ref) {
     const st = extrudeState
     const isCut = extrudeTool === 'cutout'
     if ((extrudeTool !== 'extrude' && !isCut) || !st?.armed || st.revolveAxis || !vp) return
-    const pts = st.profiles?.[st.pickedIdx]
+    // EVERY shape in the sketch, not just the picked one — commit extrudes /
+    // cuts them all, so the preview shows them all (one merged prism).
+    const all = (st.profiles || []).filter(Boolean)
     const depthMm = parseFloat(st.depthInput)
-    if (!pts || !(depthMm > 0) || (isCut && st.extentMode === 'through')) { vp.hideExtrudeSolidPreview(); return }
-    vp.showExtrudeSolidPreview(
-      buildExtrudePrismGeometry(pts, st.planeId, st.facePlane || null,
-        previewRangeMm(isCut, depthMm, st.direction || 'front', st.planeId)),
-      isCut ? '#e05a4e' : ADD_PREVIEW_COLOR)
+    if (!all.length || !(depthMm > 0) || (isCut && st.extentMode === 'through')) { vp.hideExtrudeSolidPreview(); return }
+    const range = previewRangeMm(isCut, depthMm, st.direction || 'front', st.facePlane?.free ? 'free' : st.planeId)
+    const parts = all.map(pts => buildExtrudePrismGeometry(pts, st.planeId, st.facePlane || null, range))
+    let geo = parts[0]
+    if (parts.length > 1) {
+      // The prisms are plain triangle lists — join their positions into one.
+      const arrays = parts.map(g => g.getAttribute('position').array)
+      const merged = new Float32Array(arrays.reduce((n, a) => n + a.length, 0))
+      let off = 0
+      for (const a of arrays) { merged.set(a, off); off += a.length }
+      parts.forEach(g => g.dispose())
+      geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(merged, 3))
+      geo.computeVertexNormals()
+    }
+    vp.showExtrudeSolidPreview(geo, isCut ? '#e05a4e' : ADD_PREVIEW_COLOR)
     return () => vp.hideExtrudeSolidPreview()
   }, [extrudeState?.armed, extrudeState?.revolveAxis, extrudeState?.planeId, extrudeState?.facePlane,
       extrudeState?.profiles, extrudeState?.pickedIdx, extrudeState?.depthInput, extrudeState?.direction,
@@ -10091,7 +10110,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // Extrudes show a wireframe + arrows; cutouts show arrows only.
   // Pass depthMm=Infinity for a through-all cutout (arrow gets a fixed visual length + ∞ label).
   // animPhase (0..1) scales the depth for the breathing ghost animation — 1 = full depth.
-  function drawExtrudePreview(vp, profilePts, planeId, dir, centScreen, depthMm, direction, opType, color, facePlane=null, animPhase=1) {
+  function drawExtrudePreview(vp, profilePts, planeId, dir, centScreen, depthMm, direction, opType, color, facePlane=null, animPhase=1, otherProfiles=[]) {
     const oc = vp.getExtrudePreviewCanvas(); if (!oc) return
     const ctx = oc.getContext('2d')
     ctx.setTransform(1,0,0,1,0,0)
@@ -10207,6 +10226,24 @@ const App3D = forwardRef(function App3D(props, ref) {
       ctx.setLineDash([4,3])
       glowStroke(ctx, facePath(capPts), strokeColor, 1.5)
       ctx.setLineDash([])
+    }
+
+    // ── The sketch's other shapes: same cap (and base, both ways), no arrow ──
+    for (const pts of otherProfiles) {
+      const sp = pts.map(p => vp.sketchToScreen(p.x, p.y, planeId, facePlane)).filter(Boolean)
+      if (sp.length < 3) continue
+      const k = direction === 'front' ? 1 : direction === 'back' ? -1 : 0.5
+      const cap = sp.map(p => ({ x: p.x + dir.dx*offsetLen*k, y: p.y + dir.dy*offsetLen*k }))
+      if (isCutout) {
+        ctx.setLineDash([4,3])
+        glowStroke(ctx, facePath(cap), strokeColor, 1.5)
+        if (isBoth) glowStroke(ctx, facePath(sp.map(p => ({ x: p.x - dir.dx*offsetLen/2, y: p.y - dir.dy*offsetLen/2 }))), strokeColor, 1.5)
+        ctx.setLineDash([])
+      } else {
+        if (isBoth) glowStroke(ctx, facePath(sp.map(p => ({ x: p.x - dir.dx*offsetLen/2, y: p.y - dir.dy*offsetLen/2 }))), strokeColor, 1.25)
+        glowFill(ctx, facePath(cap), strokeColor, 0.1)
+        glowStroke(ctx, facePath(cap), strokeColor, 1.75)
+      }
     }
 
     // ── Direction arrow(s) ────────────────────────────────────────────────────
@@ -10417,7 +10454,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   function directionToggle(color, { compact = false } = {}) {
     const oneWay = extrudeState.direction !== 'both'
     // A cut sketched on a body's face always goes into that body — there is no other side to flip to.
-    const faceCut = extrudeTool === 'cutout' && extrudeState.planeId === 'face'
+    const faceCut = extrudeTool === 'cutout' && extrudeState.planeId === 'face' && !extrudeState.facePlane?.free
     const btn = (key, label, active, enabled, onClick, title) => (
       <button key={key} onClick={onClick} title={title} disabled={!enabled}
         style={{
@@ -10716,7 +10753,7 @@ const App3D = forwardRef(function App3D(props, ref) {
               pts: p, planeId, axis: revolveAxis, angleDeg, ...revolveWorkerDir(revolveReverse),
               circle: p.circleMeta || null,
               ...(facePlane ? {
-                normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z],
+                normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z], ...(facePlane.free ? { freePlane: true } : {}),
                 origin: [pxToMm(facePlane.origin.x), pxToMm(facePlane.origin.y), pxToMm(facePlane.origin.z)],
                 uAxis:  [facePlane.uAxis.x,  facePlane.uAxis.y,  facePlane.uAxis.z],
               } : {}),
@@ -10725,7 +10762,7 @@ const App3D = forwardRef(function App3D(props, ref) {
               pts: p, depthMm: cutDepthMm, planeId, direction: cutDirection,
               circle: p.circleMeta || null,
               ...(facePlane ? {
-                normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z],
+                normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z], ...(facePlane.free ? { freePlane: true } : {}),
                 origin: [pxToMm(facePlane.origin.x), pxToMm(facePlane.origin.y), pxToMm(facePlane.origin.z)],
                 uAxis:  [facePlane.uAxis.x,  facePlane.uAxis.y,  facePlane.uAxis.z],
               } : {}),
@@ -10829,7 +10866,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           pts, planeId, direction, axis: revolveAxis, angleDeg, ...revolveWorkerDir(revolveReverse),
           circle: pts.circleMeta || null,
           ...(facePlane ? {
-            normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z],
+            normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z], ...(facePlane.free ? { freePlane: true } : {}),
             origin: [pxToMm(facePlane.origin.x), pxToMm(facePlane.origin.y), pxToMm(facePlane.origin.z)],
             uAxis:  [facePlane.uAxis.x,  facePlane.uAxis.y,  facePlane.uAxis.z],
           } : {}),
@@ -10963,7 +11000,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             pts: profPts, depthMm, planeId, direction, draftAngleDeg, draftDirection,
             circle: profPts.circleMeta || null,  // true circle → real curve, not a polygon prism
             ...(facePlane ? {
-              normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z],
+              normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z], ...(facePlane.free ? { freePlane: true } : {}),
               origin: [pxToMm(facePlane.origin.x), pxToMm(facePlane.origin.y), pxToMm(facePlane.origin.z)],
               uAxis:  [facePlane.uAxis.x,  facePlane.uAxis.y,  facePlane.uAxis.z],
               vAxis:  [facePlane.vAxis.x,  facePlane.vAxis.y,  facePlane.vAxis.z],
@@ -10991,7 +11028,7 @@ const App3D = forwardRef(function App3D(props, ref) {
               pts: holePts, depthMm: depthMm*4+10, planeId, direction: 'both',
               circle: holePts.circleMeta || null,
               ...(facePlane ? {
-                normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z],
+                normal: [facePlane.normal.x, facePlane.normal.y, facePlane.normal.z], ...(facePlane.free ? { freePlane: true } : {}),
                 origin: [pxToMm(facePlane.origin.x), pxToMm(facePlane.origin.y), pxToMm(facePlane.origin.z)],
                 uAxis:  [facePlane.uAxis.x,  facePlane.uAxis.y,  facePlane.uAxis.z],
               } : {}),

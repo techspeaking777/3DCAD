@@ -115,11 +115,14 @@ function serializeFacePlane(fp) {
     normal: vec3ToArr(fp.normal),
     uAxis:  vec3ToArr(fp.uAxis),
     vAxis:  vec3ToArr(fp.vAxis),
+    ...(fp.free ? { free: true } : {}),
   }
 }
 function deserializeFacePlane(obj) {
   if (!obj) return null
-  return new FacePlane(arrToVec3(obj.origin), arrToVec3(obj.normal), arrToVec3(obj.uAxis), arrToVec3(obj.vAxis))
+  const fp = new FacePlane(arrToVec3(obj.origin), arrToVec3(obj.normal), arrToVec3(obj.uAxis), arrToVec3(obj.vAxis))
+  if (obj.free) fp.free = true
+  return fp
 }
 
 // Packs a profile-points array (possibly carrying .circleMeta/.curveSegments/

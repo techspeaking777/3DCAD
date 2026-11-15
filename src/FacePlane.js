@@ -32,6 +32,10 @@ export class FacePlane {
     this.vAxis  = vAxis.clone().normalize()
     // THREE.Plane for raycasting
     this.threePlane = new THREE.Plane().setFromNormalAndCoplanarPoint(this.normal, this.origin)
+    // true for an OFFSET plane (offsetFacePlane in App3D): it doesn't sit on a
+    // body face, so a cut on it isn't forced "into the face" — it can go
+    // either side, like a cut on a work plane.
+    this.free = false
   }
 
   /** 3D world Vector3 → 2D sketch {x,y} */

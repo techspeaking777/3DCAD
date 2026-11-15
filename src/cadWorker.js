@@ -2616,7 +2616,7 @@ function holesInFace({ pts, draftAngleDeg }) {
 
 function buildExtrude({ pts, depthMm, planeId, direction='both',
                         normal, origin, uAxis, vAxis, isCut=false, circle=null,
-                        draftAngleDeg=0, draftDirection='out' }) {
+                        draftAngleDeg=0, draftDirection='out', freePlane=false }) {
   if (!circle && (!pts||pts.length<3)) throw new Error('Need ≥3 pts')
   const half = depthMm / 2
   // 1mm protrusion on the entry face prevents OCC coincident-face Boolean failures
@@ -2647,8 +2647,10 @@ function buildExtrude({ pts, depthMm, planeId, direction='both',
 
   let shape
   if (direction === 'front') {
-    if (planeId === 'face' && isCut) {
+    if (planeId === 'face' && isCut && !freePlane) {
       // Replicad face plane normal points OUTWARD; 'front' cut means INWARD.
+      // (Not on an offset plane — freePlane — which isn't on a face: there
+      // 'front' is +normal like a work plane, so the cut can go either side.)
       // Put profile depthMm inside the solid and extrude outward through the face + OVH.
       shape = profileWithHoles(pts, planeId, -depthMm, normal, origin, uAxis, circle).extrude(depthMm + OVH)
     } else {

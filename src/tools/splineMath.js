@@ -69,20 +69,10 @@ function findSplineIntersectionUs(sampled, lines, circles, arcs, otherSplines=[]
     const b = sampled[i + 1]
     const segU = i / total  // u at start of this segment
 
-    // vs lines
+    // vs lines (crossings — a line that only ENDS on the spline is handled below)
     lines.forEach(l => {
       const h = segSegIntersect(a.x, a.y, b.x, b.y, l.x1, l.y1, l.x2, l.y2)
-      if (h) { us.push(segU + h.t / total); return }
-      // segSegIntersect only finds crossings — a line whose endpoint just
-      // touches the spline (a T-junction, not a crossing) falls outside its
-      // strict interior bounds. Check the line's own endpoints directly.
-      const tol = TRIM_DIST / zoomRef.scale
-      ;[[l.x1, l.y1], [l.x2, l.y2]].forEach(([px, py]) => {
-        const t = tOnSeg(px, py, a.x, a.y, b.x, b.y)
-        if (t <= 1e-6 || t >= 1 - 1e-6) return
-        const ex = a.x + t * (b.x - a.x), ey = a.y + t * (b.y - a.y)
-        if (Math.hypot(px - ex, py - ey) < tol) us.push(segU + t / total)
-      })
+      if (h) us.push(segU + h.t / total)
     })
 
     // vs circles
@@ -151,6 +141,26 @@ function findSplineIntersectionUs(sampled, lines, circles, arcs, otherSplines=[]
       }
     })
   })
+
+  // Anything that only ENDS on the spline (a T-junction, not a crossing) — a
+  // line's, an arc's or another open spline's end within reach of it — is a cut
+  // point too. Checked against the nearest point on the WHOLE curve, so an end
+  // landing exactly on one of a trimmed spline's own points (common after Trim
+  // or Corner) counts; the spline's own two ends don't (nothing to cut there).
+  const tol = TRIM_DIST / zoomRef.scale
+  const touch = (px, py) => {
+    let best = Infinity, bestU = -1
+    for (let i = 0; i < total; i++) {
+      const a = sampled[i], b = sampled[i + 1]
+      const t = Math.max(0, Math.min(1, tOnSeg(px, py, a.x, a.y, b.x, b.y)))
+      const d = Math.hypot(px - (a.x + t * (b.x - a.x)), py - (a.y + t * (b.y - a.y)))
+      if (d < best) { best = d; bestU = (i + t) / total }
+    }
+    if (best < tol && bestU > 1e-6 && bestU < 1 - 1e-6) us.push(bestU)
+  }
+  lines.forEach(l => { touch(l.x1, l.y1); touch(l.x2, l.y2) })
+  arcs.forEach(arc => [arc.startAngle, arc.endAngle].forEach(ang => touch(arc.cx + arc.r * Math.cos(ang), arc.cy + arc.r * Math.sin(ang))))
+  otherSplines.forEach(sp => { if (sp && !sp.closed && sp.points.length >= 2) { const q = sp.points; touch(q[0].x, q[0].y); touch(q[q.length - 1].x, q[q.length - 1].y) } })
 
   // Deduplicate and sort
   const uniq = []

@@ -62,6 +62,33 @@ export function pointOnSegT(px,py,x1,y1,x2,y2,tol=4) {
   return Math.max(0,Math.min(1,t))
 }
 
+// A spline as points for intersection tests: a polyline spline (Trim output,
+// DXF import, Text) IS its points; a drawn one is its Catmull-Rom curve sampled.
+function splineTrimPoly(sp, perSeg) {
+  const n = sp.points.length
+  if (sp.polyline) return sp.closed ? [...sp.points, sp.points[0]] : sp.points
+  const ext = sp.closed ? [sp.points[n-1], ...sp.points, sp.points[0], sp.points[1]] : [sp.points[0], ...sp.points, sp.points[n-1]]
+  const segCount = sp.closed ? n : n - 1
+  const poly = []
+  for (let i = 0; i < segCount; i++) {
+    const p0 = ext[i], p1 = ext[i+1], p2 = ext[i+2], p3 = ext[i+3]
+    for (let j = 0; j < perSeg; j++) {
+      const t = j / perSeg, t2 = t*t, t3 = t2*t
+      poly.push({
+        x: 0.5*((2*p1.x)+(-p0.x+p2.x)*t+(2*p0.x-5*p1.x+4*p2.x-p3.x)*t2+(-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
+        y: 0.5*((2*p1.y)+(-p0.y+p2.y)*t+(2*p0.y-5*p1.y+4*p2.y-p3.y)*t2+(-p0.y+3*p1.y-3*p2.y+p3.y)*t3),
+      })
+    }
+  }
+  poly.push(sp.closed ? poly[0] : sp.points[n-1])
+  return poly
+}
+// The two ends of an OPEN spline — a spline that just ENDS on a line / circle /
+// arc (a T-junction, e.g. one trimmed back to it) is a cut point for trimming
+// that entity, the same as a line ending on it. Without this, trimming the tip
+// of a line a spline had been trimmed back to deleted the WHOLE line.
+const splineEnds = sp => sp.closed || sp.points.length < 2 ? [] : [sp.points[0], sp.points[sp.points.length - 1]]
+
 // Find t-value on segment (x1,y1)→(x2,y2) where a sampled polyline crosses it.
 // Returns all crossing t-values.
 function segSplineIntersections(x1,y1,x2,y2,polyPts) {
@@ -96,25 +123,8 @@ export function lineIntersections(idx,lines,circles,arcs,splines=[]) {
   // Spline crossings — sample each spline and find segment-segment intersections
   splines.forEach(sp=>{
     if (!sp||sp.points.length<2) return
-    // Inline sample to avoid circular import — 20 samples per segment is sufficient for trim
-    const n=sp.points.length
-    const ext=sp.closed
-      ? [sp.points[n-1],...sp.points,sp.points[0],sp.points[1]]
-      : [sp.points[0],...sp.points,sp.points[n-1]]
-    const segCount=sp.closed?n:n-1
-    const poly=[]
-    for (let i=0;i<segCount;i++){
-      const p0=ext[i],p1=ext[i+1],p2=ext[i+2],p3=ext[i+3]
-      for (let j=0;j<20;j++){
-        const t=j/20,t2=t*t,t3=t2*t
-        poly.push({
-          x:0.5*((2*p1.x)+(-p0.x+p2.x)*t+(2*p0.x-5*p1.x+4*p2.x-p3.x)*t2+(-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
-          y:0.5*((2*p1.y)+(-p0.y+p2.y)*t+(2*p0.y-5*p1.y+4*p2.y-p3.y)*t2+(-p0.y+3*p1.y-3*p2.y+p3.y)*t3),
-        })
-      }
-    }
-    if (poly.length) poly.push(sp.closed?poly[0]:sp.points[n-1])
-    segSplineIntersections(x1,y1,x2,y2,poly).forEach(t=>add(t))
+    segSplineIntersections(x1,y1,x2,y2,splineTrimPoly(sp,20)).forEach(t=>add(t))
+    splineEnds(sp).forEach(p=>add(pointOnSegT(p.x,p.y,x1,y1,x2,y2)))
   })
   const ts=Array.from(tSet).map(Number).sort((a,b)=>a-b)
   const dx=x2-x1,dy=y2-y1
@@ -146,24 +156,14 @@ export function circleIntersectionAngles(idx,lines,circles,arcs,splines=[]) {
   // Spline crossings — sample each spline and find where it crosses the circle
   splines.forEach(sp=>{
     if (!sp||sp.points.length<2) return
-    const n=sp.points.length
-    const ext=sp.closed?[sp.points[n-1],...sp.points,sp.points[0],sp.points[1]]:[sp.points[0],...sp.points,sp.points[n-1]]
-    const segs=sp.closed?n:n-1
-    for (let i=0;i<segs;i++){
-      const p0=ext[i],p1=ext[i+1],p2=ext[i+2],p3=ext[i+3]
-      const poly=[]
-      for (let j=0;j<=16;j++){
-        const t=j/16,t2=t*t,t3=t2*t
-        poly.push({
-          x:0.5*((2*p1.x)+(-p0.x+p2.x)*t+(2*p0.x-5*p1.x+4*p2.x-p3.x)*t2+(-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
-          y:0.5*((2*p1.y)+(-p0.y+p2.y)*t+(2*p0.y-5*p1.y+4*p2.y-p3.y)*t2+(-p0.y+3*p1.y-3*p2.y+p3.y)*t3),
-        })
-      }
-      for (let k=0;k<poly.length-1;k++){
-        segCircleIntersect(poly[k].x,poly[k].y,poly[k+1].x,poly[k+1].y,c.cx,c.cy,c.r)
-          .forEach(p=>angles.push(p.angle))
-      }
+    const poly=splineTrimPoly(sp,16)
+    for (let k=0;k<poly.length-1;k++){
+      segCircleIntersect(poly[k].x,poly[k].y,poly[k+1].x,poly[k+1].y,c.cx,c.cy,c.r)
+        .forEach(p=>angles.push(p.angle))
     }
+    splineEnds(sp).forEach(p=>{
+      if (Math.abs(Math.hypot(p.x-c.cx,p.y-c.cy)-c.r)<1) angles.push(norm2pi(Math.atan2(p.y-c.cy,p.x-c.cx)))
+    })
   })
   const uniq=[]
   angles.forEach(a=>{if(!uniq.some(b=>Math.abs(b-a)<1e-4))uniq.push(a)})
@@ -193,25 +193,18 @@ export function arcIntersectionAngles(arcIdx,lines,circles,arcs,splines=[]) {
   // Spline crossings against this arc
   splines.forEach(sp=>{
     if (!sp||sp.points.length<2) return
-    const n=sp.points.length
-    const ext=sp.closed?[sp.points[n-1],...sp.points,sp.points[0],sp.points[1]]:[sp.points[0],...sp.points,sp.points[n-1]]
-    const segs=sp.closed?n:n-1
-    for (let i=0;i<segs;i++){
-      const p0=ext[i],p1=ext[i+1],p2=ext[i+2],p3=ext[i+3]
-      const poly=[]
-      for (let j=0;j<=16;j++){
-        const t=j/16,t2=t*t,t3=t2*t
-        poly.push({
-          x:0.5*((2*p1.x)+(-p0.x+p2.x)*t+(2*p0.x-5*p1.x+4*p2.x-p3.x)*t2+(-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
-          y:0.5*((2*p1.y)+(-p0.y+p2.y)*t+(2*p0.y-5*p1.y+4*p2.y-p3.y)*t2+(-p0.y+3*p1.y-3*p2.y+p3.y)*t3),
-        })
-      }
-      for (let k=0;k<poly.length-1;k++){
-        segCircleIntersect(poly[k].x,poly[k].y,poly[k+1].x,poly[k+1].y,arc.cx,arc.cy,arc.r)
-          .filter(p=>angleOnArc(p.angle,arc.startAngle,arc.endAngle))
-          .forEach(p=>angles.push(p.angle))
-      }
+    const poly=splineTrimPoly(sp,16)
+    for (let k=0;k<poly.length-1;k++){
+      segCircleIntersect(poly[k].x,poly[k].y,poly[k+1].x,poly[k+1].y,arc.cx,arc.cy,arc.r)
+        .filter(p=>angleOnArc(p.angle,arc.startAngle,arc.endAngle))
+        .forEach(p=>angles.push(p.angle))
     }
+    splineEnds(sp).forEach(p=>{
+      if (Math.abs(Math.hypot(p.x-arc.cx,p.y-arc.cy)-arc.r)<1) {
+        const a=norm2pi(Math.atan2(p.y-arc.cy,p.x-arc.cx))
+        if (angleOnArc(a,arc.startAngle,arc.endAngle)) angles.push(a)
+      }
+    })
   })
   // 1e-4 matches circleIntersectionAngles' own dedup tolerance below — a
   // tangent-circle construction (see tanCircleSolution) can produce the SAME

@@ -232,9 +232,10 @@ const PROJECT_FORMAT_VERSION = 1
 // no longer matches (file edited by hand, features changed) is ignored on load.
 // Bump when the worker starts building a saved recipe DIFFERENTLY (v2: failed
 // circle cuts are re-cut as true arcs, not a 96-gon; v3: a spline is ONE B-spline
-// edge, not a Bezier per span) — older cached shapes are
+// edge, not a Bezier per span; v4: a closed spline is a closed curve, not open +
+// a straight closing line) — older cached shapes are
 // then ignored once and every body is rebuilt from its features on next open.
-const SNAPSHOT_FORMAT_VERSION = 3
+const SNAPSHOT_FORMAT_VERSION = 4
 
 // A hash of the features that decide the geometry — not their name, colour or hidden
 // flag (those change without touching a shape). Works on the plain objects as saved,

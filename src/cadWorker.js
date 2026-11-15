@@ -2185,8 +2185,8 @@ function bezierChainAsBSplineEdge(sketcher, segs, endWorld) {
 // Emits one real curve — a chain of cubic Beziers reproducing the original
 // hand-drawn spline exactly (see catmullRomToBezierSegments) — onto a
 // Sketcher already positioned at controlPoints[0].
-function emitBezierChain(sketcher, controlPoints) {
-  const segs = catmullRomToBezierSegments(controlPoints, false)
+function emitBezierChain(sketcher, controlPoints, closed=false) {
+  const segs = catmullRomToBezierSegments(controlPoints, closed)
   // ONE edge for the whole spline (as Fusion / Solid Edge store it): the Bezier
   // chain rewritten exactly as a single cubic B-spline, so an extruded spline
   // wall is one face with no seam lines and its rim is one edge (Fillet /
@@ -2194,7 +2194,8 @@ function emitBezierChain(sketcher, controlPoints) {
   // old way — if a span is degenerate or OCC refuses the curve.
   if (segs.length >= 2 && segs.every(s => Math.hypot(s.end.x-s.start.x, s.end.y-s.start.y) >= 0.01)) {
     try {
-      const endWorld = sketcher.plane.toWorldCoords(toMm(segs[segs.length-1].end))
+      // A closed curve ends exactly where the wire started.
+      const endWorld = closed ? sketcher.firstPoint : sketcher.plane.toWorldCoords(toMm(segs[segs.length-1].end))
       sketcher.pendingEdges.push(bezierChainAsBSplineEdge(sketcher, segs, endWorld))
       sketcher._updatePointer(endWorld)
       return
@@ -2250,6 +2251,18 @@ function emitArc(sketcher, seg, snapEndTo=null) {
   sketcher.threePointsArcTo(endMm, toMm(midPt))
 }
 
+// A spline segment that is a whole CLOSED spline (drawn with C on) — built as
+// a closed curve. New profiles say so (`closed`); older saved ones are told
+// apart by shape: the segment spans the whole profile and, unlike an open
+// spline whose two ends were joined, its control points don't repeat the start.
+function isClosedSplineSeg(seg, n, close) {
+  if (seg.closed) return true
+  const cp = seg.controlPoints
+  if (!close || seg.startIdx !== 0 || seg.count < n || !cp || cp.length < 3) return false
+  const a = cp[0], b = cp[cp.length - 1]
+  return Math.hypot(a.x - b.x, a.y - b.y) > 0.01
+}
+
 // Mixed profile: walks `pts` by index, switching between straight .lineTo()
 // calls and real curve commands (spline/arc) wherever a curveSegments entry
 // says so — see detectProfiles() in extrudeMath.js for how these get
@@ -2274,8 +2287,9 @@ function buildMixedProfile(sketcher, pts, curveSegments, close=true) {
     const seg = (segPtr < segs.length && segs[segPtr].startIdx === i) ? segs[segPtr] : null
     if (seg) {
       if (seg.type === 'spline') {
-        emitBezierChain(sketcher, seg.controlPoints)
-        cur = toMm(seg.controlPoints[seg.controlPoints.length - 1])
+        const closedCurve = isClosedSplineSeg(seg, n, close)
+        emitBezierChain(sketcher, seg.controlPoints, closedCurve)
+        cur = closedCurve ? anchor : toMm(seg.controlPoints[seg.controlPoints.length - 1])
       } else if (seg.type === 'arc') {
         // Last segment overall, and its jump reaches (or passes) the end of
         // pts — nothing but close() follows, so this arc's end IS the wire's

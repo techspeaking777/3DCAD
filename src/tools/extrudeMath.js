@@ -320,7 +320,9 @@ export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
     // splines (always the case for Text/font-outline imports, which is the
     // only source of closed splines today besides freehand closed drawing).
     if (!sp.polyline) {
-      pts.curveSegments = [{ type:'spline', startIdx:0, count: pts.length, controlPoints: sp.points.map(p=>({x:p.x,y:p.y})) }]
+      // closed: the worker builds it as a CLOSED curve (without it the curve ran
+      // open and a straight line closed it — a flat side with two corners)
+      pts.curveSegments = [{ type:'spline', closed: true, startIdx:0, count: pts.length, controlPoints: sp.points.map(p=>({x:p.x,y:p.y})) }]
     }
     profiles.push(pts)
   })

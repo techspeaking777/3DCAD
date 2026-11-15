@@ -26,6 +26,7 @@ function ownProblems(r) {
   if (r.error) return [['red', 'could not open: ' + r.error]]
   const p = []
   for (const f of r.rebuilt || []) if (f.error) p.push(['red', `${f.name} failed: ${f.error}`])
+  for (const b of r.broken || []) if (!(r.rebuilt || []).some(f => f.error && f.name === b.name)) p.push(['red', `${b.name} skipped: ${b.reason}`])
   for (const b of r.bodies || []) {
     if (b.error) { p.push(['red', `${b.name}: could not measure`]); continue }
     if (!b.valid) p.push(['red', `${b.name}: invalid shape`])
@@ -54,6 +55,8 @@ function vsBaseline(r, b) {
   const failedThen = new Set((b.rebuilt || []).filter(f => f.error).map(f => f.name))
   for (const n of failedNow) if (!failedThen.has(n)) out.push(['red', `${n} now fails`])
   for (const n of failedThen) if (!failedNow.has(n)) out.push(['green', `${n} now rebuilds`])
+  const skippedThen = new Set((b.broken || []).map(x => x.name))
+  for (const x of r.broken || []) if (!skippedThen.has(x.name) && !failedNow.has(x.name)) out.push(['red', `${x.name} now skipped`])
   const rb = r.bodies || [], bb = b.bodies || []
   if (rb.length !== bb.length) out.push(['red', `bodies ${bb.length} → ${rb.length}`])
   for (let i = 0; i < Math.min(rb.length, bb.length); i++) {

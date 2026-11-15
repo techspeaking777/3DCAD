@@ -2303,22 +2303,25 @@ function bezierChainAsBSplineEdge(sketcher, segs, endWorld) {
 // Emits one real curve — a chain of cubic Beziers reproducing the original
 // hand-drawn spline exactly (see catmullRomToBezierSegments) — onto a
 // Sketcher already positioned at controlPoints[0].
-function emitBezierChain(sketcher, controlPoints, closed=false) {
-  emitBezierSegs(sketcher, catmullRomToBezierSegments(controlPoints, closed), closed)
+// legacy: a curve from a feature made before 2026-11-15 (saveLoad
+// markLegacySplines) — built the old way, one Bezier edge per span, so old
+// projects rebuild exactly as they were made (their fillets fit the old walls).
+function emitBezierChain(sketcher, controlPoints, closed=false, legacy=false) {
+  emitBezierSegs(sketcher, catmullRomToBezierSegments(controlPoints, closed), closed, legacy)
 }
 
 // A chain of cubic Beziers ({start, end, cp1, cp2}, sketch px; each starts where
 // the last ended) onto a Sketcher at segs[0].start. endsAtStart: the chain ends
 // on the wire's start point (a closed curve). Used for drawn splines (via
 // emitBezierChain) and for Text letters' exact font curves ('bezchain').
-function emitBezierSegs(sketcher, segs, endsAtStart=false) {
+function emitBezierSegs(sketcher, segs, endsAtStart=false, legacy=false) {
   const closed = endsAtStart
   // ONE edge for the whole spline (as Fusion / Solid Edge store it): the Bezier
   // chain rewritten exactly as a single cubic B-spline, so an extruded spline
   // wall is one face with no seam lines and its rim is one edge (Fillet /
   // Include Edge pick it whole). Falls back to one Bezier edge per span — the
   // old way — if a span is degenerate or OCC refuses the curve.
-  if (segs.length >= 2 && segs.every(s => Math.hypot(s.end.x-s.start.x, s.end.y-s.start.y) >= 0.01)) {
+  if (!legacy && segs.length >= 2 && segs.every(s => Math.hypot(s.end.x-s.start.x, s.end.y-s.start.y) >= 0.01)) {
     try {
       // A closed curve ends exactly where the wire started.
       const endWorld = closed ? sketcher.firstPoint : sketcher.plane.toWorldCoords(toMm(segs[segs.length-1].end))
@@ -2384,6 +2387,7 @@ function emitArc(sketcher, seg, snapEndTo=null) {
 // spline whose two ends were joined, its control points don't repeat the start.
 function isClosedSplineSeg(seg, n, close) {
   if (seg.closed) return true
+  if (seg.legacy) return false   // made before closed splines were built closed — keep it as it was
   const cp = seg.controlPoints
   if (!close || seg.startIdx !== 0 || seg.count < n || !cp || cp.length < 3) return false
   const a = cp[0], b = cp[cp.length - 1]
@@ -2415,7 +2419,7 @@ function buildMixedProfile(sketcher, pts, curveSegments, close=true) {
     if (seg) {
       if (seg.type === 'spline') {
         const closedCurve = isClosedSplineSeg(seg, n, close)
-        emitBezierChain(sketcher, seg.controlPoints, closedCurve)
+        emitBezierChain(sketcher, seg.controlPoints, closedCurve, !!seg.legacy)
         cur = closedCurve ? anchor : toMm(seg.controlPoints[seg.controlPoints.length - 1])
       } else if (seg.type === 'bezchain') {
         // A Text letter's exact font curves (extrudeMath glyphCurveSegments)

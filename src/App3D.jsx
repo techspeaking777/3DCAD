@@ -26,6 +26,7 @@ import { getAuthState, fetchMyClasses, saveNewCloudProject, updateCloudProject, 
 import { detectProfiles, detectPath, buildSolid, openEnds } from './tools/extrudeMath.js'
 import { cadEngine } from './cadEngine.js'
 import ReplayPanel from './tools/ReplayPanel.jsx'
+import { featureNeeds } from './tools/featureDeps.js'
 import { replicadMeshToThree } from './cadMesh.js'
 import TracerPanel from './tools/TracerPanel.jsx'
 import TextPanel from './tools/TextPanel.jsx'
@@ -1413,7 +1414,7 @@ function CutoutGlyph({ color='#7fa8cc' }) {
   )
 }
 
-function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, onEditShellThickness, onEditLoft, hiddenSolidIds, onToggleBodyVisible, onConvertSketch, onPatternCutout, hasSolids }) {
+function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, onEditShellThickness, onEditLoft, hiddenSolidIds, onToggleBodyVisible, onConvertSketch, onPatternCutout, hasSolids, brokenFeatures }) {
   const [editingName, setEditingName] = useState(null)
   const [hoverName, setHoverName] = useState(null)   // row whose name shows the rename cue
 
@@ -1509,12 +1510,16 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
             : feat.operation === 'revolve' ? 'revolve' : feat.operation === 'import' ? 'import' : 'extrude'
           const rowColor = featureOpColor(feat)
 
-          const itemBg = isActiveSketch ? '#4FC3F722' : 'transparent'
+          // A broken feature (couldn't update — see App3D's brokenFeatures): red row
+          // with its reason. A grouped row (multi-shape cut) is broken if any member is.
+          const brokenReason = brokenFeatures?.get(feat.id)
+            || (feat.groupId ? features.filter(f => f.groupId === feat.groupId).map(f => brokenFeatures?.get(f.id)).find(Boolean) : null)
+          const itemBg = brokenReason ? '#ff6b6b18' : isActiveSketch ? '#4FC3F722' : 'transparent'
           const borderLeft = `3px solid ${isActiveSketch ? '#4FC3F7' : rowColor + '55'}`
 
           return (
             <div key={feat.id}
-              title={isLocked ? `Part of ${features.find(f=>f.id===feat.joinedInto)?.name || 'a Join'} — delete it to edit` : undefined}
+              title={brokenReason || (isLocked ? `Part of ${features.find(f=>f.id===feat.joinedInto)?.name || 'a Join'} — delete it to edit` : undefined)}
               style={{
               borderLeft, background: itemBg,
               padding: '6px 10px 6px 8px',
@@ -1557,12 +1562,12 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                       textDecoration: hoverName===feat.id ? 'underline dotted #4FC3F7' : 'none',
                       textUnderlineOffset: 3,
                       fontStyle: isBodyHidden ? 'italic' : 'normal',
-                      color: isActiveSketch?'#4FC3F7':isBodyHidden?'#6b7a90':'#c7d3e6'}}
+                      color: brokenReason?'#ff6b6b':isActiveSketch?'#4FC3F7':isBodyHidden?'#6b7a90':'#c7d3e6'}}
                     onMouseEnter={()=>setHoverName(feat.id)}
                     onMouseLeave={()=>setHoverName(h=>h===feat.id?null:h)}
                     onDoubleClick={()=>setEditingName(feat.id)}
                   >
-                    {feat.name}
+                    {brokenReason && '⚠ '}{feat.name}
                   </span>
                 )}
 
@@ -1887,6 +1892,11 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                   </div>
                 </div>
               )}
+              {brokenReason && (
+                <div style={{marginLeft:20, marginTop:3, color:'#ff6b6b', fontSize:10, lineHeight:1.35}}>
+                  {brokenReason}
+                </div>
+              )}
             </div>
           )
         })}
@@ -2152,6 +2162,22 @@ const App3D = forwardRef(function App3D(props, ref) {
   // Model health readout (Ctrl+Shift+H) — a developer view of how each body is
   // built; see the worker's shapeHealthOf. Never saved.
   const [healthOpen,setHealthOpen]=useState(false)
+  // Broken features (edit history — docs/plan-edit-history.md): feature id →
+  // plain-English reason. Worked out on every rebuild, never saved: a cutout /
+  // fillet / shell that can't be replayed is skipped and listed here instead of
+  // taking its whole body down; a body that can't be built at all is listed too.
+  // Shown red in the Feature Tree.
+  const brokenRef = useRef(new Map())
+  const [brokenFeatures, setBrokenFeatures] = useState(() => new Map())
+  function setBrokenEntry(id, reason) {
+    const cur = brokenRef.current
+    if (reason == null ? !cur.has(id) : cur.get(id) === reason) return
+    const next = new Map(cur)
+    if (reason == null) next.delete(id); else next.set(id, reason)
+    brokenRef.current = next
+    setBrokenFeatures(next)
+  }
+  function resetBroken() { brokenRef.current = new Map(); setBrokenFeatures(brokenRef.current) }
   // Replay harness — opened by adding ?replay to the URL (ReplayPanel).
   const [replayOpen,setReplayOpen]=useState(()=>new URLSearchParams(window.location.search).has('replay'))
   const [health,setHealth]=useState(null)
@@ -2769,7 +2795,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     const health = ids.length ? (await cadEngine.shapeHealth({ solidIds: ids })).health : []
     const fallbacks = (await cadEngine.takeDiagnostics()).diagnostics
     const nameOf = id => data.features.find(f => f.solidId === id && f.type === 'extrude' && !f.joinedInto)?.name || 'Body'
-    return { totalMs, featureCount: data.features.length, rebuilt: report.features,
+    const broken = [...brokenRef.current].map(([id, reason]) => ({ name: data.features.find(f => f.id === id)?.name || String(id), reason }))
+    return { totalMs, featureCount: data.features.length, rebuilt: report.features, broken,
       bodies: health.map(h => ({ ...h, name: nameOf(h.solidId) })), fallbacks }
   }
 
@@ -6560,6 +6587,37 @@ const App3D = forwardRef(function App3D(props, ref) {
   // FeatureTree's own isBodyOwner already uses to decide which rows can be
   // hidden. Mirror and Join can both be picked as a Mirror3D source (mirror-
   // of-mirror, mirror-of-join) — see commitMirrorSolid/rebuildDependentMirrors.
+  // Broken features: forget ones that were deleted, and tell the student when
+  // an edit or a load leaves more of them than before.
+  useEffect(() => {
+    const ids = new Set(features.map(f => f.id))
+    for (const id of brokenRef.current.keys()) if (!ids.has(id)) setBrokenEntry(id, null)
+  }, [features])
+  const brokenCountRef = useRef(0)
+  const brokenMsgTimerRef = useRef(null)
+  useEffect(() => {
+    const n = brokenFeatures.size, before = brokenCountRef.current
+    brokenCountRef.current = n
+    if (n <= before) return
+    setCadError(`${n} feature${n > 1 ? 's' : ''} couldn’t update — ${n > 1 ? 'they’re' : 'it’s'} marked red in the Feature Tree.`)
+    clearTimeout(brokenMsgTimerRef.current)
+    brokenMsgTimerRef.current = setTimeout(() => setCadError(null), 10000)
+  }, [brokenFeatures])
+
+  // "Updating the model…" banner whenever the CAD worker has been busy for
+  // more than 1.5 s (a long edit rebuild, a heavy project opening, …).
+  const [engineBusy, setEngineBusy] = useState(false)
+  useEffect(() => {
+    let since = null
+    const t = setInterval(() => {
+      if (cadEngine.pendingCount > 0) {
+        if (since == null) since = performance.now()
+        if (performance.now() - since > 1500) setEngineBusy(true)
+      } else { since = null; setEngineBusy(false) }
+    }, 250)
+    return () => clearInterval(t)
+  }, [])
+
   // Model health: re-measured whenever the bodies change while the panel is open.
   const healthSeqRef = useRef(0)
   useEffect(() => {
@@ -10618,6 +10676,18 @@ const App3D = forwardRef(function App3D(props, ref) {
   // applied first. `overrideId` + `overrideCut`/`overrideFilletRadius`
   // substitutes new params for ONE feature being edited; `skipId` omits one
   // being deleted. Returns the final meshData.
+  // Why a replayed step was skipped, in plain English for the Feature Tree.
+  function brokenStepReason(feat, err) {
+    const msg = String(err?.message || err || '').replace(/^Error:\s*/, '')
+    if (feat.type === 'fillet' && /no edge/i.test(msg))
+      return `Its edges moved or are gone — delete it (✕) and round the edges again`
+    if (feat.type === 'fillet' && /too large|radius/i.test(msg))
+      return `The ${feat.operation === 'chamfer' ? 'chamfer' : 'fillet'} no longer fits — try a smaller size, or delete it (✕)`
+    if (feat.operation === 'cutout' && /didn.t remove|overlap|nothing/i.test(msg))
+      return 'The cut no longer reaches the body — edit its sketch to move it, or delete it (✕)'
+    return 'Couldn’t be rebuilt: ' + (msg || 'unknown problem')
+  }
+
   async function rebuildSolidChain(baseSolid, { overrideId=null, overrideCut=null, overrideFilletRadius=null, overrideShellThickness=null, skipId=null, skipIds=null } = {}, feats = features, solidsLookup = solids) {
     let { meshData, baseWorkerParams } = baseSolid.operation === 'join'
       ? await rebuildJoinBaseMesh(baseSolid, feats, solidsLookup)
@@ -10633,8 +10703,8 @@ const App3D = forwardRef(function App3D(props, ref) {
       // A multi-shape cutout is several cutout features sharing a groupId —
       // replay the consecutive run as ONE subtract (one boolean). An
       // overridden member (being edited) is replayed on its own as before.
+      const run = [opFeat]
       if (opFeat.operation === 'cutout' && opFeat.groupId && opFeat.id !== overrideId) {
-        const run = [opFeat]
         while (k + 1 < ops.length) {
           const nx = ops[k + 1]
           if (nx.operation !== 'cutout' || nx.groupId !== opFeat.groupId || nx.id === overrideId) break
@@ -10642,20 +10712,30 @@ const App3D = forwardRef(function App3D(props, ref) {
           if (nx.id === skipId || skipSet?.has(nx.id)) continue
           run.push(nx)
         }
+      }
+      // One step that can't be replayed (a fillet whose edges moved, a cut that
+      // no longer reaches the body, …) is SKIPPED and marked broken — the body
+      // keeps everything before and after it, like Fusion. The step being
+      // edited right now still reports its error as before.
+      try {
         if (run.length > 1) {
           meshData = await cadEngine.subtract({ baseSolidId: baseSolid.id, cuts: run.map(buildCutWorkerParams), base: baseWorkerParams })
-          continue
+        } else if (opFeat.type === 'fillet') {
+          const radius = opFeat.id === overrideId ? overrideFilletRadius : opFeat.radius
+          meshData = await cadEngine.fillet3d({ solidId: baseSolid.id, edgePoints: opFeat.edgePoints, radius, operation: opFeat.operation ?? 'fillet', base: baseWorkerParams })
+        } else if (opFeat.type === 'shell') {
+          const thickness = opFeat.id === overrideId ? overrideShellThickness : opFeat.thickness
+          meshData = await cadEngine.shell3d({ solidId: baseSolid.id, facePoints: opFeat.facePoints, thickness, direction: opFeat.direction ?? 'inward', base: baseWorkerParams })
+        } else {
+          const cutParams = opFeat.id === overrideId ? overrideCut : buildCutWorkerParams(opFeat)
+          meshData = await cadEngine.subtract({ baseSolidId: baseSolid.id, cut: cutParams, base: baseWorkerParams })
         }
-      }
-      if (opFeat.type === 'fillet') {
-        const radius = opFeat.id === overrideId ? overrideFilletRadius : opFeat.radius
-        meshData = await cadEngine.fillet3d({ solidId: baseSolid.id, edgePoints: opFeat.edgePoints, radius, operation: opFeat.operation ?? 'fillet', base: baseWorkerParams })
-      } else if (opFeat.type === 'shell') {
-        const thickness = opFeat.id === overrideId ? overrideShellThickness : opFeat.thickness
-        meshData = await cadEngine.shell3d({ solidId: baseSolid.id, facePoints: opFeat.facePoints, thickness, direction: opFeat.direction ?? 'inward', base: baseWorkerParams })
-      } else {
-        const cutParams = opFeat.id === overrideId ? overrideCut : buildCutWorkerParams(opFeat)
-        meshData = await cadEngine.subtract({ baseSolidId: baseSolid.id, cut: cutParams, base: baseWorkerParams })
+        for (const f of run) setBrokenEntry(f.id, null)
+      } catch (err) {
+        if (run.some(f => f.id === overrideId)) throw err
+        console.warn('[rebuild] skipped a step that could not be replayed:', opFeat.name, err)
+        const reason = brokenStepReason(opFeat, err)
+        for (const f of run) setBrokenEntry(f.id, reason)
       }
     }
     // Move/Copy/Rotate's baked transform — applied last, on top of the
@@ -10698,6 +10778,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // report (replay harness only): gets one {name, op, ms, featureCount} or
   // {name, op, error} entry per body rebuilt.
   async function rebuildProjectFromFeatures(loadedFeatures, snapshots = null, report = null) {
+    resetBroken()
     const newSolids = []
     const failed = []
     const t0 = performance.now()
@@ -10734,6 +10815,11 @@ const App3D = forwardRef(function App3D(props, ref) {
         })
       } catch (err) {
         console.error('Rebuild failed for', feat.name, err)
+        // A body that needed another feature which couldn't be built says so,
+        // instead of a technical "source not found".
+        const needed = featureNeeds(feat, loadedFeatures).map(id => loadedFeatures.find(f => f.id === id))
+          .find(f => f && brokenRef.current.has(f.id))
+        setBrokenEntry(feat.id, needed ? `Needs ${needed.name}, which couldn’t be built` : 'Couldn’t be rebuilt: ' + (err.message || String(err)))
         failed.push(`${feat.name || feat.id}: ${err.message || String(err)}`)
         report?.features.push({ name: feat.name || String(feat.id), op: feat.operation || feat.type, error: err.message || String(err) })
       }
@@ -11168,15 +11254,19 @@ const App3D = forwardRef(function App3D(props, ref) {
           if (reuse) {
             const depOps = features.filter(f => f.solidId === solidId && (f.operation === 'cutout' || f.type === 'fillet' || f.type === 'shell'))
             for (const opFeat of depOps) {
+              // Same rule as rebuildSolidChain: a step that can't be replayed
+              // after this edit (a fillet whose edges moved, …) is skipped and
+              // marked broken (red in the tree) — the body keeps the rest.
               try {
                 meshData = opFeat.type === 'fillet'
                   ? await cadEngine.fillet3d({ solidId, edgePoints: opFeat.edgePoints, radius: opFeat.radius, operation: opFeat.operation ?? 'fillet', base: memberWorkerParams })
                   : opFeat.type === 'shell'
                     ? await cadEngine.shell3d({ solidId, facePoints: opFeat.facePoints, thickness: opFeat.thickness, direction: opFeat.direction ?? 'inward', base: memberWorkerParams })
                     : await cadEngine.subtract({ baseSolidId: solidId, cut: buildCutWorkerParams(opFeat), base: memberWorkerParams })
+                setBrokenEntry(opFeat.id, null)
               } catch (e) {
-                console.error(`[extrude edit] replaying dependent op ${opFeat.id} failed:`, e)
-                throw e
+                console.warn(`[extrude edit] skipped a step that could not be replayed: ${opFeat.name}`, e)
+                setBrokenEntry(opFeat.id, brokenStepReason(opFeat, e))
               }
             }
             if (depOps.length > 0) {
@@ -13956,6 +14046,15 @@ const App3D = forwardRef(function App3D(props, ref) {
 
       {replayOpen && <ReplayPanel onReplay={replayForTest} onClose={() => setReplayOpen(false)} />}
 
+      {engineBusy && !filletWorking && (
+        <div style={{position:'fixed',top:16,left:'50%',transform:'translateX(-50%)',
+          background:'#1d3a5c',color:'#fff',padding:'8px 18px',borderRadius:8,
+          zIndex:9999,fontFamily:'monospace',fontSize:12,pointerEvents:'none',
+          boxShadow:'0 4px 12px rgba(0,0,0,0.5)'}}>
+          Updating the model…
+        </div>
+      )}
+
       {healthOpen && <ModelHealthPanel health={health} onClose={() => setHealthOpen(false)}
         nameOf={id => baseFeatureForSolid(id)?.name || 'Body'} />}
 
@@ -16328,6 +16427,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         onToggleBodyVisible={handleToggleBodyVisible}
         onConvertSketch={convertSketchFeature}
         onPatternCutout={startCutoutPattern}
+        brokenFeatures={brokenFeatures}
         hasSolids={solids.length > 0}
       />
 

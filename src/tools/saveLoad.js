@@ -233,9 +233,10 @@ const PROJECT_FORMAT_VERSION = 1
 // Bump when the worker starts building a saved recipe DIFFERENTLY (v2: failed
 // circle cuts are re-cut as true arcs, not a 96-gon; v3: a spline is ONE B-spline
 // edge, not a Bezier per span; v4: a closed spline is a closed curve, not open +
-// a straight closing line) — older cached shapes are
+// a straight closing line; v5: features made before that build the old way —
+// markLegacySplines) — older cached shapes are
 // then ignored once and every body is rebuilt from its features on next open.
-const SNAPSHOT_FORMAT_VERSION = 4
+const SNAPSHOT_FORMAT_VERSION = 5
 
 // A hash of the features that decide the geometry — not their name, colour or hidden
 // flag (those change without touching a shape). Works on the plain objects as saved,
@@ -260,6 +261,7 @@ export function serializeProject(features, solids, drawingSheet, snapshots = nul
   return JSON.stringify({
     formatVersion: PROJECT_FORMAT_VERSION,
     app: '3d-retro-cad',
+    splineBuild: SPLINE_BUILD,   // see markLegacySplines
     features: featureObjs,
     ...(snapshots?.length ? {
       snapshots: { version: SNAPSHOT_FORMAT_VERSION, fingerprint: featuresFingerprint(featureObjs), shapes: snapshots },
@@ -332,6 +334,41 @@ async function safeSnapshots(getSnapshots) {
 // can run a project fetched as JSON (no File involved) through the exact
 // same validation/deserialization a local .trc file gets, rather than
 // duplicating it. Throws if `features` isn't present/an array.
+// ── Old spline build ──────────────────────────────────────────────────────────
+// On 2026-11-15 (commits 7406870, 879264c) a hand-drawn spline started building
+// as ONE smooth B-spline edge, and a closed spline as a truly closed curve. That
+// changed the shape of curved bodies made BEFORE then: fillets and cuts made on
+// the old split walls stopped fitting (a student's 3.6 mm fillet now fits only
+// 1.3 mm, and on the live site the whole body vanished). Old work must rebuild
+// exactly as it was made, so a project saved without `splineBuild` gets the
+// spline curve segments of every feature created before the change marked
+// `legacy: true`, which the worker builds the old way (emitBezierSegs /
+// isClosedSplineSeg). The mark is saved with the curve from then on; a sketch
+// that is re-drawn gets fresh, unmarked (new-build) segments.
+export const SPLINE_BUILD = 2
+const SPLINE_CUTOVER_MS = Date.parse('2026-11-15T05:39:42Z')
+// When a feature was made: the timestamp in its id, else its body id (both come
+// from Date.now()); 0 (= old) when neither has one.
+function featureCreatedMs(f) {
+  const m = /(\d{12,14})/.exec(String(f.id ?? ''))
+  if (m) return Number(m[1])
+  const sid = Number(f.solidId)
+  return Number.isFinite(sid) && sid > 1e12 ? sid : 0
+}
+function markLegacySplines(node, seen = new Set()) {
+  if (!node || typeof node !== 'object' || seen.has(node)) return
+  seen.add(node)
+  if (Array.isArray(node)) {
+    if (node.curveSegments) for (const seg of node.curveSegments) if (seg?.type === 'spline') seg.legacy = true
+    if (node.holes) markLegacySplines(node.holes, seen)
+    for (const item of node) {
+      if (item && typeof item === 'object' && !(typeof item.x === 'number' && typeof item.y === 'number')) markLegacySplines(item, seen)
+    }
+    return
+  }
+  for (const v of Object.values(node)) if (v && typeof v === 'object') markLegacySplines(v, seen)
+}
+
 export function parseProjectData(data) {
   if (!data || !Array.isArray(data.features)) throw new Error('Not a project file (no feature tree)')
   // Snapshots are used only when they were written for exactly these features.
@@ -339,7 +376,11 @@ export function parseProjectData(data) {
   const snapshots = snap && snap.version === SNAPSHOT_FORMAT_VERSION && Array.isArray(snap.shapes) && snap.shapes.length
     && snap.fingerprint === featuresFingerprint(data.features)
     ? snap.shapes : null
-  return { features: data.features.map(deserializeFeature), formatVersion: data.formatVersion, sheet: data.sheet || null, snapshots }
+  const features = data.features.map(deserializeFeature)
+  if (!(data.splineBuild >= SPLINE_BUILD)) {
+    for (const f of features) if (featureCreatedMs(f) < SPLINE_CUTOVER_MS) markLegacySplines(f)
+  }
+  return { features, formatVersion: data.formatVersion, sheet: data.sheet || null, snapshots }
 }
 
 // Parses a .trc (or legacy-incompatible) file. Throws if `features` isn't

@@ -1894,6 +1894,62 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
   )
 }
 
+// ── Model health panel (Ctrl+Shift+H) ────────────────────────────────────────
+const HEALTH_FACE_NAMES = { PLANE:'flat', CYLINDRE:'cylinder', CONE:'cone', SPHERE:'sphere', TORUS:'torus',
+  BSPLINE_SURFACE:'spline', BEZIER_SURFACE:'spline', EXTRUSION_SURFACE:'swept curve', REVOLUTION_SURFACE:'revolved', OFFSET_SURFACE:'offset' }
+const HEALTH_EDGE_NAMES = { LINE:'line', CIRCLE:'arc', ELLIPSE:'ellipse', BSPLINE_CURVE:'spline', BEZIER_CURVE:'spline' }
+function healthTypes(types, names) {
+  const merged = {}
+  for (const [k, n] of Object.entries(types || {})) { const name = names[k] || k.toLowerCase(); merged[name] = (merged[name] || 0) + n }
+  return Object.entries(merged).sort((a, b) => b[1] - a[1]).map(([k, n]) => k + ' ' + n).join(' · ')
+}
+// What looks wrong in one body's readout (red = a real problem, amber = worth a look).
+function healthFlags(h) {
+  if (h.error) return [['red', 'Could not measure: ' + h.error]]
+  const f = []
+  if (!h.valid) f.push(['red', 'OpenCascade says this shape is INVALID — later cuts / fillets on it may fail'])
+  if (h.solids > 1) f.push(['red', h.solids + ' separate solids in one body'])
+  if (h.solids === 0) f.push(['red', 'no solid — only surfaces'])
+  if (h.tinyEdges) f.push(['amber', h.tinyEdges + ' tiny edge' + (h.tinyEdges > 1 ? 's' : '') + ' (< 0.05 mm, smallest ' + h.minEdge.toFixed(4) + ' mm)'])
+  if (h.tinyFaces) f.push(['amber', h.tinyFaces + ' tiny face' + (h.tinyFaces > 1 ? 's' : '') + ' (< 0.05 mm², smallest ' + h.minFace.toFixed(4) + ' mm²)'])
+  const flat = h.faceTypes?.PLANE || 0
+  if (flat > 60 && flat > h.faces * 0.8) f.push(['amber', flat + ' flat faces — a curve may have been built from facets'])
+  return f
+}
+function ModelHealthPanel({ health, onClose, nameOf }) {
+  const C = { red: '#ff6b6b', amber: '#ffb74d' }
+  return (
+    <div style={{ position:'fixed', bottom:64, left:172, width:340, maxHeight:'60vh', overflowY:'auto', zIndex:9998,
+      background:'#0e0630', border:'1px solid #3a2f7a', borderRadius:6, padding:'10px 12px',
+      fontFamily:'monospace', fontSize:11, color:'#ccc', boxShadow:'0 4px 16px rgba(0,0,0,0.6)' }}>
+      <div style={{ display:'flex', alignItems:'center', marginBottom:8 }}>
+        <span style={{ color:'#53D3E4', fontWeight:'bold', letterSpacing:'0.05em' }}>MODEL HEALTH</span>
+        <span style={{ color:'#666', marginLeft:8 }}>Ctrl+Shift+H</span>
+        <button onClick={onClose} title="Close"
+          style={{ marginLeft:'auto', background:'none', border:'none', color:'#888', cursor:'pointer', fontSize:13 }}>✕</button>
+      </div>
+      {!health && <div style={{ color:'#888' }}>Measuring…</div>}
+      {health && !health.length && <div style={{ color:'#888' }}>No visible bodies.</div>}
+      {health && health.map(h => {
+        const flags = healthFlags(h)
+        return (
+          <div key={h.solidId ?? 'err'} style={{ borderTop:'1px solid #2a2050', padding:'7px 0' }}>
+            <div style={{ color:'#fff', fontWeight:'bold' }}>{h.solidId != null ? nameOf(h.solidId) : 'Error'}</div>
+            {!h.error && <>
+              <div>{h.faces} faces · {h.edges} edges · {Math.round(h.volume).toLocaleString()} mm³</div>
+              <div style={{ color:'#999' }}>faces: {healthTypes(h.faceTypes, HEALTH_FACE_NAMES)}</div>
+              <div style={{ color:'#999' }}>edges: {healthTypes(h.edgeTypes, HEALTH_EDGE_NAMES)}</div>
+            </>}
+            {flags.length
+              ? flags.map(([c, t], i) => <div key={i} style={{ color:C[c] }}>⚠ {t}</div>)
+              : <div style={{ color:'#7ED957' }}>✓ looks clean</div>}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 const App3D = forwardRef(function App3D(props, ref) {
   // ── Phase 2 Step 1: Work planes ──
   const [sketchMode,setSketchMode]=useState(false)
@@ -2092,6 +2148,10 @@ const App3D = forwardRef(function App3D(props, ref) {
   // X-ray view: faces fade out and every edge shows through the solids. View
   // only — never saved, never touches the model. Toolbar button or the X key.
   const [xray,setXray]=useState(false)
+  // Model health readout (Ctrl+Shift+H) — a developer view of how each body is
+  // built; see the worker's shapeHealthOf. Never saved.
+  const [healthOpen,setHealthOpen]=useState(false)
+  const [health,setHealth]=useState(null)
   const [navMode,setNavMode]=useState(null)
   useEffect(()=>{ viewport3dRef.current?.setNavMode(navMode) },[navMode])
   useEffect(()=>{
@@ -6475,6 +6535,21 @@ const App3D = forwardRef(function App3D(props, ref) {
   // FeatureTree's own isBodyOwner already uses to decide which rows can be
   // hidden. Mirror and Join can both be picked as a Mirror3D source (mirror-
   // of-mirror, mirror-of-join) — see commitMirrorSolid/rebuildDependentMirrors.
+  // Model health: re-measured whenever the bodies change while the panel is open.
+  const healthSeqRef = useRef(0)
+  useEffect(() => {
+    if (!healthOpen) return
+    const ids = solids.filter(s => s.id !== '__preview__' && !s.hidden).map(s => s.id)
+    const seq = ++healthSeqRef.current
+    setHealth(null)
+    const t = setTimeout(() => {
+      cadEngine.shapeHealth({ solidIds: ids })
+        .then(r => { if (seq === healthSeqRef.current) setHealth(r.health || []) })
+        .catch(err => { if (seq === healthSeqRef.current) setHealth([{ solidId: null, error: err.message }]) })
+    }, 300)
+    return () => clearTimeout(t)
+  }, [healthOpen, solids])
+
   function baseFeatureForSolid(solidId) {
     return features.find(f => f.type==='extrude' && !f.joinedInto && f.solidId===solidId &&
       ['extrude','revolve','loft','sweep','spring','mirror','join','import'].includes(f.operation || 'extrude'))
@@ -12900,6 +12975,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
     if (e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==='s'){e.preventDefault();if(!sketchMode)handleSaveProjectAs();return}
     if (e.ctrlKey&&e.key==='s'){e.preventDefault();sketchMode?handleSave():handleSaveProject();return}
+    if (e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==='h'){e.preventDefault();setHealthOpen(v=>!v);return}
     if ((e.key==='f'||e.key==='F')&&!e.ctrlKey){zoomToFit();return}
     if ((e.key==='x'||e.key==='X')&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&!/^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName||'')&&!e.target?.isContentEditable){setXray(v=>!v);return}
     // Sweep/Spring confirm popup: Esc always cancels the whole feature. Checked
@@ -13841,6 +13917,9 @@ const App3D = forwardRef(function App3D(props, ref) {
           <span style={{opacity:0.6,fontSize:11,marginLeft:10}}>✕</span>
         </div>
       )}
+
+      {healthOpen && <ModelHealthPanel health={health} onClose={() => setHealthOpen(false)}
+        nameOf={id => baseFeatureForSolid(id)?.name || 'Body'} />}
 
       {filletWorking && (
         <div style={{position:'fixed',top:16,left:'50%',transform:'translateX(-50%)',

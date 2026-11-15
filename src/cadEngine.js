@@ -30,7 +30,7 @@ class CadEngine {
       )
 
       this._worker.onmessage = (e) => {
-        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, soften, softenEdges, filletEdges, filletMax, snapshots, restored, message } = e.data
+        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, soften, softenEdges, filletEdges, filletMax, snapshots, restored, health, message } = e.data
         const { chain, filletPartial } = e.data
 
         if (type === 'ready') {
@@ -67,6 +67,7 @@ class CadEngine {
             chain !== undefined ? { chain } :
             snapshots ? { snapshots } :
             restored ? { restored } :
+            health ? { health } :
             { faces, edges, ...(soften ? { soften } : {}), ...(filletPartial ? { filletPartial } : {}) }
           )
         } else if (type === 'error') {
@@ -125,6 +126,10 @@ class CadEngine {
   }
 
   /** Round edges of a solid as much as each will take — params: {solidId, radius (mm, the target), minRadius?, edges?:[{edgeId, point:[x,y,z]},...] (just these; default every edge), keepFacePoints?:[[x,y,z],...] (faces whose outline edges stay sharp), base?}. Resolves {faces, edges, soften:{rounds:[{radius, edgePoints}], total, skipped, leftover:[{edgeId, point}], timedOut}}. */
+  /** Model health readout — params: {solidIds}. Resolves {health:[{solidId, faces, edges, faceTypes, edgeTypes, tinyEdges, minEdge, tinyFaces, minFace, solids, valid, volume} | {solidId, error}]}. */
+  async shapeHealth(params) {
+    return this._send('shapeHealth', params)
+  }
   async softenAll(params) {
     return this._send('softenAll', params)
   }

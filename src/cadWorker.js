@@ -547,6 +547,44 @@ function shapeIsValid(shape) {
   return valid
 }
 
+// ── Model health (developer readout — Ctrl+Shift+H in the app) ──────────────
+// How a stored body is actually built: faces / edges by kind, tiny edges and
+// faces (the trace of a curve split into pieces, or debris a boolean left),
+// how many separate solids, OCC's validity check and the volume. A simple part
+// with far more faces than it should have points at something upstream that
+// approximates or splits geometry (the kind of thing the spline, text and DXF
+// fixes removed).
+const HEALTH_TINY_EDGE = 0.05   // mm
+const HEALTH_TINY_FACE = 0.05   // mm²
+function shapeHealthOf(shape) {
+  const oc = getOC()
+  const measure = (fn, w) => { const g = new oc.GProp_GProps_1(); try { fn(w, g); return g.Mass() } finally { g.delete() } }
+  const faceTypes = {}, edgeTypes = {}
+  let tinyEdges = 0, minEdge = Infinity, tinyFaces = 0, minFace = Infinity
+  const faces = shape.faces
+  for (const f of faces) {
+    faceTypes[f.geomType] = (faceTypes[f.geomType] || 0) + 1
+    const a = measure((w, g) => oc.BRepGProp.SurfaceProperties_1(w, g, false, false), f.wrapped)
+    if (a < minFace) minFace = a
+    if (a < HEALTH_TINY_FACE) tinyFaces++
+    f.delete?.()
+  }
+  const edges = shape.edges
+  for (const e of edges) {
+    edgeTypes[e.geomType] = (edgeTypes[e.geomType] || 0) + 1
+    const L = measure((w, g) => oc.BRepGProp.LinearProperties(w, g, false, false), e.wrapped)
+    if (L < minEdge) minEdge = L
+    if (L < HEALTH_TINY_EDGE) tinyEdges++
+    e.delete?.()
+  }
+  let solids = 0
+  const ex = new oc.TopExp_Explorer_2(shape.wrapped, oc.TopAbs_ShapeEnum.TopAbs_SOLID, oc.TopAbs_ShapeEnum.TopAbs_SHAPE)
+  for (; ex.More(); ex.Next()) solids++
+  ex.delete()
+  return { faces: faces.length, edges: edges.length, faceTypes, edgeTypes, tinyEdges, minEdge, tinyFaces, minFace,
+    solids, valid: shapeIsValid(shape), volume: ocVolume(shape.wrapped) }
+}
+
 function edgeFilterForPoints(pts) {
   return e => e.either(pts.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt)))
 }
@@ -1307,6 +1345,17 @@ self.onmessage = async function(e) {
         catch (err) { console.warn('[cadWorker] snapshot failed for', solidId, err) }
       }
       self.postMessage({ type:'result', id, snapshots: items })
+      return
+    }
+    if (type==='shapeHealth') {
+      const health = []
+      for (const solidId of params.solidIds) {
+        const shape = shapeStore.get(solidId)
+        if (!shape || shape.isNull) continue
+        try { health.push({ solidId, ...shapeHealthOf(shape) }) }
+        catch (err) { health.push({ solidId, error: String(err?.message || err) }) }
+      }
+      self.postMessage({ type:'result', id, health })
       return
     }
     if (type==='restoreShapes') {

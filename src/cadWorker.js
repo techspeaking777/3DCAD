@@ -2166,11 +2166,23 @@ function bezierChainAsBSplineEdge(sketcher, segs, endWorld) {
   segs.forEach((s, i) => poles.push(plane.toWorldCoords(toMm(s.cp1)), plane.toWorldCoords(toMm(s.cp2)),
     i === segs.length - 1 ? endWorld : plane.toWorldCoords(toMm(s.end))))
   const n = segs.length
+  // Knot spacing: a span's parameter length is scaled so each join's tangents
+  // match in speed as well as direction — then a smooth (G1) join is C1 in the
+  // spline too and its knot can be lowered below. A Catmull-Rom chain's tangents
+  // are equal either side, so it stays evenly spaced (unchanged).
+  const h = [1]
+  for (let i = 1; i < n; i++) {
+    const a = segs[i-1], b = segs[i]
+    const la = Math.hypot(a.end.x - a.cp2.x, a.end.y - a.cp2.y), lb = Math.hypot(b.cp1.x - b.start.x, b.cp1.y - b.start.y)
+    const k = la > 1e-9 && lb > 1e-9 ? lb / la : 1
+    h.push(h[i-1] * Math.min(100, Math.max(0.01, k)))
+  }
   const P = new oc.TColgp_Array1OfPnt_2(1, poles.length)
   poles.forEach((v, i) => { const p = v.toPnt(); P.SetValue(i + 1, p); p.delete() })
   const K = new oc.TColStd_Array1OfReal_2(1, n + 1)
   const M = new oc.TColStd_Array1OfInteger_2(1, n + 1)
-  for (let i = 0; i <= n; i++) { K.SetValue(i + 1, i); M.SetValue(i + 1, i === 0 || i === n ? 4 : 3) }
+  let u = 0
+  for (let i = 0; i <= n; i++) { K.SetValue(i + 1, u); M.SetValue(i + 1, i === 0 || i === n ? 4 : 3); if (i < n) u += h[i] }
   const curve = new oc.Geom_BSplineCurve_1(P, K, M, 3, false)
   P.delete(); K.delete(); M.delete()
   for (let i = 2; i <= n; i++) curve.RemoveKnot(i, 2, 1e-6)
@@ -2186,7 +2198,15 @@ function bezierChainAsBSplineEdge(sketcher, segs, endWorld) {
 // hand-drawn spline exactly (see catmullRomToBezierSegments) — onto a
 // Sketcher already positioned at controlPoints[0].
 function emitBezierChain(sketcher, controlPoints, closed=false) {
-  const segs = catmullRomToBezierSegments(controlPoints, closed)
+  emitBezierSegs(sketcher, catmullRomToBezierSegments(controlPoints, closed), closed)
+}
+
+// A chain of cubic Beziers ({start, end, cp1, cp2}, sketch px; each starts where
+// the last ended) onto a Sketcher at segs[0].start. endsAtStart: the chain ends
+// on the wire's start point (a closed curve). Used for drawn splines (via
+// emitBezierChain) and for Text letters' exact font curves ('bezchain').
+function emitBezierSegs(sketcher, segs, endsAtStart=false) {
+  const closed = endsAtStart
   // ONE edge for the whole spline (as Fusion / Solid Edge store it): the Bezier
   // chain rewritten exactly as a single cubic B-spline, so an extruded spline
   // wall is one face with no seam lines and its rim is one edge (Fillet /
@@ -2290,6 +2310,10 @@ function buildMixedProfile(sketcher, pts, curveSegments, close=true) {
         const closedCurve = isClosedSplineSeg(seg, n, close)
         emitBezierChain(sketcher, seg.controlPoints, closedCurve)
         cur = closedCurve ? anchor : toMm(seg.controlPoints[seg.controlPoints.length - 1])
+      } else if (seg.type === 'bezchain') {
+        // A Text letter's exact font curves (extrudeMath glyphCurveSegments)
+        emitBezierSegs(sketcher, seg.beziers, !!seg.endsAtStart && close)
+        cur = seg.endsAtStart && close ? anchor : toMm(seg.beziers[seg.beziers.length - 1].end)
       } else if (seg.type === 'arc') {
         // Last segment overall, and its jump reaches (or passes) the end of
         // pts — nothing but close() follows, so this arc's end IS the wire's

@@ -361,7 +361,14 @@ export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
     if (sp.points.length < 2) return
     let pts = sp.polyline ? sp.points.map(p=>({...p})) : sampleSpline(sp.points, true, 16)
     if (pts.length < 3) return
-    if (sp.polyline && !sp.textId) pts = closedPolylineWithCurves(pts)
+    if (sp.polyline) {
+      // A Text letter with its font structure intact: its EXACT curves. Anything
+      // else (or a letter whose points no longer match it, e.g. after a Trim):
+      // smooth stretches through the points (polylineCurveRuns).
+      const glyphSegs = glyphCurveSegments(sp.glyph, pts)
+      if (glyphSegs) pts.curveSegments = glyphSegs
+      else pts = closedPolylineWithCurves(pts)
+    }
     if (sp.textId) pts.textId = sp.textId
     // Real curve metadata (see the mixed-loop walker above for the full
     // rationale) — the whole profile is one closed hand-drawn curve, so it's
@@ -377,6 +384,68 @@ export function detectProfiles(lines, arcs, planeId, circles=[], splines=[]) {
   })
 
   return resolveNestedHoles(profiles)
+}
+
+// A Text letter contour (TextPanel's `glyph` = { segs, samples }) back to its
+// font's exact curves. Each 'Q'/'C' span was sampled at t = i/samples, so its
+// control points are solved back from two of its own points — and because Move /
+// Rotate / Scale / Mirror move the points, the curves follow them exactly.
+// Spans that flow smoothly into each other (< 2°) become one 'bezchain' curve
+// segment (one edge in the solid — cadWorker emitBezierSegs); lines stay lines.
+// Returns null when the points don't fit the structure (then: polylineCurveRuns).
+export function glyphCurveSegments(glyph, P) {
+  const s = glyph?.samples, segs = glyph?.segs
+  if (!segs || !(s >= 2)) return null
+  let need = 1
+  for (const t of segs) need += t === 'L' ? 1 : (t === 'Q' || t === 'C') ? s : NaN
+  if (need !== P.length) return null
+  const lerp = (a, b, k) => ({ x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k })
+  const spans = []
+  let idx = 0
+  for (const t of segs) {
+    if (t === 'L') { spans.push(null); idx += 1; continue }
+    const p0 = P[idx], p3 = P[idx + s]
+    let cp1, cp2
+    if (t === 'Q') {
+      const k = Math.round(s / 2), u = k / s, m = 1 - u, q = P[idx + k]
+      const p1 = { x: (q.x - m*m*p0.x - u*u*p3.x) / (2*u*m), y: (q.y - m*m*p0.y - u*u*p3.y) / (2*u*m) }
+      cp1 = lerp(p0, p1, 2/3); cp2 = lerp(p3, p1, 2/3)   // the same curve as a cubic
+    } else {
+      if (s < 3) return null
+      const t1 = Math.round(s / 3) / s, t2 = Math.round(2 * s / 3) / s
+      const A = u => 3*u*(1-u)*(1-u), B = u => 3*u*u*(1-u), C0 = u => (1-u)**3, C3 = u => u**3
+      const r = (u, q) => ({ x: q.x - C0(u)*p0.x - C3(u)*p3.x, y: q.y - C0(u)*p0.y - C3(u)*p3.y })
+      const r1 = r(t1, P[idx + Math.round(s / 3)]), r2 = r(t2, P[idx + Math.round(2 * s / 3)])
+      const det = A(t1)*B(t2) - A(t2)*B(t1)
+      if (Math.abs(det) < 1e-12) return null
+      cp1 = { x: (r1.x*B(t2) - r2.x*B(t1)) / det, y: (r1.y*B(t2) - r2.y*B(t1)) / det }
+      cp2 = { x: (A(t1)*r2.x - A(t2)*r1.x) / det, y: (A(t1)*r2.y - A(t2)*r1.y) / det }
+    }
+    spans.push({ start: p0, end: p3, cp1, cp2, idx })
+    idx += s
+  }
+  const cosMax = Math.cos(2 * Math.PI / 180)
+  const smooth = (a, b) => {
+    const ax = a.end.x - a.cp2.x, ay = a.end.y - a.cp2.y, bx = b.cp1.x - b.start.x, by = b.cp1.y - b.start.y
+    const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by)
+    return la > 1e-6 && lb > 1e-6 && (ax*bx + ay*by) / (la*lb) > cosMax
+  }
+  const out = []
+  let run = null
+  for (const sp of spans) {
+    if (!sp) { run = null; continue }
+    if (run && smooth(run.list[run.list.length - 1], sp)) run.list.push(sp)
+    else { run = { list: [sp] }; out.push(run) }
+  }
+  if (!out.length) return null
+  const first = P[0]
+  return out.map(({ list }) => {
+    const last = list[list.length - 1]
+    return { type: 'bezchain', startIdx: list[0].idx, count: last.idx + s - list[0].idx,
+      // ends exactly where the contour started (the worker then lands on the wire start)
+      ...(Math.hypot(last.end.x - first.x, last.end.y - first.y) < 1e-6 ? { endsAtStart: true } : {}),
+      beziers: list.map(({ start, end, cp1, cp2 }) => ({ start: { ...start }, end: { ...end }, cp1, cp2 })) }
+  })
 }
 
 // A closed polyline spline with smooth stretches (see polylineCurveRuns): if it

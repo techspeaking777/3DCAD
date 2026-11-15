@@ -14,31 +14,34 @@ function quadPt(p0,p1,p2,t) {
 }
 
 // Convert opentype.js path commands → array of polyline contours
-// Each contour: { points:[{x,y},...], closed:bool }
+// Each contour: { points:[{x,y},...], closed:bool, segs } — segs is one letter
+// per span after the start point ('L' line = 1 point, 'Q'/'C' curve = `samples`
+// points at t = i/samples). It lets the 3D build recover the font's EXACT
+// curves from the points (extrudeMath glyphCurveSegments) instead of facets.
 // samples: how many points per bezier curve segment
 function pathToContours(commands, samples=12) {
   const contours=[]
-  let pts=[], cx=0, cy=0
+  let pts=[], cx=0, cy=0, segs=''
   for (const cmd of commands) {
     if (cmd.type==='M') {
-      if (pts.length>=2) contours.push({points:pts,closed:false})
-      pts=[{x:cmd.x,y:cmd.y}];cx=cmd.x;cy=cmd.y
+      if (pts.length>=2) contours.push({points:pts,closed:false,segs})
+      pts=[{x:cmd.x,y:cmd.y}];cx=cmd.x;cy=cmd.y;segs=''
     } else if (cmd.type==='L') {
-      pts.push({x:cmd.x,y:cmd.y});cx=cmd.x;cy=cmd.y
+      pts.push({x:cmd.x,y:cmd.y});cx=cmd.x;cy=cmd.y;segs+='L'
     } else if (cmd.type==='C') {
       const p0={x:cx,y:cy},p1={x:cmd.x1,y:cmd.y1},p2={x:cmd.x2,y:cmd.y2},p3={x:cmd.x,y:cmd.y}
       for (let i=1;i<=samples;i++) pts.push(cubicPt(p0,p1,p2,p3,i/samples))
-      cx=cmd.x;cy=cmd.y
+      cx=cmd.x;cy=cmd.y;segs+='C'
     } else if (cmd.type==='Q') {
       const p0={x:cx,y:cy},p1={x:cmd.x1,y:cmd.y1},p2={x:cmd.x,y:cmd.y}
       for (let i=1;i<=samples;i++) pts.push(quadPt(p0,p1,p2,i/samples))
-      cx=cmd.x;cy=cmd.y
+      cx=cmd.x;cy=cmd.y;segs+='Q'
     } else if (cmd.type==='Z') {
-      if (pts.length>=2) contours.push({points:pts,closed:true})
-      pts=[]
+      if (pts.length>=2) contours.push({points:pts,closed:true,segs})
+      pts=[];segs=''
     }
   }
-  if (pts.length>=2) contours.push({points:pts,closed:false})
+  if (pts.length>=2) contours.push({points:pts,closed:false,segs})
   return contours
 }
 
@@ -149,6 +152,7 @@ export default function TextPanel({ insertPt, onImport, onClose, mmToPx }) {
       }),
       closed:   c.closed,
       polyline: true,
+      ...(c.closed ? { glyph: { segs: c.segs, samples } } : {}),
     }))
 
     onImport(newSplines)

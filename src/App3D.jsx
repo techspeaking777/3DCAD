@@ -9806,7 +9806,14 @@ const App3D = forwardRef(function App3D(props, ref) {
   const extrudeAnimRef = useRef(null)
   const extrudeAnimParamsRef = useRef(null)
   function cancelExtrudeAnim() {
-    if (extrudeAnimRef.current) { cancelAnimationFrame(extrudeAnimRef.current); extrudeAnimRef.current = null }
+    if (extrudeAnimRef.current) {
+      cancelAnimationFrame(extrudeAnimRef.current); extrudeAnimRef.current = null
+      // The loop keeps drawing while commitExtrude's worker build runs, so the
+      // Apply button's own clear gets painted over — wipe its last frame here
+      // (only when this loop was running: Loft draws on the same canvas).
+      const oc = viewport3dRef.current?.getExtrudePreviewCanvas?.()
+      if (oc) { const ctx = oc.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,oc.width,oc.height) }
+    }
     extrudeAnimParamsRef.current = null
     extrudeSnapRef.current = null
   }

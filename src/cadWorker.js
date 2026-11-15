@@ -2152,11 +2152,57 @@ function catmullRomToBezierSegments(pts, closed) {
   return segments
 }
 
+// A chain of cubic Beziers (end of one = start of the next) as ONE cubic
+// B-spline edge — exact, not a fit: the Bezier control points become the poles
+// and each join a knot of multiplicity 3 (= the same curve). Catmull-Rom spans
+// meet with equal tangents, so each join's multiplicity is then lowered to 2
+// (C1) when OCC confirms that leaves the curve unchanged — algorithms that read
+// continuity from the knots (fillets, sweeps) then see a smooth curve.
+// Starts exactly at the sketcher's pen (like replicad's own bezierCurveTo).
+function bezierChainAsBSplineEdge(sketcher, segs, endWorld) {
+  const oc = getOC()
+  const plane = sketcher.plane
+  const poles = [sketcher.pointer]
+  segs.forEach((s, i) => poles.push(plane.toWorldCoords(toMm(s.cp1)), plane.toWorldCoords(toMm(s.cp2)),
+    i === segs.length - 1 ? endWorld : plane.toWorldCoords(toMm(s.end))))
+  const n = segs.length
+  const P = new oc.TColgp_Array1OfPnt_2(1, poles.length)
+  poles.forEach((v, i) => { const p = v.toPnt(); P.SetValue(i + 1, p); p.delete() })
+  const K = new oc.TColStd_Array1OfReal_2(1, n + 1)
+  const M = new oc.TColStd_Array1OfInteger_2(1, n + 1)
+  for (let i = 0; i <= n; i++) { K.SetValue(i + 1, i); M.SetValue(i + 1, i === 0 || i === n ? 4 : 3) }
+  const curve = new oc.Geom_BSplineCurve_1(P, K, M, 3, false)
+  P.delete(); K.delete(); M.delete()
+  for (let i = 2; i <= n; i++) curve.RemoveKnot(i, 2, 1e-6)
+  const handle = new oc.Handle_Geom_Curve_2(curve)
+  const maker = new oc.BRepBuilderAPI_MakeEdge_24(handle)
+  if (!maker.IsDone()) { maker.delete(); throw new Error('B-spline edge not built') }
+  const edge = cast(maker.Edge())
+  maker.delete()
+  return edge
+}
+
 // Emits one real curve — a chain of cubic Beziers reproducing the original
 // hand-drawn spline exactly (see catmullRomToBezierSegments) — onto a
 // Sketcher already positioned at controlPoints[0].
 function emitBezierChain(sketcher, controlPoints) {
-  for (const { start, end, cp1, cp2 } of catmullRomToBezierSegments(controlPoints, false)) {
+  const segs = catmullRomToBezierSegments(controlPoints, false)
+  // ONE edge for the whole spline (as Fusion / Solid Edge store it): the Bezier
+  // chain rewritten exactly as a single cubic B-spline, so an extruded spline
+  // wall is one face with no seam lines and its rim is one edge (Fillet /
+  // Include Edge pick it whole). Falls back to one Bezier edge per span — the
+  // old way — if a span is degenerate or OCC refuses the curve.
+  if (segs.length >= 2 && segs.every(s => Math.hypot(s.end.x-s.start.x, s.end.y-s.start.y) >= 0.01)) {
+    try {
+      const endWorld = sketcher.plane.toWorldCoords(toMm(segs[segs.length-1].end))
+      sketcher.pendingEdges.push(bezierChainAsBSplineEdge(sketcher, segs, endWorld))
+      sketcher._updatePointer(endWorld)
+      return
+    } catch (e) {
+      console.warn('[cadWorker] single-curve spline failed, using segments:', e)
+    }
+  }
+  for (const { start, end, cp1, cp2 } of segs) {
     // Degenerate guard: two control points placed on top of each other would
     // produce a near-zero-length edge OCC can choke on — same defensive
     // spirit as dedupeRep. 0.01px ≈ dedupeRep's 0.005mm epsilon (×SCALE).

@@ -19,7 +19,6 @@ import { loadJSON, exportDXF, parseDXF, centreDxfResult, saveProjectAs, canPickS
 import TracerPanel from './tools/TracerPanel.jsx'
 import TextPanel from './tools/TextPanel.jsx'
 import PageSetupPanel from './tools/PageSetupPanel.jsx'
-import GuidePanel from './tools/GuidePanel.jsx'
 import OrthoViewsPanel from './tools/OrthoViewsPanel.jsx'
 import { pageAreaMm } from './tools/orthoViewsMath.js'
 import { DEFAULT_DIM_STYLE, dimPrimitives, distToDim, angleDimFromLines, orthoDimFromPoints, overallDimsForViews } from './tools/dimGeometry.js'
@@ -35,8 +34,8 @@ import MirrorPanel from './tools/MirrorPanel.jsx'
 import SelectDimPanel from './tools/SelectDimPanel.jsx'
 import SaveAsPanel from './tools/SaveAsPanel.jsx'
 import {
-  IconLine, IconCircle, IconTrim, IconDelete, IconExtend, IconOffset,
-  IconMirror, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
+  IconLine, IconCircle, IconTrim, IconDelete, IconExtend, IconCorner, IconOffset,
+  IconMirror, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace,
   IconUndo, IconRedo, IconFitView, IconSave, IconLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim
 } from './draw/ToolIcons.jsx'  // retro sprites 28×36
 
@@ -104,6 +103,9 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   // Fillet tool state
   // [{kind:'line'|'arc',idx,clickPt}] up to 2, or [{kind:'chain',idx}] = every corner of that line's shape
   const [filletMode,setFilletMode]=useState('fillet')   // 'fillet' | 'chamfer' (kept between uses)
+  // Trim Corner is its own button but runs the Fillet tool's picking and
+  // preview in 'corner' mode (computeFilletOp); fMode is the mode in use.
+  const fMode=tool==='corner'?'corner':filletMode
   const [filletSel,setFilletSel]=useState([])   // up to 2 {kind:'line',idx,clickPt}
   const [filletAccepted,setFilletAccepted]=useState(false)
   const [filletRadiusInput,setFilletRadiusInput]=useState('')
@@ -152,7 +154,6 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       setDimStyle(sheet.dimStyle || (sheet.dims?.length ? { ...DEFAULT_DIM_STYLE, decimals: 2, units: true } : DEFAULT_DIM_STYLE))
     },
   }), [lines, circles, arcs, splines, dims, pageConfig, dimStyle])
-  const [guideOpen,setGuideOpen]=useState(false)
   const [gridVisible,setGridVisible]=useState(false)
   const [gridSnap,setGridSnap]=useState(false)
   const [gridSizeMm,setGridSizeMm]=useState(5)
@@ -562,8 +563,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   // (and plane); the new rounding arcs / chamfer lines take the style of what
   // they join.
   // Shared by Enter, the panel's Apply and a click.
-  function applyFillet(){
-    const res=filletPreview
+  function applyFillet(override){
+    const res=override||filletPreview
     if (!res||res.tooLarge||res.needLines||res.parallel||!res.count) return
     commit(snapshot())
     const tag={}
@@ -595,7 +596,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
            (tool==='movecopy'&&!moveCopyAccepted)||
            (tool==='rotatecopy'&&!rotateCopyAccepted)||
            (tool==='resize'&&!resizeAccepted)||
-           (tool==='fillet'&&!filletAccepted)
+           ((tool==='fillet'||tool==='corner')&&!filletAccepted)
   }
 
   // Execute a drag-window select: add entities fully enclosed by rect to current
@@ -631,7 +632,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     if(tool==='movecopy')    setMoveCopySel(merge)
     if(tool==='rotatecopy')  setRotateCopySel(merge)
     if(tool==='resize')      setResizeSel(merge)
-    if(tool==='fillet'){
+    if((tool==='fillet'||tool==='corner')){
       // fillet only uses lines, max 2
       const lineHits=hits.filter(h=>h.kind==='line')
       setFilletSel(prev=>{
@@ -1126,17 +1127,17 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   },[lines,circles,arcs,splines])
 
   useEffect(()=>{
-    if (tool!=='fillet'||filletAccepted||!mousePos){setFilletHover(null);return}
+    if ((tool!=='fillet'&&tool!=='corner')||filletAccepted||!mousePos){setFilletHover(null);return}
     setFilletHover(nearestFilletEntity(mousePos,lines,arcs))
   },[tool,filletAccepted,mousePos,lines,arcs])
 
   useEffect(()=>{
     const ready=filletSel[0]?.kind==='chain'||filletSel.length===2
-    if (tool!=='fillet'||!filletAccepted||!ready){setFilletPreview(null);return}
+    if ((tool!=='fillet'&&tool!=='corner')||!filletAccepted||!ready){setFilletPreview(null);return}
     const r=mmToPx(parseFloat(filletRadiusInput)||0)
-    if (r<=0&&filletMode!=='corner'){setFilletPreview(null);return}
-    setFilletPreview(computeFilletOp(filletSel,lines,arcs,r,filletMode))
-  },[tool,filletAccepted,filletSel,filletRadiusInput,filletMode,lines,arcs])
+    if (r<=0&&fMode!=='corner'){setFilletPreview(null);return}
+    setFilletPreview(computeFilletOp(filletSel,lines,arcs,r,fMode))
+  },[tool,filletAccepted,filletSel,filletRadiusInput,fMode,lines,arcs])
 
 
   // ── PERP SNAP — completely separate algorithm, no tangent code ──────────────
@@ -1352,7 +1353,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       const isRzSel=resizeSel.some(e=>e.kind==='arc'&&e.idx===idx)
       const isRzHov=resizeHover?.kind==='arc'&&resizeHover.idx===idx&&!isRzSel
       const isFiSel=filletSel.some(e=>e.kind==='arc'&&e.idx===idx)
-      const isFiHov=tool==='fillet'&&filletHover?.kind==='arc'&&filletHover.idx===idx&&!isFiSel
+      const isFiHov=(tool==='fillet'||tool==='corner')&&filletHover?.kind==='arc'&&filletHover.idx===idx&&!isFiSel
       const color=isDelTarget?'#F44336':isOffSel||isMirSel||isMCSel||isRCSel||isRzSel||isFiSel?'#FF9800':isOffHov||isMirHov||isMCHov||isRCHov||isRzHov||isFiHov?'#FFD600':'#222'
       // End = start + sweep within (0, 2π]: an angle stored a turn off would otherwise draw a full circle
       ctx.beginPath();ctx.arc(arc.cx,arc.cy,arc.r,arc.startAngle,arc.startAngle+(norm2pi(arc.endAngle-arc.startAngle)||2*Math.PI),false)
@@ -1944,10 +1945,10 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     }
 
     // Fillet preview
-    if (tool==='fillet'&&filletAccepted&&filletPreview){
+    if ((tool==='fillet'||tool==='corner')&&filletAccepted&&filletPreview){
       const fp=filletPreview
       if (fp.tooLarge||fp.needLines||fp.parallel){
-        const msg=fp.parallel?'These lines never meet':fp.needLines?(filletMode==='corner'?'Corner':'Chamfer')+' needs two straight lines':(filletMode==='chamfer'?'Distance':'Radius')+' too large'
+        const msg=fp.parallel?'These lines never meet':fp.needLines?(fMode==='corner'?'Corner':'Chamfer')+' needs two straight lines':(fMode==='chamfer'?'Distance':'Radius')+' too large'
         if (mousePos) drawLabel(ctx,msg,mousePos.x,mousePos.y-20/sc,'#F44336',sc)
       } else if (fp.count){
         ctx.save();ctx.setLineDash([6/sc,3/sc])
@@ -1960,7 +1961,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         ctx.setLineDash([])
         fp.marks.forEach(t=>{ctx.save();ctx.translate(t.x,t.y);ctx.scale(1/sc,1/sc);ctx.beginPath();ctx.arc(0,0,4,0,Math.PI*2);ctx.fillStyle='#4CAF50';ctx.fill();ctx.restore()})
         const at=fp.marks[0]
-        const what=filletMode==='corner'?'Corner':(filletMode==='chamfer'?'Chamfer ':'R ')+(parseFloat(filletRadiusInput)||0)+' mm'+(fp.count>1?' · '+fp.count+' corners':'')
+        const what=fMode==='corner'?'Corner':(fMode==='chamfer'?'Chamfer ':'R ')+(parseFloat(filletRadiusInput)||0)+' mm'+(fp.count>1?' · '+fp.count+' corners':'')
         drawLabel(ctx,what+' · Enter or click to apply',at.x,at.y-24/sc,'#4CAF50',sc)
         ctx.restore()
       }
@@ -2155,7 +2156,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       if (geo) drawLineIndicator(ctx,geo.x,geo.y,geo.type,sc)
     }
 
-  },[lines,circles,arcs,splines,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,deferredTangent,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,filletMode,dragSelectRect,viewTransform,canvasSize,tKeyDown,pKeyDown,perpSourceLineIdx,drawStyle,intersectionPts,joinHover,joinFirstPt,pageConfig,dims,dimToolPreview,dimToolPts,dimStyle,dimMode,dimAngleLines,dimLineHover,gridVisible,gridSizeMm])
+  },[lines,circles,arcs,splines,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,deferredTangent,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,fMode,dragSelectRect,viewTransform,canvasSize,tKeyDown,pKeyDown,perpSourceLineIdx,drawStyle,intersectionPts,joinHover,joinFirstPt,pageConfig,dims,dimToolPreview,dimToolPts,dimStyle,dimMode,dimAngleLines,dimLineHover,gridVisible,gridSizeMm])
 
   function handleMouseDown(e){
     if (e.button===1){e.preventDefault();isPanningRef.current=true;lastPanPosRef.current={x:e.clientX,y:e.clientY}}
@@ -2649,14 +2650,29 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       return
     }
 
-    if (tool==='fillet'){
+    if ((tool==='fillet'||tool==='corner')){
       if (e.detail>1) return   // 2nd click of a double-click — handleDoubleClick picks the whole shape
       if (!filletAccepted){
         const hit=nearestFilletEntity(raw,lines,arcs)
         if (!hit) return
         const already=filletSel.findIndex(s=>s.kind===hit.kind&&s.idx===hit.idx)
         if (already>=0) setFilletSel(p=>p.filter((_,i)=>i!==already))
-        else if (filletSel.length<2) setFilletSel(p=>[...p,hit])
+        else if (filletSel.length<2){
+          setFilletSel(p=>[...p,hit])
+          if (filletSel.length===1){
+            // Trim Corner: the second pick finishes it — no number to type
+            if ((tool==='corner')){
+              const res=computeFilletOp([...filletSel,hit],lines,arcs,0,'corner')
+              if (res&&!res.parallel&&!res.needLines&&res.count){applyFillet(res);return}
+            }
+            if (tool==='corner') setFilletAccepted(true)
+          }
+        }
+      } else if (tool==='corner'){
+        // That corner couldn't be made (parallel lines / an arc) — a click starts again
+        const hit=nearestFilletEntity(raw,lines,arcs)
+        resetFillet()
+        if (hit) setFilletSel([hit])
       } else {
         // Click applies the fillet (same as Enter / the FilletRadiusPanel's Apply button)
         applyFillet()
@@ -2831,9 +2847,9 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
   function handleDoubleClick(e){
     // Fillet: double-click a line to round (or chamfer) every corner of the
     // shape it belongs to — one radius for the lot.
-    if (tool==='fillet'&&!filletAccepted){
+    if ((tool==='fillet'||tool==='corner')&&!filletAccepted){
       const hit=nearestFilletEntity(mousePos||{x:0,y:0},lines,arcs)
-      if (hit?.kind==='line'){
+      if (hit?.kind==='line'&&tool==='fillet'){
         e.preventDefault()
         setFilletSel([{kind:'chain',idx:hit.idx}])
         setFilletAccepted(true)
@@ -2890,7 +2906,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     if (tool==='movecopy'&&!moveCopyAccepted&&moveCopySel.length>0) setMoveCopyAccepted(true)
     if (tool==='rotatecopy'&&!rotateCopyAccepted&&rotateCopySel.length>0) setRotateCopyAccepted(true)
     if (tool==='resize'&&!resizeAccepted&&resizeSel.length>0) setResizeAccepted(true)
-    if (tool==='fillet'&&!filletAccepted&&filletSel.length===2) setFilletAccepted(true)
+    if ((tool==='fillet'||tool==='corner')&&!filletAccepted&&filletSel.length===2) setFilletAccepted(true)
   }
 
   function handleMouseMove(e){
@@ -3215,7 +3231,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       return
     }
 
-    if (tool==='fillet'){
+    if ((tool==='fillet'||tool==='corner')){
       if (e.key==='Escape'){resetFillet();return}
       if (!filletAccepted){
         if (e.key==='Tab'){e.preventDefault();if(filletSel.length===2)setFilletAccepted(true);return}
@@ -3468,7 +3484,14 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
         hints:[K('type','scale factor'), K('click','anchor point'), K('Esc')] }
     }
 
-    if (tool==='fillet') {
+    if (tool==='corner') return filletAccepted
+      ? { step:2, total:2, color:'#EF9A9A',
+          action: filletPreview?.parallel ? 'These lines never meet — click another line' : 'Corner needs two straight lines — click a line',
+          hints:[K('Esc')] }
+      : { step:filletSel.length+1, total:2, color:c,
+          action: filletSel.length ? 'Click the second line' : 'Click a line on the side you want to keep',
+          hints: filletSel.length ? [K('Esc')] : [] }
+    if ((tool==='fillet'||tool==='corner')) {
       if (!filletAccepted) {
         if (filletSel.length===0) return { step:1, total:3, color:c,
           action:'Click a line or arc — or double-click a shape for every corner',
@@ -3480,9 +3503,6 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           action:'2 picked',
           hints:[K('Tab','accept'), K('Esc')] }
       }
-      if (filletMode==='corner') return { step:3, total:3, color:c,
-        action: filletPreview?.parallel ? 'These lines never meet' : 'Join the lines at their corner',
-        hints:[K('Enter','apply'), K('Tab','apply')] }
       if (filletPreview?.tooLarge) return { step:3, total:3, color:'#EF9A9A',
         action:`R ${filletRadiusInput} mm — too large`,
         hints:[K('type','smaller radius')] }
@@ -3535,6 +3555,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     ['trim',       IconTrim,       'Trim',           '#FF5722'],
     ['delete',     IconDelete,     'Delete',         '#F44336'],
     ['extend',     IconExtend,     'Extend',         '#00ACC1'],
+    ['corner',     IconCorner,     'Trim Corner — click two lines; both are trimmed or stretched to meet', '#FF7043'],
     ['join',       IconJoin,       'Join / Connect', '#76FF03'],
   ]
 
@@ -3745,7 +3766,7 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
       </div>
 
       <div style={{flex:1,display:'flex',flexDirection:'column',minWidth:0}}>
-        {/* ── Top toolbar: Edit + Modify + Guide ── */}
+        {/* ── Top toolbar: Edit + Modify ── */}
         <div style={{background:'#1e1e1e',display:'flex',alignItems:'center',padding:'0 8px',gap:4,flexShrink:0,borderBottom:'1px solid #333',flexWrap:'wrap'}}>
           {/* Edit group */}
           <span style={{color:'#555',fontFamily:'monospace',fontSize:9,textTransform:'uppercase',letterSpacing:'0.1em',marginRight:2}}>Edit</span>
@@ -3825,20 +3846,8 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
               )}
             </div>
           ))}
-          {/* Divider */}
-          <div style={{width:1,height:48,background:'#333',margin:'0 6px'}}/>
-          {/* Guide toggle */}
-          <button
-            onClick={()=>setGuideOpen(p=>!p)}
-            title="Toggle Guide Panel"
-            style={{...btnBase,
-              background:guideOpen?'#f7fb0422':'transparent',
-              outline:guideOpen?'2px solid #f7fb04':'none',
-              outlineOffset:'-2px'}}>
-            <IconGuide active={guideOpen}/>
-          </button>
         </div>
-        {/* ── Canvas + Guide side by side ── */}
+        {/* ── Canvas ── */}
         <div style={{flex:1,display:'flex',minHeight:0}}>
           <div style={{flex:1,overflow:'hidden',minWidth:0}}>
           <canvas ref={canvasRef}
@@ -3848,24 +3857,6 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
           onMouseMove={handleMouseMove} onMouseDown={handleMouseDown} onMouseUp={handleMouseUp}
         />
           </div>
-          {guideOpen && <GuidePanel tool={tool} toolState={{
-            // selection-phase tools
-            mirrorSel, mirrorAccepted, mirrorP1,
-            moveCopySel, moveCopyAccepted, moveCopyMode,
-            rotateCopySel, rotateCopyAccepted, rotateCopyMode,
-            resizeSel, resizeAccepted,
-            filletSel, filletAccepted, filletRadiusInput,
-            // draw tools
-            startPoint, circleCenter, splinePoints,
-            // single-action tools
-            offsetEntity, offsetDistInput, offsetPreview,
-            trimPreview, extendPreview, deletePreview,
-            joinFirstPt,
-            // dim tool
-            dimToolStep,
-            // select
-            selection, selectDimField,
-          }}/>}
         </div>
         <div style={{height:52,background:'#16162a',display:'flex',alignItems:'center',padding:'0 8px',gap:4,flexShrink:0,borderTop:'2px solid #2a2a4a'}}>
           <button onClick={()=>undo(snapshot(),restore)} title="Undo (Ctrl+Z)" disabled={!canUndo}

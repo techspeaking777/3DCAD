@@ -4,7 +4,7 @@ import { useDraggablePanel, DragHandle } from './useDraggablePanel.jsx'
 // Kid-friendly popover shown next to the Fillet toolbar button once both lines
 // are picked. A real, visible input box for the radius — no blind keystrokes —
 // Enter or the Apply button rounds the corner.
-// mode: 'fillet' | 'chamfer' | 'corner' (onMode switches it); corners: how many
+// mode: 'fillet' | 'chamfer' (onMode switches it; 'corner' = the Trim Corner tool, no button here); corners: how many
 // corners the preview will change (more than 1 for a whole shape); needLines:
 // Chamfer / Corner was asked for on an arc; parallel: Corner on two lines that
 // never meet. Corner (Solid Edge's Trim Corner) takes no number.
@@ -32,7 +32,7 @@ export default function FilletRadiusPanel({ toolColor, value, onChange, onApply,
 
       {onMode && (
         <div style={{display:'flex',gap:4,marginBottom:8}}>
-          {[['fillet','ROUND'],['chamfer','CHAMFER'],['corner','CORNER']].map(([m,label])=>(
+          {[['fillet','ROUND'],['chamfer','CHAMFER']].map(([m,label])=>(
             <button key={m} onClick={()=>onMode(m)} title={m==='fillet'?'Round the corner':m==='chamfer'?'Cut the corner off straight':'Trim or extend both lines so they meet in a sharp corner'}
               style={{flex:1,padding:'4px 0',borderRadius:5,cursor:'pointer',fontFamily:'monospace',fontSize:9,
                 letterSpacing:'0.05em',fontWeight:'bold',background:mode===m?toolColor+'33':'#0d0d1a',

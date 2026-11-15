@@ -9,7 +9,7 @@ const SK = {
   draw:      '#53D3E4',   // Line, Circle, Spline, Text, Axis, Trace, Edge
   edit:      '#FF9F1C',   // Trim, Delete, Extend, Join, Fillet, Offset
   transform: '#B48CFF',   // Move, Rotate, Scale, Mirror, Centre
-  annotate:  '#FBDA2D',   // Dim, Guide
+  annotate:  '#FBDA2D',   // Dim
 }
 const SW = 2, SWG = 1.25, DASH = '3 2.5'
 
@@ -144,6 +144,20 @@ export function IconExtend({ active }) {
   </>}</SketchIcon>
 }
 
+// Trim Corner: one line stretched (dashed + arrow), the other's overshoot cut
+// off (faded, dashed), meeting at the corner point.
+export function IconCorner({ active }) {
+  return <SketchIcon label="CORNER" color={SK.edit} active={active}>{({ c, g }) => <>
+    <line x1="6" y1="14" x2="21" y2="14" stroke={c} strokeWidth={SW} strokeLinecap="round"/>
+    <line x1="21" y1="14" x2="29" y2="14" stroke={c} strokeWidth={SW} strokeDasharray={DASH}/>
+    <Arrow x={33} y={14} dx={1} dy={0} c={c} len={4.5}/>
+    <line x1="34" y1="42" x2="34" y2="14" stroke={c} strokeWidth={SW} strokeLinecap="round"/>
+    <line x1="34" y1="14" x2="34" y2="4" stroke={g} strokeWidth={SW} strokeDasharray={DASH}/>
+    <path d="M39 5 L45 11 M45 5 L39 11" stroke={c} strokeWidth="1.8" strokeLinecap="round"/>
+    <Pt x={34} y={14} c={c}/>
+  </>}</SketchIcon>
+}
+
 export function IconJoin({ active }) {
   return <SketchIcon label="JOIN" color={SK.edit} active={active}>{({ c }) => <>
     <line x1="5" y1="34" x2="19" y2="34" stroke={c} strokeWidth={SW} strokeLinecap="round"/>
@@ -230,14 +244,6 @@ export function IconDim({ active }) {
     <line x1="10" y1="22" x2="38" y2="22" stroke={c} strokeWidth="1.3"/>
     <Arrow x={10} y={22} dx={-1} dy={0} c={c}/><Arrow x={38} y={22} dx={1} dy={0} c={c}/>
     <text x="24" y="17" textAnchor="middle" fill={c} fontSize="10" fontFamily="monospace" fontWeight="bold">25</text>
-  </>}</SketchIcon>
-}
-
-export function IconGuide({ active }) {
-  return <SketchIcon label="GUIDE" color={SK.annotate} active={active}>{({ c }) => <>
-    <circle cx="24" cy="24" r="17" stroke={c} strokeWidth={SW}/>
-    <path d="M18 19 A6 6 0 1 1 26 24.6 Q24 25.5 24 28.5 V30" stroke={c} strokeWidth="2.5" strokeLinecap="round"/>
-    <circle cx="24" cy="35.5" r="1.8" fill={c}/>
   </>}</SketchIcon>
 }
 

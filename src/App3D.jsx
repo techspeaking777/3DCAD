@@ -32,7 +32,6 @@ import { springFrame, springDims, springProfileTouchesAxis } from './tools/sprin
 import PatternPanel from './tools/PatternPanel.jsx'
 import ViewCube from './tools/ViewCube.jsx'
 import PageSetupPanel from './tools/PageSetupPanel.jsx'
-import GuidePanel from './tools/GuidePanel.jsx'
 import SaveAsPanel from './tools/SaveAsPanel.jsx'
 import CloudSavePanel from './tools/CloudSavePanel.jsx'
 import CloudOpenPanel from './tools/CloudOpenPanel.jsx'
@@ -49,8 +48,8 @@ import OffsetDistPanel from './tools/OffsetDistPanel.jsx'
 import SelectDimPanel from './tools/SelectDimPanel.jsx'
 import { useDraggablePanel, DragHandle } from './tools/useDraggablePanel.jsx'
 import {
-  IconLine, IconCircle, IconTrim, IconDelete, IconExtend, IconOffset,
-  IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace, IconGuide,
+  IconLine, IconCircle, IconTrim, IconDelete, IconExtend, IconCorner, IconOffset,
+  IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace,
   IconUndo, IconRedo, IconFitView, IconReframe, IconNew, IconSave, IconLoad, IconCloudSave, IconCloudLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
   IconIncludeEdge,
   IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconSubtract3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D, IconRevolve3D, IconSpring3D, IconShell3D, IconPattern3D, IconSoften3D, IconXray3D,
@@ -2207,7 +2206,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   const toolBtnRefs = useRef({})
   const [flyoutAnchor,setFlyoutAnchor] = useState(null)
   useEffect(() => {
-    if (sketchMode && (tool==='line'||tool==='circle'||tool==='spline'||tool==='fillet'||tool==='offset'||tool==='includeedge')) {
+    if (sketchMode && (tool==='line'||tool==='circle'||tool==='spline'||(tool==='fillet'||tool==='corner')||tool==='offset'||tool==='includeedge')) {
       const el = toolBtnRefs.current[tool]
       if (el) {
         // Scroll the button into view first — the sidebar can hold more tools
@@ -2292,6 +2291,9 @@ const App3D = forwardRef(function App3D(props, ref) {
   // Fillet tool state
   // [{kind:'line'|'arc',idx,clickPt}] up to 2, or [{kind:'chain',idx}] = every corner of that line's shape
   const [filletMode,setFilletMode]=useState('fillet')   // 'fillet' | 'chamfer' (kept between uses)
+  // Trim Corner is its own button but runs the Fillet tool's picking and
+  // preview in 'corner' mode (computeFilletOp); fMode is the mode in use.
+  const fMode=tool==='corner'?'corner':filletMode
   const [filletSel,setFilletSel]=useState([])   // up to 2 {kind:'line',idx,clickPt}
   const [filletAccepted,setFilletAccepted]=useState(false)
   const [filletRadiusInput,setFilletRadiusInput]=useState('')
@@ -2314,12 +2316,6 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [textOpen,setTextOpen]=useState(false)
   const [pageSetupOpen,setPageSetupOpen]=useState(false)
   const [pageConfig,setPageConfig]=useState({size:'A4',orientation:'landscape',margin:10,showPage:false})
-  const [guideOpen,setGuideOpen]=useState(false)
-  // Guide's toggle button only shows in the sketch profile environment (see
-  // its render site) — GuidePanel itself has no close affordance of its own,
-  // so leaving sketch mode while it's open would strand it open with no way
-  // to dismiss it in the 3D environment.
-  useEffect(() => { if (!sketchMode) setGuideOpen(false) }, [sketchMode])
   const [saveAsOpen,setSaveAsOpen]=useState(false)  // false | 'sketch' | 'project' — which save flow the SaveAsPanel fallback modal is for
   const [gridVisible,setGridVisible]=useState(true)
   // Extrude/Cutout step 1 (pick a work plane or face) only — work planes have
@@ -3163,8 +3159,8 @@ const App3D = forwardRef(function App3D(props, ref) {
   // (and plane); the new rounding arcs / chamfer lines take the style of what
   // they join and the sketch's plane tag (same bug class as the Mirror tool's commit).
   // Shared by Enter, the panel's Apply and a click.
-  function applyFillet(){
-    const res=filletPreview
+  function applyFillet(override){
+    const res=override||filletPreview
     if (!res||res.tooLarge||res.needLines||res.parallel||!res.count) return
     commit(snapshot())
     const tag=planeTag()
@@ -3197,7 +3193,7 @@ const App3D = forwardRef(function App3D(props, ref) {
            (tool==='movecopy'&&!moveCopyAccepted)||
            (tool==='rotatecopy'&&!rotateCopyAccepted)||
            (tool==='resize'&&!resizeAccepted)||
-           (tool==='fillet'&&!filletAccepted)
+           ((tool==='fillet'||tool==='corner')&&!filletAccepted)
   }
 
   // Execute a drag-window select: add entities fully enclosed by rect to current
@@ -3247,7 +3243,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if(tool==='movecopy')    setMoveCopySel(merge)
     if(tool==='rotatecopy')  setRotateCopySel(merge)
     if(tool==='resize')      setResizeSel(merge)
-    if(tool==='fillet'){
+    if((tool==='fillet'||tool==='corner')){
       // fillet only uses lines, max 2
       const lineHits=hits.filter(h=>h.kind==='line')
       setFilletSel(prev=>{
@@ -3710,17 +3706,17 @@ const App3D = forwardRef(function App3D(props, ref) {
   },[lines,circles,arcs,splines])
 
   useEffect(()=>{
-    if (tool!=='fillet'||filletAccepted||!mousePos){setFilletHover(null);return}
+    if ((tool!=='fillet'&&tool!=='corner')||filletAccepted||!mousePos){setFilletHover(null);return}
     setFilletHover(nearestFilletEntity(mousePos,lines,arcs))
   },[tool,filletAccepted,mousePos,lines,arcs])
 
   useEffect(()=>{
     const ready=filletSel[0]?.kind==='chain'||filletSel.length===2
-    if (tool!=='fillet'||!filletAccepted||!ready){setFilletPreview(null);return}
+    if ((tool!=='fillet'&&tool!=='corner')||!filletAccepted||!ready){setFilletPreview(null);return}
     const r=mmToPx(parseFloat(filletRadiusInput)||0)
-    if (r<=0&&filletMode!=='corner'){setFilletPreview(null);return}
-    setFilletPreview(computeFilletOp(filletSel,lines,arcs,r,filletMode))
-  },[tool,filletAccepted,filletSel,filletRadiusInput,filletMode,lines,arcs])
+    if (r<=0&&fMode!=='corner'){setFilletPreview(null);return}
+    setFilletPreview(computeFilletOp(filletSel,lines,arcs,r,fMode))
+  },[tool,filletAccepted,filletSel,filletRadiusInput,fMode,lines,arcs])
 
 
   // ── PERP SNAP — completely separate algorithm, no tangent code ──────────────
@@ -4152,7 +4148,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       const isRzSel=resizeSel.some(e=>e.kind==='arc'&&e.idx===idx)
       const isRzHov=resizeHover?.kind==='arc'&&resizeHover.idx===idx&&!isRzSel
       const isFiSel=filletSel.some(e=>e.kind==='arc'&&e.idx===idx)
-      const isFiHov=tool==='fillet'&&filletHover?.kind==='arc'&&filletHover.idx===idx&&!isFiSel
+      const isFiHov=(tool==='fillet'||tool==='corner')&&filletHover?.kind==='arc'&&filletHover.idx===idx&&!isFiSel
       const isSelHov=selectHover?.kind==='arc'&&selectHover.idx===idx&&!selection.some(s=>s.kind==='arc'&&s.idx===idx)
       const isSelected=selection.some(s=>s.kind==='arc'&&s.idx===idx)
       const color=isDelTarget?'#F44336':isOffSel||isMirSel||isCenSel||isMCSel||isRCSel||isRzSel||isFiSel?'#FF9800':isOffHov||isMirHov||isCenHov||isMCHov||isRCHov||isRzHov||isFiHov?'#FFD600':isSelHov||isSelected?'#64B5F6':null
@@ -4321,10 +4317,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
 
     // ── Fillet preview ──
-    if (tool==='fillet'&&filletAccepted&&filletPreview){
+    if ((tool==='fillet'||tool==='corner')&&filletAccepted&&filletPreview){
       const fp=filletPreview
       if (fp.tooLarge||fp.needLines||fp.parallel){
-        const msg=fp.parallel?'These lines never meet':fp.needLines?(filletMode==='corner'?'Corner':'Chamfer')+' needs two straight lines':(filletMode==='chamfer'?'Distance':'Radius')+' too large'
+        const msg=fp.parallel?'These lines never meet':fp.needLines?(fMode==='corner'?'Corner':'Chamfer')+' needs two straight lines':(fMode==='chamfer'?'Distance':'Radius')+' too large'
         if (mousePos) drawLabel(ctx,msg,mousePos.x,mousePos.y-20/sc,'#F44336',sc)
       } else if (fp.count){
         ctx.save();ctx.setLineDash([6/sc,3/sc])
@@ -4337,7 +4333,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         ctx.setLineDash([])
         fp.marks.forEach(t=>{ctx.save();ctx.translate(t.x,t.y);ctx.scale(1/sc,1/sc);ctx.beginPath();ctx.arc(0,0,4,0,Math.PI*2);ctx.fillStyle='#4CAF50';ctx.fill();ctx.restore()})
         const at=fp.marks[0]
-        const what=filletMode==='corner'?'Corner':(filletMode==='chamfer'?'Chamfer ':'R ')+(parseFloat(filletRadiusInput)||0)+' mm'+(fp.count>1?' · '+fp.count+' corners':'')
+        const what=fMode==='corner'?'Corner':(fMode==='chamfer'?'Chamfer ':'R ')+(parseFloat(filletRadiusInput)||0)+' mm'+(fp.count>1?' · '+fp.count+' corners':'')
         drawLabel(ctx,what+' · Enter or click to apply',at.x,at.y-24/sc,'#4CAF50',sc)
         ctx.restore()
       }
@@ -4725,7 +4721,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (segs) for (const s of segs) drawPreviewLine(ctx,s.x1,s.y1,s.x2,s.y2,includeEdgeConstruction?'#90A4AE':'#FFEB3B',1,sc)
     }
 
-  },[lines,circles,arcs,splines,sketchCrossPt,sketchOpenPts,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,filletMode,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction])
+  },[lines,circles,arcs,splines,sketchCrossPt,sketchOpenPts,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,fMode,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction])
 
 
   // ── Phase 2 Step 3: plane tagging ────────────────────────────────────────
@@ -12430,7 +12426,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       return
     }
 
-    if (tool==='fillet'){
+    if ((tool==='fillet'||tool==='corner')){
       if (e.detail>1) return   // 2nd click of a double-click — handleDoubleClick picks the whole shape
       if (!filletAccepted){
         const hit=nearestFilletEntity(raw,lines,arcs)
@@ -12439,11 +12435,23 @@ const App3D = forwardRef(function App3D(props, ref) {
         if (already>=0) setFilletSel(p=>p.filter((_,i)=>i!==already))
         else if (filletSel.length<2){
           setFilletSel(p=>[...p,hit])
+          if (filletSel.length===1){
+            // Trim Corner: the second pick finishes it — no number to type
+            if ((tool==='corner')){
+              const res=computeFilletOp([...filletSel,hit],lines,arcs,0,'corner')
+              if (res&&!res.parallel&&!res.needLines&&res.count){applyFillet(res);return}
+            }
+          }
           // No confirm step needed — picking 2 lines is enough (matches the
           // FilletRadiusPanel showing as soon as filletSel.length===2). Tab
           // still works too, but is now a no-op once this already ran.
           if (filletSel.length===1) setFilletAccepted(true)
         }
+      } else if (tool==='corner'){
+        // That corner couldn't be made (parallel lines / an arc) — a click starts again
+        const hit=nearestFilletEntity(raw,lines,arcs)
+        resetFillet()
+        if (hit) setFilletSel([hit])
       } else {
         // Click applies the fillet (same as Enter)
         applyFillet()
@@ -12634,9 +12642,9 @@ const App3D = forwardRef(function App3D(props, ref) {
   function handleDoubleClick(e){
     // Fillet: double-click a line to round (or chamfer) every corner of the
     // shape it belongs to — one radius for the lot.
-    if (tool==='fillet'&&!filletAccepted){
+    if ((tool==='fillet'||tool==='corner')&&!filletAccepted){
       const hit=nearestFilletEntity(screenToWorld(e.clientX,e.clientY),lines,arcs)
-      if (hit?.kind==='line'){
+      if (hit?.kind==='line'&&tool==='fillet'){
         e.preventDefault()
         setFilletSel([{kind:'chain',idx:hit.idx}])
         setFilletAccepted(true)
@@ -12700,7 +12708,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (tool==='movecopy'&&!moveCopyAccepted&&moveCopySel.length>0) setMoveCopyAccepted(true)
     if (tool==='rotatecopy'&&!rotateCopyAccepted&&rotateCopySel.length>0) setRotateCopyAccepted(true)
     if (tool==='resize'&&!resizeAccepted&&resizeSel.length>0) setResizeAccepted(true)
-    if (tool==='fillet'&&!filletAccepted&&filletSel.length===2) setFilletAccepted(true)
+    if ((tool==='fillet'||tool==='corner')&&!filletAccepted&&filletSel.length===2) setFilletAccepted(true)
     if (tool==='center'&&centerSel.length>0) commitCenter()
     if (tool==='join3d'&&joinSel.length>=2) commitJoin()
     if (tool==='subtract3d'&&subtractTargetId&&subtractToolIds.length>=1) commitSubtract()
@@ -13358,7 +13366,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       return
     }
 
-    if (tool==='fillet'){
+    if ((tool==='fillet'||tool==='corner')){
       if (e.key==='Escape'){resetFillet();return}
       if (!filletAccepted){
         if (e.key==='Tab'){e.preventDefault();if(filletSel.length===2)setFilletAccepted(true);return}
@@ -13604,7 +13612,14 @@ const App3D = forwardRef(function App3D(props, ref) {
         hints:[K('type','scale factor'), K('click','anchor point'), K('Esc')] }
     }
 
-    if (tool==='fillet') {
+    if (tool==='corner') return filletAccepted
+      ? { step:2, total:2, color:'#EF9A9A',
+          action: filletPreview?.parallel ? 'These lines never meet — click another line' : 'Corner needs two straight lines — click a line',
+          hints:[K('Esc')] }
+      : { step:filletSel.length+1, total:2, color:c,
+          action: filletSel.length ? 'Click the second line' : 'Click a line on the side you want to keep',
+          hints: filletSel.length ? [K('Esc')] : [] }
+    if ((tool==='fillet'||tool==='corner')) {
       if (!filletAccepted) {
         if (filletSel.length===0) return { step:1, total:3, color:c,
           action:'Click a line or arc — or double-click a shape for every corner',
@@ -13616,9 +13631,6 @@ const App3D = forwardRef(function App3D(props, ref) {
           action:'2 picked',
           hints:[K('Tab','accept'), K('Esc')] }
       }
-      if (filletMode==='corner') return { step:3, total:3, color:c,
-        action: filletPreview?.parallel ? 'These lines never meet' : 'Join the lines at their corner',
-        hints:[K('Enter','apply'), K('Tab','apply')] }
       if (filletPreview?.tooLarge) return { step:3, total:3, color:'#EF9A9A',
         action:`R ${filletRadiusInput} mm — too large`,
         hints:[K('type','smaller radius')] }
@@ -13690,6 +13702,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     ['trim',       IconTrim,       'Trim',           '#FF5722'],
     ['delete',     IconDelete,     'Delete',         '#F44336'],
     ['extend',     IconExtend,     'Extend',         '#00ACC1'],
+    ['corner',     IconCorner,     'Trim Corner — click two lines; both are trimmed or stretched to meet', '#FF7043'],
     ['join',       IconJoin,       'Join / Connect', '#76FF03'],
   ]
 
@@ -14289,22 +14302,9 @@ const App3D = forwardRef(function App3D(props, ref) {
                   letterSpacing:'0.05em',whiteSpace:'nowrap'}}>FINISH</span>
               </button>
             )}
-
-            {/* Guide — sketch profile environment only, not the 3D environment */}
-            {sketchMode && (
-              <button
-                onClick={()=>setGuideOpen(p=>!p)}
-                title="Toggle Guide Panel"
-                style={{...btnBase,
-                  background:guideOpen?'#f7fb0422':'transparent',
-                  outline:guideOpen?'2px solid #f7fb04':'none',
-                  outlineOffset:'-2px'}}>
-                <IconGuide active={guideOpen}/>
-              </button>
-            )}
           </div>
         </div>
-        {/* ── Viewport3D + Guide side by side ── */}
+        {/* ── Viewport3D ── */}
         <div style={{flex:1,display:'flex',minHeight:0,position:'relative',
           outline: sketchMode ? `3px solid ${getPlaneColor(activePlane)}` : 'none',
           outlineOffset: '-3px',
@@ -14397,24 +14397,6 @@ const App3D = forwardRef(function App3D(props, ref) {
             onMouseUp={handleMouseUp}
           />
           </div>
-          {guideOpen && <GuidePanel tool={tool} toolState={{
-            // selection-phase tools
-            mirrorSel, mirrorAccepted, mirrorP1,
-            moveCopySel, moveCopyAccepted, moveCopyMode,
-            rotateCopySel, rotateCopyAccepted, rotateCopyMode,
-            resizeSel, resizeAccepted,
-            filletSel, filletAccepted, filletRadiusInput,
-            // draw tools
-            startPoint, circleCenter, splinePoints,
-            // single-action tools
-            offsetEntity, offsetDistInput, offsetPreview,
-            trimPreview, extendPreview, deletePreview,
-            joinFirstPt,
-            // dim tool
-            dimToolStep,
-            // select
-            selection, selectDimField,
-          }}/>}
 
           {/* ── SmartStep bar: overlays bottom of viewport during Extrude/Cutout/Revolve ── */}
           <SmartStepBar

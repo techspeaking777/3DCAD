@@ -710,9 +710,9 @@ export function parseDXF(dxfText, pxPerMm=2) {
   const betterResult = parseDXFMultiVertex(dxfText, scale)
 
   return {
-    lines: lines_out,
+    lines: [...lines_out, ...betterResult.polyLines],
     circles: circles_out,
-    arcs: arcs_out,
+    arcs: [...arcs_out, ...betterResult.polyArcs],
     splines: betterResult.splines,
     units: units.name,
   }
@@ -722,6 +722,7 @@ export function parseDXF(dxfText, pxPerMm=2) {
 function parseDXFMultiVertex(dxfText, scale) {
   const mm = v => v * scale
   const lines_out = [], circles_out = [], arcs_out = [], splines_out = []
+  const polyLines = [], polyArcs = []   // a rounded polyline's spans (new data, unlike lines_out/arcs_out)
 
   const raw = dxfText.replace(/\r/g,'').split('\n')
 
@@ -737,41 +738,116 @@ function parseDXFMultiVertex(dxfText, scale) {
     if (code===2 && val==='ENDSEC') break
     if (!inEntities) continue
 
-    if (code===0 && (val==='LWPOLYLINE'||val==='POLYLINE'||val==='SPLINE')) {
-      const type=val
-      const pts=[]
-      let flags=0, closed=false, layer=''
-      let vx=null,vy=null
-
+    if (code===0 && (val==='LWPOLYLINE'||val==='POLYLINE')) {
+      // Vertices {x, y, b} in DXF units; b = the BULGE of the span leaving that
+      // vertex (0 = straight, else tan(¼ of the arc's included angle), + = CCW).
+      // LWPOLYLINE lists 10/20/42 per vertex; POLYLINE has a header (whose own
+      // 10/20 is a dummy point, NOT a vertex) followed by VERTEX entities.
+      const type = val
+      const verts = []
+      let flags = 0, layer = '', cur = null
       while (i < raw.length) {
-        const c2=parseInt(raw[i]?.trim())
-        const v2=raw[i+1]?.trim()
-        i+=2
+        const c2 = parseInt(raw[i]?.trim()), v2 = raw[i+1]?.trim()
+        i += 2
         if (isNaN(c2)) continue
-        if (c2===0) {
-          // Push last vertex if pending
-          if (vx!==null&&vy!==null) pts.push({x:mm(vx),y:-mm(vy)})
-          vx=null;vy=null
-          if (v2==='SEQEND') break  // end of POLYLINE
-          if (v2!=='VERTEX') { i-=2; break }  // next entity
-          continue
+        if (c2 === 0) {
+          if (type === 'POLYLINE' && v2 === 'VERTEX') { if (cur) verts.push(cur); cur = { x: 0, y: 0, b: 0 }; continue }
+          if (cur) verts.push(cur)
+          if (!(type === 'POLYLINE' && v2 === 'SEQEND')) i -= 2   // SEQEND's own codes are skipped by the main walk
+          break
         }
-        if (c2===8)  layer=v2
-        if (c2===70) flags=parseInt(v2)
-        if (c2===10) { if(vx!==null&&vy!==null)pts.push({x:mm(vx),y:-mm(vy)}); vx=parseFloat(v2);vy=null }
-        if (c2===20) { vy=parseFloat(v2); if(vx!==null&&vy!==null&&type==='LWPOLYLINE'){pts.push({x:mm(vx),y:-mm(vy)});vx=null;vy=null} }
+        const header = type === 'POLYLINE' ? !cur : true
+        if (c2 === 8 && (type === 'LWPOLYLINE' ? !layer : header)) layer = v2
+        if (c2 === 70 && (type === 'LWPOLYLINE' || !cur)) flags = parseInt(v2)
+        if (type === 'LWPOLYLINE' && c2 === 10) { if (cur) verts.push(cur); cur = { x: parseFloat(v2), y: 0, b: 0 }; continue }
+        if (!cur) continue
+        if (c2 === 10) cur.x = parseFloat(v2)
+        if (c2 === 20) cur.y = parseFloat(v2)
+        if (c2 === 42) cur.b = parseFloat(v2) || 0
       }
-      if (vx!==null&&vy!==null) pts.push({x:mm(vx),y:-mm(vy)})
-      closed=!!(flags&1)
-
-      const layerL=(layer||'').toLowerCase()
-      const style = layerL.includes('construction')||layerL.includes('cnst') ? 'construction'
-                  : layerL.includes('dashed')||layerL.includes('dash') ? 'dashed'
-                  : undefined
-      const s=style?{style}:{}
-
-      if (pts.length>=2)
-        splines_out.push({points:pts,closed,polyline:true,...s})
+      const closed = !!(flags & 1)
+      if (closed && verts.length > 2) {   // a closed polyline that also repeats its start
+        const a = verts[0], z = verts[verts.length - 1]
+        if (Math.hypot(a.x - z.x, a.y - z.y) < 1e-9) verts.pop()
+      }
+      const s = dxfStyle(layer)
+      if (verts.some(v => Math.abs(v.b) > 1e-9)) {
+        // Rounded corners: every span becomes a true LINE or ARC entity.
+        const n = verts.length, spans = closed ? n : n - 1
+        for (let k = 0; k < spans; k++) {
+          const a = verts[k], b = verts[(k + 1) % n]
+          if (Math.hypot(b.x - a.x, b.y - a.y) < 1e-9) continue
+          if (Math.abs(a.b) < 1e-9) polyLines.push({ x1: mm(a.x), y1: -mm(a.y), x2: mm(b.x), y2: -mm(b.y), ...s })
+          else polyArcs.push({ ...bulgeArc(a, b, a.b, mm), ...s })
+        }
+      } else if (verts.length >= 2) {
+        splines_out.push({ points: verts.map(v => ({ x: mm(v.x), y: -mm(v.y) })), closed, polyline: true, ...s })
+      }
+    }
+    else if (code===0 && val==='SPLINE') {
+      // A B-spline: degree (71), knots (40), control points (10/20), optional
+      // weights (41) and fit points (11/21). The CONTROL points are not on the
+      // curve, so the curve itself is evaluated and sampled (the solid then
+      // gets one smooth curve through the samples — see polylineCurveRuns).
+      let layer = '', flags = 0, degree = 3
+      const knots = [], ctrl = [], weights = [], fit = []
+      while (i < raw.length) {
+        const c2 = parseInt(raw[i]?.trim()), v2 = raw[i+1]?.trim()
+        i += 2
+        if (isNaN(c2)) continue
+        if (c2 === 0) { i -= 2; break }
+        if (c2 === 8) layer = v2
+        if (c2 === 70) flags = parseInt(v2)
+        if (c2 === 71) degree = parseInt(v2)
+        if (c2 === 40) knots.push(parseFloat(v2))
+        if (c2 === 41) weights.push(parseFloat(v2))
+        if (c2 === 10) ctrl.push({ x: parseFloat(v2), y: 0 })
+        if (c2 === 20 && ctrl.length) ctrl[ctrl.length - 1].y = parseFloat(v2)
+        if (c2 === 11) fit.push({ x: parseFloat(v2), y: 0 })
+        if (c2 === 21 && fit.length) fit[fit.length - 1].y = parseFloat(v2)
+      }
+      const s = dxfStyle(layer)
+      let closed = !!(flags & 1)
+      let pts = null, polyline = true
+      if (ctrl.length >= 2 && degree >= 1 && knots.length === ctrl.length + degree + 1) {
+        pts = sampleNurbs(ctrl, knots, weights.length === ctrl.length ? weights : null, degree)
+      } else if (fit.length >= 2) {
+        pts = fit; polyline = false   // fit points lie ON the curve — draw a spline through them
+      } else if (ctrl.length >= 2) {
+        pts = ctrl
+      }
+      if (pts) {
+        const a = pts[0], z = pts[pts.length - 1]
+        if (pts.length > 2 && Math.hypot(a.x - z.x, a.y - z.y) < 1e-9) { pts = pts.slice(0, -1); closed = true }
+        splines_out.push({ points: pts.map(q => ({ x: mm(q.x), y: -mm(q.y) })), closed, polyline, ...s })
+      }
+    }
+    else if (code===0 && val==='ELLIPSE') {
+      // Centre (10/20), major-axis end RELATIVE to the centre (11/21), minor/major
+      // ratio (40), start/end parameter in radians (41/42). Sampled; a whole
+      // ellipse becomes one closed smooth curve in the solid.
+      let cx = 0, cy = 0, mx = 1, my = 0, ratio = 1, t0 = 0, t1 = Math.PI * 2, layer = ''
+      while (i < raw.length) {
+        const c2 = parseInt(raw[i]?.trim()), v2 = raw[i+1]?.trim()
+        i += 2
+        if (isNaN(c2)) continue
+        if (c2 === 0) { i -= 2; break }
+        if (c2 === 8) layer = v2
+        if (c2 === 10) cx = parseFloat(v2); if (c2 === 20) cy = parseFloat(v2)
+        if (c2 === 11) mx = parseFloat(v2); if (c2 === 21) my = parseFloat(v2)
+        if (c2 === 40) ratio = parseFloat(v2)
+        if (c2 === 41) t0 = parseFloat(v2); if (c2 === 42) t1 = parseFloat(v2)
+      }
+      let sweep = t1 - t0
+      while (sweep <= 1e-9) sweep += Math.PI * 2
+      const full = Math.abs(sweep - Math.PI * 2) < 1e-6
+      const N = Math.max(16, Math.round(64 * sweep / (Math.PI * 2)))
+      const pts = []
+      for (let k = 0; k < (full ? N : N + 1); k++) {
+        const t = t0 + sweep * k / N
+        pts.push({ x: mm(cx + mx * Math.cos(t) - ratio * my * Math.sin(t)), y: -mm(cy + my * Math.cos(t) + ratio * mx * Math.sin(t)) })
+      }
+      splines_out.push({ points: pts, closed: full, polyline: true, ...dxfStyle(layer) })
     }
     else if (code===0 && val==='LINE') {
       let x1=0,y1=0,x2=0,y2=0,layer=''
@@ -804,5 +880,56 @@ function parseDXFMultiVertex(dxfText, scale) {
     }
   }
 
-  return {lines:lines_out,circles:circles_out,arcs:arcs_out,splines:splines_out}
+  return {lines:lines_out,circles:circles_out,arcs:arcs_out,splines:splines_out,polyLines,polyArcs}
+}
+
+function dxfStyle(layer) {
+  const l = (layer || '').toLowerCase()
+  const style = l.includes('construction') || l.includes('cnst') ? 'construction'
+              : l.includes('dashed') || l.includes('dash') ? 'dashed' : undefined
+  return style ? { style } : {}
+}
+
+// A polyline span a→b with bulge b (DXF units, Y-up) as an ARC entity in the
+// app's frame (px, Y-down) — the same conversion the ARC branch uses.
+// bulge = tan(θ/4), θ the included angle, positive = counter-clockwise.
+function bulgeArc(a, b, bulge, mm) {
+  const theta = 4 * Math.atan(bulge)
+  const dx = b.x - a.x, dy = b.y - a.y, c = Math.hypot(dx, dy)
+  const ux = dx / c, uy = dy / c
+  const h = (c / 2) / Math.tan(theta / 2)          // signed: centre left of a→b when CCW
+  const cx = (a.x + b.x) / 2 - uy * h, cy = (a.y + b.y) / 2 + ux * h
+  const r = Math.abs(c / (2 * Math.sin(theta / 2)))
+  const aa = Math.atan2(a.y - cy, a.x - cx), ab = Math.atan2(b.y - cy, b.x - cx)
+  const [sa, ea] = bulge > 0 ? [aa, ab] : [ab, aa]   // DXF arcs run CCW from start to end
+  return { cx: mm(cx), cy: -mm(cy), r: mm(r), startAngle: -ea, endAngle: -sa }
+}
+
+// Samples a (possibly rational) B-spline — de Boor's algorithm over the valid
+// knot range [U[p], U[n]] — into points ON the curve.
+function sampleNurbs(P, U, W, p) {
+  const n = P.length
+  const lo = U[p], hi = U[n]
+  if (!(hi > lo)) return null
+  const N = Math.max(40, (n - p) * 16)
+  const out = []
+  for (let s = 0; s <= N; s++) {
+    const t = lo + (hi - lo) * s / N
+    let k = p
+    while (k < n - 1 && t >= U[k + 1]) k++
+    const d = []
+    for (let j = 0; j <= p; j++) {
+      const q = P[k - p + j], w = W ? W[k - p + j] : 1
+      d.push([q.x * w, q.y * w, w])
+    }
+    for (let r = 1; r <= p; r++) {
+      for (let j = p; j >= r; j--) {
+        const i = k - p + j, den = U[i + p - r + 1] - U[i]
+        const al = den === 0 ? 0 : (t - U[i]) / den
+        d[j] = [(1 - al) * d[j-1][0] + al * d[j][0], (1 - al) * d[j-1][1] + al * d[j][1], (1 - al) * d[j-1][2] + al * d[j][2]]
+      }
+    }
+    out.push({ x: d[p][0] / d[p][2], y: d[p][1] / d[p][2] })
+  }
+  return out
 }

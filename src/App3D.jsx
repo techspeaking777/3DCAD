@@ -23,6 +23,7 @@ import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewL
 import { useHistory } from './tools/history.js'
 import { rectCorners, rectLines, rectSize, threePointArc, arcMidPoint } from './tools/shapeMath.js'
 import { ShapeModeRow, RectPanel, ArcPanel, LINE_MODES, CIRCLE_MODES } from './tools/ShapeModePanels.jsx'
+import { ensureIds, linkTwoPointDim, resolveDim, sameMeasure, dimLabelPoint, applyDimValue, dimClash, dimText } from './tools/sketchDims.js'
 import { loadJSON, exportDXF, parseDXF, centreDxfResult, saveProjectAs, canPickSaveLocation, exportFaceDXF as writeFaceDXF, saveBlobAs, saveProjectFileAs, loadProjectFile, serializeProject, parseProjectData } from './tools/saveLoad.js'
 import { getAuthState, fetchMyClasses, saveNewCloudProject, updateCloudProject, loadCloudProject, saveFeedbackCopy, updateFeedbackCopy } from './tools/cloudSave.js'
 import { detectProfiles, detectPath, buildSolid, openEnds } from './tools/extrudeMath.js'
@@ -2347,6 +2348,9 @@ const App3D = forwardRef(function App3D(props, ref) {
   const snapArcs = faceRefArcs.length ? [...arcs, ...faceRefArcs] : arcs
   const [splines,setSplines]=useState([])
   const [dims,setDims]=useState([])  // dimension annotations
+  // Driving dimensions (edit history Session 5, tools/sketchDims.js): the one
+  // being typed into — {idx, input, ref}.
+  const [dimEdit,setDimEdit]=useState(null)
 
   // Spline in-progress state
   const [splinePoints,setSplinePoints]=useState([])   // [{x,y},...] being placed
@@ -2613,6 +2617,71 @@ const App3D = forwardRef(function App3D(props, ref) {
   const { commit, undo, redo, canUndo, canRedo } = useHistory()
   const snapshot = () => ({ lines, circles, arcs, splines, dims })
   const restore = (snap) => { setLines(snap.lines); setCircles(snap.circles); setArcs(snap.arcs); setSplines(snap.splines||[]); setDims(snap.dims||[]) }
+
+  // Every sketch line / circle / arc has a stable id, so a dimension can point
+  // at it (Session 5). Older sketches get theirs here; a piece split off that
+  // kept its parent's id gets a new one. A linked dimension whose geometry
+  // was deleted goes with it.
+  useEffect(()=>{
+    const taken=new Set()
+    const L=ensureIds(lines,taken), C=ensureIds(circles,taken), A=ensureIds(arcs,taken)
+    if (L!==lines) setLines(L)
+    if (C!==circles) setCircles(C)
+    if (A!==arcs) setArcs(A)
+    if (L!==lines||C!==circles||A!==arcs) return
+    const geo={lines,circles,arcs,splines}
+    if (dims.some(d=>resolveDim(d,geo).broken)) setDims(ds=>ds.filter(d=>!resolveDim(d,{lines,circles,arcs,splines}).broken))
+  },[lines,circles,arcs,dims])
+  // What each dimension shows now (linked ones follow their geometry), in the
+  // shape the drawing and hit-test code uses — same order as `dims`.
+  const viewDims=useMemo(()=>dims.map(d=>resolveDim(d,{lines,circles,arcs,splines})),[dims,lines,circles,arcs,splines])
+  // The dimension whose number is under sketch point pt (index), or -1.
+  function dimLabelAt(pt){
+    const r=16/zoomRef.scale
+    let best=-1,bestD=r
+    viewDims.forEach((v,i)=>{const q=dimLabelPoint(v);if(!q)return;const d=Math.hypot(q.x-pt.x,q.y-pt.y);if(d<bestD){bestD=d;best=i}})
+    return best
+  }
+  function openDimEdit(idx){
+    const v=viewDims[idx]
+    if (!v||v.broken) return
+    setDimEdit({idx,input:v.valueMm!=null?String(Math.round(v.valueMm*100)/100):'',ref:!!dims[idx].ref})
+  }
+  // Typing a new value into a driving dimension: the sketch follows (follow-
+  // the-corner rules), unless that would change another driving dimension.
+  function applyDimEdit(){
+    const ed=dimEdit;if(!ed)return
+    const dim=dims[ed.idx];if(!dim){setDimEdit(null);return}
+    const linked=dim.kind==='len'||dim.kind==='dist'||dim.kind==='dia'||dim.kind==='rad'
+    if (!linked){setDimEdit(null);return}
+    // Driving / reference switch
+    if (!!dim.ref!==ed.ref){
+      if (!ed.ref&&dims.some((o,i)=>i!==ed.idx&&!o.ref&&sameMeasure(o,dim))){
+        setCadError('Another dimension already sets that size — this one stays a reference.');setTimeout(()=>setCadError(null),6000);return
+      }
+      commit(snapshot())
+      setDims(ds=>ds.map((d,i)=>i===ed.idx?{...d,ref:ed.ref||undefined}:d))
+      setDimEdit(null);return
+    }
+    if (dim.ref){setDimEdit(null);return}
+    const val=parseFloat(ed.input)
+    const geo={lines,circles,arcs,splines}
+    const cur=resolveDim(dim,geo).valueMm
+    if (!(val>0)){setCadError('Type a size bigger than 0.');setTimeout(()=>setCadError(null),5000);return}
+    if (Math.abs(val-cur)<1e-6){setDimEdit(null);return}
+    const res=applyDimValue(dim,val,geo)
+    if (res.error){setCadError(res.error);setTimeout(()=>setCadError(null),6000);return}
+    const clash=dimClash(dims,ed.idx,geo,res,val)
+    if (clash){
+      setCadError(clash.self
+        ? "That size can't be reached with the shape the way it is."
+        : `That clashes with the ${clash.valueMm.toFixed(2)} mm dimension — change that one, or make one of them a reference.`)
+      setTimeout(()=>setCadError(null),7000);return
+    }
+    commit(snapshot())
+    setLines(res.lines);setCircles(res.circles);setArcs(res.arcs);if(res.splines!==splines)setSplines(res.splines)
+    setDimEdit(null)
+  }
 
   // Separate history for the 3D feature tree — deliberately not unified with
   // the 2D sketch history above: different granularity (one committed
@@ -2887,7 +2956,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     resetMeasure(); resetMirror3D(); resetJoin3D(); resetSubtract3D(); resetLoft3D(); resetFillet3D(); resetExportSTL(); resetExportSTEP()
     setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
     setTool('select')
-    setLines([]); setCircles([]); setArcs([]); setSplines([])
+    setLines([]); setCircles([]); setArcs([]); setSplines([]); setDims([])
     setExtrudeState(null); setExtrudeTool(null); setExtrudeHandlePos(null); setEditingFeatureId(null)
   }
 
@@ -3677,7 +3746,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       // Hit-test dimensions
       const sd=(SELECT_DIST*1.5)/zoomRef.scale
       let bestDim=null,bestDist=sd+1
-      dims.forEach((dim,idx)=>{
+      viewDims.forEach((dim,idx)=>{
         let d=sd+1
         if (dim.kind==='linear'&&dim.x1!=null&&dim.x2!=null){
           const len=Math.hypot(dim.x2-dim.x1,dim.y2-dim.y1)||1
@@ -3792,11 +3861,11 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (bestCircle){
         const c=circles[bestCircle.idx]
         const ang=Math.atan2(mousePos.y-c.cy,mousePos.x-c.cx)
-        setDimToolPreview({kind:'diameter',cx:c.cx,cy:c.cy,r:c.r,angle:ang})
+        setDimToolPreview({kind:'diameter',cx:c.cx,cy:c.cy,r:c.r,angle:ang,idx:bestCircle.idx})
       } else if (bestArc){
         const a=arcs[bestArc.idx]
         const ang=Math.atan2(mousePos.y-a.cy,mousePos.x-a.cx)
-        setDimToolPreview({kind:'radius',cx:a.cx,cy:a.cy,r:a.r,angle:ang})
+        setDimToolPreview({kind:'radius',cx:a.cx,cy:a.cy,r:a.r,angle:ang,idx:bestArc.idx})
       } else {
         setDimToolPreview(null)
       }
@@ -3871,7 +3940,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (d<bestDist){bestDist=d;best={kind:'spline',idx}}
     })
     // Hit-test dimensions — check proximity to dim line and extension lines
-    dims.forEach((dim,idx)=>{
+    viewDims.forEach((dim,idx)=>{
       let d=sd+1
       if (dim.kind==='linear'&&dim.x1!=null&&dim.x2!=null){
         const len=Math.hypot(dim.x2-dim.x1,dim.y2-dim.y1)||1
@@ -3892,7 +3961,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (d<bestDist){bestDist=d;best={kind:'dim',idx}}
     })
     setSelectHover(best)
-  },[tool,mousePos,lines,circles,arcs,splines,dims,selection,selectLiveGeom,viewTransform.scale])
+  },[tool,mousePos,lines,circles,arcs,splines,dims,viewDims,selection,selectLiveGeom,viewTransform.scale])
 
   // Select tool: the corner under the cursor that a press-and-drag would move
   // (drawn as a small white square). Not offered where an arc ends — moving an
@@ -4689,9 +4758,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
 
     // ── Committed dimension annotations ──
-    dims.forEach((dim,di)=>{
+    viewDims.forEach((dim,di)=>{
       const isDelTarget=tool==='delete'&&deletePreview?.kind==='dim'&&deletePreview.idx===di
-      const dimColor=isDelTarget?'#F44336':'#ccc'
+      // Linked (Session 5): driving = blue, reference = grey in brackets; the one being typed into = orange
+      const dimColor=isDelTarget?'#F44336':dimEdit?.idx===di?'#FF9800':dim.linked?(dim.driving?'#1565C0':'#9E9E9E'):'#ccc'
       ctx.save();ctx.strokeStyle=dimColor;ctx.fillStyle=dimColor
       const LW=0.8/sc,ARR=6/sc,FS=11/sc;ctx.lineWidth=LW
       if (dim.kind==='linear'){
@@ -4701,18 +4771,18 @@ const App3D = forwardRef(function App3D(props, ref) {
         const d1x=dim.x1+nx*off,d1y=dim.y1+ny*off,d2x=dim.x2+nx*off,d2y=dim.y2+ny*off
         ctx.beginPath();ctx.moveTo(d1x,d1y);ctx.lineTo(d2x,d2y);ctx.stroke()
         ;[[d1x,d1y,ux,uy],[d2x,d2y,-ux,-uy]].forEach(([ax,ay,ax2,ay2])=>{ctx.beginPath();ctx.moveTo(ax,ay);ctx.lineTo(ax+ax2*ARR-ay2*ARR*0.35,ay+ay2*ARR+ax2*ARR*0.35);ctx.lineTo(ax+ax2*ARR+ay2*ARR*0.35,ay+ay2*ARR-ax2*ARR*0.35);ctx.closePath();ctx.fill()})
-        const txt=dim.text||pxToMm(len).toFixed(2)+' mm'
+        const txt=dim.text||(dim.linked?dimText(dim):pxToMm(len).toFixed(2)+' mm')
         const mx=(d1x+d2x)/2,my=(d1y+d2y)/2
         ctx.save();ctx.translate(mx,my);ctx.scale(1/sc,1/sc);let ang=Math.atan2(uy,ux);if(ang>Math.PI/2||ang<-Math.PI/2)ang+=Math.PI;ctx.rotate(ang);ctx.font=`${FS*sc}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='bottom';ctx.fillStyle=dimColor;ctx.fillText(txt,0,-3);ctx.restore()
       } else if (dim.kind==='diameter'){
         const {cx,cy,r,angle}=dim,cos=Math.cos(angle),sin=Math.sin(angle)
         ctx.beginPath();ctx.moveTo(cx-r*cos,cy-r*sin);ctx.lineTo(cx+r*cos,cy+r*sin);ctx.stroke()
-        const txt=dim.text||'⌀'+pxToMm(r*2).toFixed(2)+' mm'
+        const txt=dim.text||(dim.linked?dimText(dim):'⌀'+pxToMm(r*2).toFixed(2)+' mm')
         ctx.save();ctx.translate(cx,cy);ctx.scale(1/sc,1/sc);let a=angle;if(a>Math.PI/2||a<-Math.PI/2)a+=Math.PI;ctx.rotate(a);ctx.font=`${FS*sc}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='bottom';ctx.fillText(txt,0,-3);ctx.restore()
       } else if (dim.kind==='radius'){
         const {cx,cy,r,angle}=dim,ex=cx+r*Math.cos(angle),ey=cy+r*Math.sin(angle)
         ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(ex,ey);ctx.stroke()
-        const txt=dim.text||'R'+pxToMm(r).toFixed(2)+' mm'
+        const txt=dim.text||(dim.linked?dimText(dim):'R'+pxToMm(r).toFixed(2)+' mm')
         ctx.save();ctx.translate(cx,cy);ctx.scale(1/sc,1/sc);let a=angle;if(a>Math.PI/2||a<-Math.PI/2)a+=Math.PI;ctx.rotate(a);ctx.font=`${FS*sc}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='bottom';ctx.fillText(txt,(r/2*sc/sc)*(a===angle?1:-1),-3);ctx.restore()
       }
       ctx.restore()
@@ -4977,7 +5047,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (segs) for (const s of segs) drawPreviewLine(ctx,s.x1,s.y1,s.x2,s.y2,includeEdgeConstruction?'#90A4AE':'#FFEB3B',1,sc)
     }
 
-  },[lines,circles,arcs,splines,sketchCrossPt,sketchOpenPts,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,fMode,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction,lineMode,circleMode,shapePts,rectW,rectH,arcR])
+  },[lines,circles,arcs,splines,sketchCrossPt,sketchOpenPts,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,fMode,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,viewDims,dimEdit,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction,lineMode,circleMode,shapePts,rectW,rectH,arcR])
 
 
   // ── Phase 2 Step 3: plane tagging ────────────────────────────────────────
@@ -5272,6 +5342,7 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   // Enter sketch mode for a new or existing sketch
   function enterSketch(plane, existingId=null, initialGeometry=null) {
+    setDimEdit(null)
     activePlaneRef.current = plane  // set synchronously
     setActivePlane(plane)
     setSketchMode(true)
@@ -5289,6 +5360,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         setCircles(feat.circles||[])
         setArcs(feat.arcs||[])
         setSplines(feat.splines||[])
+        setDims(feat.dims||[])
       }
     } else if (initialGeometry) {
       // Editing extrude/cutout's saved sketch — restore geometry
@@ -5296,9 +5368,10 @@ const App3D = forwardRef(function App3D(props, ref) {
       setCircles(initialGeometry.circles || [])
       setArcs(initialGeometry.arcs || [])
       setSplines(initialGeometry.splines || [])
+      setDims(initialGeometry.dims || [])
     } else {
       // New sketch — clear working arrays
-      setLines([]); setCircles([]); setArcs([]); setSplines([])
+      setLines([]); setCircles([]); setArcs([]); setSplines([]); setDims([])
     }
   }
 
@@ -5399,6 +5472,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       circles: [...circles],
       arcs:    [...arcs],
       splines: [...splines],
+      dims:    [...dims],
     }
     if (editingId) {
       setFeatures(prev => prev.map(f =>
@@ -5419,7 +5493,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         visible: true, ...sketchGeom,
       }])
     }
-    setLines([]); setCircles([]); setArcs([]); setSplines([])
+    setLines([]); setCircles([]); setArcs([]); setSplines([]); setDims([])
     setExtrudeHandlePos(null)
     viewport3dRef.current?.restoreSavedView()
   }
@@ -5477,6 +5551,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       sketchCircles: [...srcCircles],
       sketchArcs:    [...srcArcs],
       sketchSplines: [...srcSplines],
+      sketchDims:    [...dims],
     }
 
     if (sourceSketchId) convertingSketchIdRef.current = sourceSketchId
@@ -5796,6 +5871,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         sketchCircles: [...circles],
         sketchArcs:    [...arcs],
         sketchSplines: [...splines],
+        sketchDims:    [...dims],
       }
 
       viewport3dRef.current?.restoreSavedView()
@@ -5862,7 +5938,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     convertingSketchIdRef.current = null
     setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
     activePlaneRef.current = null
-    setLines([]); setCircles([]); setArcs([]); setSplines([])
+    setLines([]); setCircles([]); setArcs([]); setSplines([]); setDims([])
     if (extrudeTool) {
       setExtrudeTool(null); setExtrudeState(null); setEditingFeatureId(null)
       setExtrudeOffsetMode(false); setExtrudeOffsetBase(null); setExtrudeOffsetDistInput('20')
@@ -5912,7 +5988,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     setExtrudeOffsetDistInput('20')
     viewport3dRef.current?.hideOffsetPlanePreview()
     // Fresh canvas for the integrated sketch (step 2)
-    setLines([]); setCircles([]); setArcs([]); setSplines([])
+    setLines([]); setCircles([]); setArcs([]); setSplines([]); setDims([])
     setCachedProfiles([])
   }
 
@@ -8783,7 +8859,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     resetLoft3D()
     setTool('select')
     setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
-    setLines([]); setCircles([]); setArcs([]); setSplines([])
+    setLines([]); setCircles([]); setArcs([]); setSplines([]); setDims([])
 
     const normal = [basis.normal.x, basis.normal.y, basis.normal.z]
     const origin = [pxToMm(basis.origin.x), pxToMm(basis.origin.y), pxToMm(basis.origin.z)]
@@ -8935,7 +9011,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     resetSweep3D()
     setTool('select')
     setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
-    setLines([]); setCircles([]); setArcs([]); setSplines([])
+    setLines([]); setCircles([]); setArcs([]); setSplines([]); setDims([])
     // The profile plane is auto-computed from the path's own tangent — often
     // a genuinely odd/tilted angle, unlike a work plane or a picked face.
     // Leaving the camera there after commit (success or failure) is
@@ -9042,7 +9118,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     resetSpring3D()
     setTool('select')
     setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
-    setLines([]); setCircles([]); setArcs([]); setSplines([])
+    setLines([]); setCircles([]); setArcs([]); setSplines([]); setDims([])
 
     // Subtracts the coil volume from the visible solid(s) it overlaps (the
     // ones that glowed red in the preview), instead of adding a new one — same
@@ -10934,7 +11010,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       setSolids(prev => prev.filter(s => s.id!=='__preview__'))
       setExtrudeState(null)
       setExtrudeTool(null)
-      setLines([]); setCircles([]); setArcs([]); setSplines([])
+      setLines([]); setCircles([]); setArcs([]); setSplines([]); setDims([])
     }
   }
 
@@ -11292,7 +11368,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (!state) return
     const { profiles, planeId, pickedIdx, depthInput, direction='both', extentMode='value', revolveAxis=null, revolveReverse=false,
             draftAngleInput='0', draftDirection='out',
-            sketchLines:savedLines=[], sketchCircles:savedCircles=[], sketchArcs:savedArcs=[], sketchSplines:savedSplines=[] } = state
+            sketchLines:savedLines=[], sketchCircles:savedCircles=[], sketchArcs:savedArcs=[], sketchSplines:savedSplines=[], sketchDims:savedDims=[] } = state
     const depthMm = parseFloat(depthInput) || 20
     const angleDeg = revolveAxis ? Math.min(360, Math.max(1, depthMm)) : null
     const isCutout = extrudeTool === 'cutout' || extrudeTool === 'revolvecut'
@@ -11337,10 +11413,11 @@ const App3D = forwardRef(function App3D(props, ref) {
     setExtrudeHandlePos(null)
     setEditingFeatureId(null)
     // Clear integrated sketch canvas (geometry now baked into the solid)
-    setLines([]); setCircles([]); setArcs([]); setSplines([])
+    setLines([]); setCircles([]); setArcs([]); setSplines([]); setDims([])
 
     const editingFeat = editingId ? features.find(f => f.id === editingId) : null
-    const sketchGeom = { sketchLines: savedLines, sketchCircles: savedCircles, sketchArcs: savedArcs, sketchSplines: savedSplines }
+    // sketchDims: the sketch's dimensions (Session 5) — back when it is re-edited
+    const sketchGeom = { sketchLines: savedLines, sketchCircles: savedCircles, sketchArcs: savedArcs, sketchSplines: savedSplines, sketchDims: savedDims }
     // A body inside a Join/Subtract must stay ONE body — the Join is built
     // from it by id (edit history Session 3).
     if (editingFeat?.joinedInto && !isCutout && !revolveAxis && profiles.length !== 1) {
@@ -11872,6 +11949,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         circles: feat.sketchCircles || [],
         arcs:    feat.sketchArcs    || [],
         splines: feat.sketchSplines || [],
+        dims:    feat.sketchDims    || [],
       })
       if (feat.facePlane) viewport3dRef.current?.snapToFace(feat.facePlane)
       else viewport3dRef.current?.snapToPlane(feat.planeId)
@@ -11954,6 +12032,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       sketchCircles: feat.sketchCircles || [],
       sketchArcs:    feat.sketchArcs    || [],
       sketchSplines: feat.sketchSplines || [],
+      sketchDims:    feat.sketchDims    || [],
     })
     // No restoreSavedView() here — this function never enters sketch mode or
     // snaps the camera (the profile isn't changing, only depth/direction), so
@@ -12763,6 +12842,8 @@ const App3D = forwardRef(function App3D(props, ref) {
       // The 2nd click of a double-click would toggle the entity straight back
       // off; the double-click itself (handleDoubleClick) does the real work.
       if (e.detail>1) return
+      // A dimension's number: type a new size into it (Session 5).
+      {const hit=dimLabelAt(raw);if(hit>=0&&!selection.length){openDimEdit(hit);return}}
       const curLines   = selectLiveGeom?.lines   || lines
       const curCircles = selectLiveGeom?.circles || circles
       const curArcs    = selectLiveGeom?.arcs    || arcs
@@ -12811,6 +12892,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
 
     if (tool==='dim'){
+      // Clicking a dimension's number types a new size into it (Session 5).
+      if (dimToolStep===0){const hit=dimLabelAt(raw);if(hit>=0){openDimEdit(hit);return}}
       const snap=getGeoSnap(raw,snapLines,snapCircles,snapArcs,null,false,splines,intersectionPts)
       // No geometry under the cursor: fall back to the sketch's X / Y origin axes
       // (second point = the perpendicular foot from the first, so it measures TO the axis).
@@ -12821,23 +12904,39 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (dimToolPreview?.kind==='diameter'){
         const p=dimToolPreview
         commit(snapshot())
-        setDims(d=>[...d,{kind:'diameter',cx:p.cx,cy:p.cy,r:p.r,angle:p.angle,text:''}])
+        // Linked to the circle (Session 5); a second one on the same circle is a reference
+        const c=circles[p.idx]
+        const nd=c?.id?{kind:'dia',circleId:c.id,angle:p.angle}:{kind:'diameter',cx:p.cx,cy:p.cy,r:p.r,angle:p.angle,text:''}
+        setDims(d=>[...d,nd.circleId&&d.some(o=>!o.ref&&sameMeasure(o,nd))?{...nd,ref:true}:nd])
         resetDim();return
       }
       if (dimToolPreview?.kind==='radius'){
         const p=dimToolPreview
         commit(snapshot())
-        setDims(d=>[...d,{kind:'radius',cx:p.cx,cy:p.cy,r:p.r,angle:p.angle,text:''}])
+        const a=arcs[p.idx]
+        const nd=a?.id?{kind:'rad',arcId:a.id,angle:p.angle}:{kind:'radius',cx:p.cx,cy:p.cy,r:p.r,angle:p.angle,text:''}
+        setDims(d=>[...d,nd.arcId&&d.some(o=>!o.ref&&sameMeasure(o,nd))?{...nd,ref:true}:nd])
         resetDim();return
       }
       // Linear: click 1=p1, 2=p2, 3=offset
       if (dimToolStep===0){
+        // A click on a line's middle (its midpoint snap, or anywhere along it
+        // but its ends) sizes that line.
+        if ((!snap||snap.type==='midpoint'||snap.type==='online')&&!axisPt){
+          const sel=SELECT_DIST/zoomRef.scale
+          const li=lines.findIndex(l=>!l.ghostRef&&l.style!=='axis'&&distToSeg(raw.x,raw.y,l.x1,l.y1,l.x2,l.y2)<sel)
+          if (li>=0){const l=lines[li];setDimToolPts([{x:l.x1,y:l.y1},{x:l.x2,y:l.y2}]);setDimToolStep(2);return}
+        }
         setDimToolPts([pt]);setDimToolStep(1)
       } else if (dimToolStep===1){
         setDimToolPts([dimToolPts[0],pt]);setDimToolStep(2)
       } else if (dimToolStep===2&&dimToolPreview){
         commit(snapshot())
-        setDims(d=>[...d,{...dimToolPreview,text:''}])
+        // Linked to the geometry when both ends sit on it (Session 5) — then it
+        // can be typed into; a repeat of an existing one is a reference.
+        const p=dimToolPreview
+        const link=linkTwoPointDim({x:p.x1,y:p.y1},{x:p.x2,y:p.y2},p.offset,{lines,circles,arcs,splines})
+        setDims(d=>[...d,link?(d.some(o=>!o.ref&&sameMeasure(o,link))?{...link,ref:true}:link):{...p,text:''}])
         resetDim()
       }
       return
@@ -13639,7 +13738,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       // Cancel from step 3 (depth) — restore any hidden solid
       restoreHiddenEditSolid()
       setExtrudeState(null); setExtrudeTool(null); setEditingFeatureId(null)
-      setLines([]); setCircles([]); setArcs([]); setSplines([])
+      setLines([]); setCircles([]); setArcs([]); setSplines([]); setDims([])
       return
     }
     if (extrudeState) { handleExtrudeDepthKey(e); return }
@@ -14562,6 +14661,43 @@ const App3D = forwardRef(function App3D(props, ref) {
         </div>
       )}
 
+      {dimEdit&&sketchMode&&(()=>{
+        const v=viewDims[dimEdit.idx], q=v&&dimLabelPoint(v), vp=viewport3dRef.current
+        if (!q||!vp) return null
+        const planeId=typeof activePlane==='string'?activePlane:null
+        const facePlane=(activePlane&&typeof activePlane==='object')?activePlane:null
+        const sp=vp.sketchToScreen(q.x,q.y,planeId,facePlane)
+        if (!sp) return null
+        const linked=v.linked
+        return (
+          <div style={{position:'fixed',left:sp.x+14,top:Math.max(8,sp.y-18),zIndex:60,background:'#14142a',border:'2px solid #1565C0',borderRadius:8,padding:'8px 10px',fontFamily:'monospace',boxShadow:'0 6px 20px rgba(0,0,0,0.5)',width:180}}
+            onMouseDown={e=>e.stopPropagation()}>
+            <div style={{fontSize:9,color:'#90CAF9',letterSpacing:'0.08em',marginBottom:6}}>DIMENSION</div>
+            {linked?(<>
+              <div style={{display:'flex',alignItems:'center',gap:6}}>
+                <input autoFocus value={dimEdit.input} disabled={dimEdit.ref}
+                  onChange={e=>{if(/^[0-9.]*$/.test(e.target.value))setDimEdit(d=>({...d,input:e.target.value}))}}
+                  onKeyDown={e=>{e.stopPropagation();if(e.key==='Enter')applyDimEdit();if(e.key==='Escape')setDimEdit(null)}}
+                  style={{width:80,textAlign:'center',fontFamily:'monospace',fontSize:15,fontWeight:'bold',background:'#0d0d1a',color:dimEdit.ref?'#777':'#fff',border:'2px solid #1565C0',borderRadius:6,padding:'4px'}}/>
+                <span style={{color:'#888',fontSize:11}}>mm</span>
+              </div>
+              <label style={{display:'flex',alignItems:'center',gap:6,marginTop:8,fontSize:10,color:'#aaa',cursor:'pointer'}}>
+                <input type="checkbox" checked={dimEdit.ref} onChange={e=>setDimEdit(d=>({...d,ref:e.target.checked}))}/>
+                Reference (measure only)
+              </label>
+              <div style={{display:'flex',gap:6,marginTop:8}}>
+                <button onClick={applyDimEdit} style={{flex:1,padding:'5px 0',borderRadius:6,border:'none',background:'#1565C0',color:'#fff',fontFamily:'monospace',fontWeight:'bold',cursor:'pointer'}}>✓ Apply</button>
+                <button onClick={()=>setDimEdit(null)} style={{padding:'5px 8px',borderRadius:6,border:'1px solid #3a3a5a',background:'transparent',color:'#aaa',fontFamily:'monospace',cursor:'pointer'}}>✕</button>
+              </div>
+              <div style={{marginTop:6,fontSize:9,color:'#666',textAlign:'center'}}>The end nearest the origin stays put</div>
+            </>):(<>
+              <div style={{fontSize:11,color:'#ccc'}}>{dimText({...v,linked:true,driving:true})}</div>
+              <div style={{marginTop:6,fontSize:9,color:'#777'}}>This dimension isn't attached to the sketch, so it can only be read. Place a new one on line ends or a circle to change the size.</div>
+              <button onClick={()=>setDimEdit(null)} style={{marginTop:6,width:'100%',padding:'4px 0',borderRadius:6,border:'1px solid #3a3a5a',background:'transparent',color:'#aaa',fontFamily:'monospace',cursor:'pointer'}}>OK</button>
+            </>)}
+          </div>
+        )
+      })()}
       {selectDimPanel&&(
         <SelectDimPanel
           style={{position:'fixed',left:selectDimPanel.left,top:selectDimPanel.top}}
@@ -15147,6 +15283,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                     circles: saved.sketchCircles || [],
                     arcs:    saved.sketchArcs    || [],
                     splines: saved.sketchSplines || [],
+                    dims:    saved.sketchDims    || [],
                   })
                   if (typeof plane === 'string') viewport3dRef.current?.snapToPlane(plane)
                   else viewport3dRef.current?.snapToFace(plane)
@@ -15159,7 +15296,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                 activePlaneRef.current = null
                 setExtrudeState(null)
                 setExtrudeHandlePos(null)
-                setLines([]); setCircles([]); setArcs([]); setSplines([])
+                setLines([]); setCircles([]); setArcs([]); setSplines([]); setDims([])
                 viewport3dRef.current?.restoreSavedView()
               }
             }}

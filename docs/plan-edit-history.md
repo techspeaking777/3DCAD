@@ -20,7 +20,9 @@ Not covered yet: a cut sketched on another body's face, and sketches on faces ma
 
 **Session 4 is done (2026-11-16):** the Select panel's Length/Angle edit follows the corner in both tabs (rectangle, L-shape, rounded rectangle and trapezoid behave as in B3). H/V comes from the geometry, not a stored tag. The marks (yellow pin on the end that stays put, H/V on straight lines) show on the selected shape only, rather than on every line while sketching, to keep busy drawings readable. The middle anchor dot now means "automatic" (end nearest the origin).
 
-Session 5 (driving dimensions) is next.
+**Session 5 is done (2026-11-16):** sketch dimensions in the 3D tab are linked to the lines/circles/arcs they measure (stable ids, added on load), always show the current size, and can be typed into — the sketch follows (follow-the-corner; a rounded corner is re-filleted), and a value that would change another driving dimension is refused with a plain message. Reference dimensions show grey in brackets (a tick box in the edit panel, or automatic for a repeat). Dimensions are now saved with their sketch. Not done: angle dimensions, editing dims in the Drawing tab, and loft/sweep/spring sketches keep no dims.
+
+**Stage 1 and 1b are complete.**
 
 **Why:** students often want to change something they made earlier, like a base size, a sketch line, or a hole position. Today the teacher often goes in and does it for them. The goal is the parametric "change 50 to 60 and the whole model updates" moment from Fusion and Onshape, without Fusion's complexity.
 

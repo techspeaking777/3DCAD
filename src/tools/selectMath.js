@@ -370,15 +370,30 @@ export function resizeLineFollowingCorners(lines, arcs, splines, idx, fixedEnd, 
   const outA = arcs.map(a => ({ ...a }))
   const outS = splines.map(s => (Array.isArray(s.points) ? { ...s, points: s.points.map(p => ({ ...p })) } : s))
   if (fixedEnd === 1) { outL[idx].x2 = Mn.x; outL[idx].y2 = Mn.y } else { outL[idx].x1 = Mn.x; outL[idx].y1 = Mn.y }
+  return spreadCornerMove(lines, arcs, splines, outL, outA, outS, [{ p: M, d: { x: Mn.x - M.x, y: Mn.y - M.y } }], [F], new Set([idx]))
+}
+
+// Corner P moves by d (px) and the shape follows by the same rules (dimension
+// edits: one corner of a distance, edit history Session 5). `fixedPts` must not
+// move ({refused} if the change reaches one). Returns {lines, arcs, splines}.
+export function moveCornerFollowing(lines, arcs, splines, P, d, fixedPts = [], skipArcs = null) {
+  const outL = lines.map(x => ({ ...x }))
+  const outA = arcs.map(a => ({ ...a }))
+  const outS = splines.map(s => (Array.isArray(s.points) ? { ...s, points: s.points.map(p => ({ ...p })) } : s))
+  return spreadCornerMove(lines, arcs, splines, outL, outA, outS, [{ p: P, d }], fixedPts, new Set(), skipArcs)
+}
+
+// The shared walk: each queued {p, d} moves whatever meets at p (see the rules above).
+function spreadCornerMove(lines, arcs, splines, outL, outA, outS, queue, fixedPts, doneLines, doneArcs = null) {
   const near = (a, b) => Math.hypot(a.x - b.x, a.y - b.y) <= CORNER_JOIN_TOL
-  const doneLines = new Set([idx]), doneArcs = new Set(), doneSplineEnds = new Set()
-  const queue = [{ p: M, d: { x: Mn.x - M.x, y: Mn.y - M.y } }]
+  doneArcs = doneArcs || new Set()
+  const doneSplineEnds = new Set()
   let steps = 0
   while (queue.length) {
     const { p, d } = queue.shift()
     if (++steps > 1000) return { refused: true }
     if (Math.hypot(d.x, d.y) < 1e-9) continue
-    if (near(F, p)) return { refused: true }
+    if (fixedPts.some(F => near(F, p))) return { refused: true }
     lines.forEach((L, i) => {
       if (doneLines.has(i) || L.ghostRef) return
       const e = near({ x: L.x1, y: L.y1 }, p) ? 1 : near({ x: L.x2, y: L.y2 }, p) ? 2 : 0

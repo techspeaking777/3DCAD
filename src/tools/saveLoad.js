@@ -250,7 +250,7 @@ const SNAPSHOT_FORMAT_VERSION = 5
 // flag (those change without touching a shape). Works on the plain objects as saved,
 // so it comes out the same when recomputed from a parsed file.
 export function featuresFingerprint(featureObjs) {
-  const text = JSON.stringify(featureObjs.map(f => { const rest = { ...f }; delete rest.hidden; delete rest.color; delete rest.name; return rest }))
+  const text = JSON.stringify(featureObjs.map(f => { const rest = { ...f }; delete rest.hidden; delete rest.color; delete rest.name; delete rest.sketchDims; delete rest.dims; return rest }))
   // cyrb53 — a fast 53-bit string hash; plenty to tell "same recipe" from "different".
   let h1 = 0xdeadbeef, h2 = 0x41c6ce57
   for (let i = 0; i < text.length; i++) {

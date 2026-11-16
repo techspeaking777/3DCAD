@@ -26,7 +26,7 @@ import { getAuthState, fetchMyClasses, saveNewCloudProject, updateCloudProject, 
 import { detectProfiles, detectPath, buildSolid, openEnds } from './tools/extrudeMath.js'
 import { cadEngine } from './cadEngine.js'
 import ReplayPanel from './tools/ReplayPanel.jsx'
-import { featureNeeds } from './tools/featureDeps.js'
+import { featureNeeds, isBodyOwner, baseFeatureOf } from './tools/featureDeps.js'
 import { replicadMeshToThree } from './cadMesh.js'
 import TracerPanel from './tools/TracerPanel.jsx'
 import TextPanel from './tools/TextPanel.jsx'
@@ -473,6 +473,42 @@ function facePlaneParams(fp) {
     origin: [pxToMm(fp.origin.x), pxToMm(fp.origin.y), pxToMm(fp.origin.z)],
     uAxis:  [fp.uAxis.x, fp.uAxis.y, fp.uAxis.z],
   } : {}
+}
+
+// A copy of FacePlane `fp` moved by d (mm), keeping its body link, click point
+// and centre — used when a sketch follows the face it was drawn on (App3D
+// followBodyEdit, docs/plan-edit-history.md Session 2).
+function shiftFacePlane(fp, dMm) {
+  const t = new THREE.Vector3(mmToPx(dMm[0]), mmToPx(dMm[1]), mmToPx(dMm[2]))
+  const out = new FacePlane(fp.origin.clone().add(t), fp.normal, fp.uAxis, fp.vAxis, (fp.viewCenter || fp.origin).clone().add(t))
+  for (const k of Object.keys(fp)) if (!(k in out)) out[k] = fp[k]
+  out.free = !!fp.free
+  if (fp.point) out.point = fp.point.clone().add(t)
+  return out
+}
+const addMm = (p, d) => [p[0] + d[0], p[1] + d[1], p[2] + d[2]]
+// A feature whose sketch plane moves by d (mm): its facePlane and the plane each
+// of its sketch entities carries (same plane = same new object).
+function shiftFeaturePlanes(f, dMm) {
+  const fp = f.facePlane
+  if (!fp) return f
+  const moved = shiftFacePlane(fp, dMm)
+  const cache = new Map([[fp, moved]])
+  const off = fp.normal.dot(fp.origin)
+  const coplanar = q => Math.abs(q.normal.dot(fp.normal)) > 0.9999 && Math.abs(fp.normal.dot(q.origin) - off) < 0.02
+  const mapEnt = e => {
+    if (!e?.facePlane) return e
+    let n = cache.get(e.facePlane)
+    if (!n) {
+      if (!coplanar(e.facePlane)) return e
+      n = shiftFacePlane(e.facePlane, dMm)
+      cache.set(e.facePlane, n)
+    }
+    return { ...e, facePlane: n }
+  }
+  const out = { ...f, facePlane: moved }
+  for (const k of ['sketchLines', 'sketchCircles', 'sketchArcs', 'sketchSplines']) if (Array.isArray(f[k])) out[k] = f[k].map(mapEnt)
+  return out
 }
 
 // Builds cadWorker params to rebuild a solid's OWN base shape from scratch
@@ -8683,17 +8719,29 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     try {
       const solidId = editingId ? features.find(f => f.id === editingId)?.solidId : Date.now()
-      const meshData = await cadEngine.loft({
+      let meshData = await cadEngine.loft({
         solidId, normal, origin, uAxis, ruled,
         profiles: profiles.map(p => ({ pts: p.pts, circle: p.circle, offsetMm: p.offsetMm })),
       })
+      // Editing: replay the body's own cutouts/fillets/shell on the new loft
+      // (they used to be dropped until the next reload), after followBodyEdit
+      // has moved whatever sat on a face that moved.
+      const editingLoftFeat = editingId ? features.find(f => f.id === editingId) : null
+      const newLoftFeat = editingLoftFeat ? { ...editingLoftFeat, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled } : null
+      let followLoft = null
+      if (editingLoftFeat) {
+        const newRec = featureToTempSolid(newLoftFeat)   // keeps a Move, like the saved feature
+        followLoft = await followBodyEdit(featureToTempSolid(editingLoftFeat), newRec, features)
+        meshData = await rebuildSolidChain(newRec, {}, followLoft.feats)
+      }
       const color = (editingId && solids.find(s => s.id === solidId)?.color) || extrudeColor
       const group = replicadMeshToThree(meshData, color, solidId)
       const solidData = { id: solidId, group, operation: 'loft', color, normal, origin, uAxis, vAxis, profiles, ruled }
 
       setSolids(prev => editingId ? prev.map(s => s.id === solidId ? solidData : s) : [...prev, solidData])
       if (editingId) {
-        setFeatures(prev => prev.map(f => f.id === editingId ? { ...f, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled } : f))
+        setFeatures(prev => prev.map(f => f.id === editingId ? { ...f, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled } : (followLoft?.changed.get(f.id) || f)))
+        if (followLoft?.movedBodies.length) await rebuildMovedBodies(followLoft.movedBodies, followLoft.feats.map(f => f.id === editingId ? newLoftFeat : f))
       } else {
         const loftName = nextLoftName()   // outside the updater — see nextSketchName's comment
         const loftFeat = {
@@ -10688,6 +10736,109 @@ const App3D = forwardRef(function App3D(props, ref) {
     return 'Couldn’t be rebuilt: ' + (msg || 'unknown problem')
   }
 
+  // ── Follow the face (docs/plan-edit-history.md, Session 2) ──
+  // A body's own recipe just changed (oldRec → newRec, solid-shaped records as
+  // featureToTempSolid makes). Before its steps are replayed, everything stored
+  // on it by position is found again on the new shape (worker relocatePoints):
+  //   - fillet edge points and shell face points
+  //   - cutouts and sketches drawn on its faces (they move with the face)
+  //   - other bodies sketched on its faces: each moves as a whole, with its
+  //     own fillets, cuts and the bodies sketched on IT
+  // Returns {feats, changed: Map id → updated feature, movedBodies: [featId]}.
+  // A point that can't be found keeps its old place (the step then shows red
+  // if it no longer fits — Session 1's broken marking).
+  async function followBodyEdit(oldRec, newRec, feats) {
+    const none = { feats, changed: new Map(), movedBodies: [] }
+    if (!oldRec || !newRec || newRec.operation === 'import') return none
+    const oldBase = buildBaseWorkerParams(oldRec), newBase = buildBaseWorkerParams(newRec)
+    if (!oldBase || !newBase) return none
+    const sid = newRec.id
+    const baseFeat = baseFeatureOf(sid, feats)
+    const baseIdx = baseFeat ? feats.indexOf(baseFeat) : -1
+    const v3mm = v => [pxToMm(v.x), pxToMm(v.y), pxToMm(v.z)]
+    // Old files don't record which body a face sketch was drawn on — those
+    // only count when their point really sits on this body's face (strict).
+    const onThisBody = fp => fp && !fp.free && (fp.solidId == null || fp.solidId === sid)
+    const planeQuery = fp => ({
+      kind: 'plane', origin: v3mm(fp.origin), normal: [fp.normal.x, fp.normal.y, fp.normal.z],
+      p: fp.point ? v3mm(fp.point) : v3mm(fp.viewCenter || fp.origin), strict: fp.solidId == null,
+    })
+    const queries = [], slots = []
+    const ask = (q, slot) => { queries.push(q); slots.push(slot) }
+    feats.forEach((f, i) => {
+      if (f.solidId === sid && f.type === 'fillet') (f.edgePoints || []).forEach((p, k) => ask({ kind: 'edge', p }, { f, field: 'edgePoints', k }))
+      else if (f.solidId === sid && f.type === 'shell') (f.facePoints || []).forEach((p, k) => ask({ kind: 'face', p }, { f, field: 'facePoints', k }))
+      else if (f.solidId === sid && f.operation === 'cutout' && f.planeId === 'face' && onThisBody(f.facePlane)) ask(planeQuery(f.facePlane), { f, field: 'facePlane' })
+      else if (f.type === 'sketch' && onThisBody(f.facePlane) && i > baseIdx) ask(planeQuery(f.facePlane), { f, field: 'facePlane' })
+      else if (isBodyOwner(f) && f.solidId !== sid && !f.joinedInto && f.planeId === 'face' && onThisBody(f.facePlane) && i > baseIdx)
+        ask(planeQuery(f.facePlane), { f, field: 'body' })
+    })
+    if (!queries.length) return none
+    let res
+    try { res = (await cadEngine.relocatePoints({ oldBase, newBase, queries })).relocated }
+    catch (err) { console.warn('[follow] could not compare the old and new shape:', err); return none }
+    const changed = new Map()
+    const get = f => changed.get(f.id) || f
+    const bodyShift = []
+    res.forEach((r, i) => {
+      const { f, field, k } = slots[i]
+      if (field === 'edgePoints' || field === 'facePoints') {
+        if (!r.point) return
+        const cur = get(f)
+        const arr = [...cur[field]]; arr[k] = r.point
+        changed.set(f.id, { ...cur, [field]: arr })
+      } else if (r.d) {
+        if (field === 'body') bodyShift.push([f, r.d])
+        else changed.set(f.id, shiftFeaturePlanes(get(f), r.d))
+      }
+    })
+    // A body sketched on a face that moved goes with it — and so does
+    // everything stored on it, and every body sketched on IT.
+    const movedBodies = []
+    const shiftBody = (bf, d) => {
+      if (movedBodies.includes(bf.id)) return
+      movedBodies.push(bf.id)
+      changed.set(bf.id, shiftFeaturePlanes(get(bf), d))
+      for (const f of feats) {
+        if (f === bf) continue
+        const c = get(f)
+        if (f.solidId === bf.solidId && f.type === 'fillet') changed.set(f.id, { ...c, edgePoints: (c.edgePoints || []).map(p => addMm(p, d)) })
+        else if (f.solidId === bf.solidId && f.type === 'shell') changed.set(f.id, { ...c, facePoints: (c.facePoints || []).map(p => addMm(p, d)) })
+        else if (f.solidId === bf.solidId && f.operation === 'cutout' && c.facePlane && (c.facePlane.solidId == null || c.facePlane.solidId === bf.solidId))
+          changed.set(f.id, shiftFeaturePlanes(c, d))
+        else if (f.type === 'sketch' && c.facePlane && (f.id === bf.sketchId || c.facePlane.solidId === bf.solidId))
+          changed.set(f.id, shiftFeaturePlanes(c, d))
+        else if (isBodyOwner(f) && f.solidId !== bf.solidId && !f.joinedInto && f.planeId === 'face' && c.facePlane?.solidId === bf.solidId)
+          shiftBody(f, d)
+      }
+    }
+    for (const [f, d] of bodyShift) shiftBody(f, d)
+    const moved = res.filter(r => r.point || r.d).length
+    if (moved) console.info(`[follow] ${moved} stored point(s) followed their face; ${movedBodies.length} body(ies) moved with it`)
+    return { feats: feats.map(f => changed.get(f.id) || f), changed, movedBodies }
+  }
+
+  // After followBodyEdit: rebuild the other bodies that moved with a face, in
+  // tree order, and put them on screen. `feats` is the updated feature list.
+  async function rebuildMovedBodies(movedBodies, feats) {
+    for (const id of movedBodies) {
+      const feat = feats.find(f => f.id === id)
+      if (!feat) continue
+      try {
+        const meshData = await rebuildFeatureSolid(feat, feats)
+        const prevSolid = solids.find(s => s.id === feat.solidId)
+        const color = prevSolid?.color || feat.color
+        const solid = { ...(prevSolid || featureToTempSolid(feat)), facePlane: feat.facePlane, color, group: replicadMeshToThree(meshData, color, feat.solidId) }
+        setSolids(prev => prev.map(s => s.id === feat.solidId ? solid : s))
+        setBrokenEntry(feat.id, null)
+        await rebuildDependentMirrors(solid)
+      } catch (err) {
+        console.warn('[follow] a body sketched on the edited face could not be rebuilt:', feat.name, err)
+        setBrokenEntry(feat.id, brokenStepReason(feat, err))
+      }
+    }
+  }
+
   async function rebuildSolidChain(baseSolid, { overrideId=null, overrideCut=null, overrideFilletRadius=null, overrideShellThickness=null, skipId=null, skipIds=null } = {}, feats = features, solidsLookup = solids) {
     let { meshData, baseWorkerParams } = baseSolid.operation === 'join'
       ? await rebuildJoinBaseMesh(baseSolid, feats, solidsLookup)
@@ -11071,7 +11222,16 @@ const App3D = forwardRef(function App3D(props, ref) {
             uAxis:  [facePlane.uAxis.x,  facePlane.uAxis.y,  facePlane.uAxis.z],
           } : {}),
         }
-        const meshData = await cadEngine.revolve({ ...revolveParams, solidId })
+        let meshData = await cadEngine.revolve({ ...revolveParams, solidId })
+        // Editing: the body's own cutouts/fillets/shell are replayed on the new
+        // shape (they used to be dropped until the next reload), after
+        // followBodyEdit has moved whatever sat on a face that moved.
+        let followRev = null
+        if (editingFeat) {
+          const newRec = featureToTempSolid({ ...editingFeat, solidId, operation: 'revolve', profilePts: pts, planeId, facePlane, revolveAxis, angleDeg, revolveReverse, transform: undefined })
+          followRev = await followBodyEdit(featureToTempSolid(editingFeat), newRec, features)
+          meshData = await rebuildSolidChain(newRec, {}, followRev.feats)
+        }
         const group = replicadMeshToThree(meshData, color, solidId)
         const solid = { id:solidId, group, planeId, operation:'revolve', profilePts:pts, color, facePlane, revolveAxis, angleDeg, revolveReverse }
         setSolids(prev => [...prev.filter(s => s.id !== solidId), solid])
@@ -11083,7 +11243,8 @@ const App3D = forwardRef(function App3D(props, ref) {
           ...sketchGeom,
         }
         if (editingId) {
-          setFeatures(prev => prev.map(f => f.id === editingId ? revolveFeat : f))
+          setFeatures(prev => prev.map(f => f.id === editingId ? revolveFeat : (followRev?.changed.get(f.id) || f)))
+          if (followRev?.movedBodies.length) await rebuildMovedBodies(followRev.movedBodies, followRev.feats.map(f => f.id === editingId ? revolveFeat : f))
         } else {
           setFeatures(prev => [...prev, revolveFeat])
           // "Join to body": fuse the revolve into the body it was sketched on.
@@ -11114,31 +11275,21 @@ const App3D = forwardRef(function App3D(props, ref) {
           ? features.filter(f => f.groupId === editingFeat.groupId)
           : [editingFeat]
         const updatedById = new Map()
+        // The body's own cutouts, fillets and shell are replayed on the new
+        // depth (they used to be dropped until the next reload), after
+        // followBodyEdit has moved whatever sat on a face that moved.
+        let featsNow = features
+        const movedBodies = []
+        const rebuiltMembers = []
         for (const member of groupMembers) {
           const memberPts = member.profilePts
-          const memberWorkerParams = {
-            pts: memberPts, depthMm, planeId: member.planeId, direction, draftAngleDeg, draftDirection,
-            circle: memberPts.circleMeta || null,  // true circle → real curve, not a polygon prism
-            ...(member.facePlane ? {
-              normal: [member.facePlane.normal.x, member.facePlane.normal.y, member.facePlane.normal.z],
-              origin: [pxToMm(member.facePlane.origin.x), pxToMm(member.facePlane.origin.y), pxToMm(member.facePlane.origin.z)],
-              uAxis:  [member.facePlane.uAxis.x,  member.facePlane.uAxis.y,  member.facePlane.uAxis.z],
-              vAxis:  [member.facePlane.vAxis.x,  member.facePlane.vAxis.y,  member.facePlane.vAxis.z],
-            } : {}),
-          }
-          let meshData = await cadEngine.extrude({ ...memberWorkerParams, solidId: member.solidId })
-          for (const holePts of (holesCutSeparately(draftAngleDeg) ? memberPts.holes || [] : [])) {
-            const holeCut = {
-              pts: holePts, depthMm: depthMm*4+10, planeId: member.planeId, direction: 'both',
-              circle: holePts.circleMeta || null,
-              ...(member.facePlane ? {
-                normal: [member.facePlane.normal.x, member.facePlane.normal.y, member.facePlane.normal.z],
-                origin: [pxToMm(member.facePlane.origin.x), pxToMm(member.facePlane.origin.y), pxToMm(member.facePlane.origin.z)],
-                uAxis:  [member.facePlane.uAxis.x,  member.facePlane.uAxis.y,  member.facePlane.uAxis.z],
-              } : {}),
-            }
-            meshData = await cadEngine.subtract({ baseSolidId: member.solidId, cut: holeCut, base: memberWorkerParams })
-          }
+          const newMember = { ...member, depthMm, direction, extentMode, draftAngleDeg, draftDirection }
+          const newRec = featureToTempSolid(newMember)
+          const follow = await followBodyEdit(featureToTempSolid(member), newRec, featsNow)
+          featsNow = follow.feats.map(f => f.id === member.id ? newMember : f)
+          for (const [id, f] of follow.changed) updatedById.set(id, f)
+          movedBodies.push(...follow.movedBodies)
+          const meshData = await rebuildSolidChain(newRec, {}, featsNow)
           const group = replicadMeshToThree(meshData, member.color, member.solidId)
           // filter+push, not .map() — handleEditExtent already removed this
           // solid from state (to hide it while the popup is open, for a
@@ -11146,14 +11297,18 @@ const App3D = forwardRef(function App3D(props, ref) {
           // so a .map() here would silently find no matching entry to update
           // and the solid would never come back until an unrelated re-sketch
           // (which uses this same filter+push pattern) happened to re-add it.
-          setSolids(prev => [...prev.filter(s => s.id !== member.solidId), {
+          const solidRec = {
             id: member.solidId, group, planeId: member.planeId, operation: 'extrude',
             direction, depth: mmToPx(depthMm), depthMm, draftAngleDeg, draftDirection,
             profilePts: memberPts, color: member.color, facePlane: member.facePlane,
-          }])
-          updatedById.set(member.id, { ...member, depthMm, direction, extentMode, draftAngleDeg, draftDirection })
+          }
+          rebuiltMembers.push(solidRec)
+          setSolids(prev => [...prev.filter(s => s.id !== member.solidId), solidRec])
+          updatedById.set(member.id, newMember)
         }
         setFeatures(prev => prev.map(f => updatedById.get(f.id) || f))
+        for (const s of rebuiltMembers) await rebuildDependentMirrors(s)
+        await rebuildMovedBodies(movedBodies, featsNow)
 
       } else {
         // Fresh profile set: a brand new extrude, or a pencil re-sketch
@@ -11192,6 +11347,7 @@ const App3D = forwardRef(function App3D(props, ref) {
 
         const newFeats = []
         const newSolidObjs = []   // plain solid records, for "Join to body" below
+        let followResult = null   // reuse only — see followBodyEdit
         let profIdx = -1
         for (const profPts of profiles) {
           profIdx++
@@ -11252,7 +11408,13 @@ const App3D = forwardRef(function App3D(props, ref) {
           // inlined here since the base mesh is already in hand — avoids
           // re-extruding it a second time.
           if (reuse) {
-            const depOps = features.filter(f => f.solidId === solidId && (f.operation === 'cutout' || f.type === 'fillet' || f.type === 'shell'))
+            // Follow the face (Session 2): fillets, cuts and sketches sitting on
+            // a face that moved are found again on the new shape first.
+            const follow = await followBodyEdit(featureToTempSolid(editingFeat), featureToTempSolid({
+              ...editingFeat, depthMm, direction, draftAngleDeg, draftDirection, planeId, facePlane, profilePts: profPts, operation: 'extrude',
+            }), features)
+            followResult = follow
+            const depOps = follow.feats.filter(f => f.solidId === solidId && (f.operation === 'cutout' || f.type === 'fillet' || f.type === 'shell'))
             for (const opFeat of depOps) {
               // Same rule as rebuildSolidChain: a step that can't be replayed
               // after this edit (a fillet whose edges moved, …) is skipped and
@@ -11294,7 +11456,11 @@ const App3D = forwardRef(function App3D(props, ref) {
         }
 
         if (reuse) {
-          setFeatures(prev => prev.map(f => f.id === editingId ? newFeats[0] : f))
+          const changed = followResult?.changed || new Map()
+          setFeatures(prev => prev.map(f => f.id === editingId ? newFeats[0] : (changed.get(f.id) || f)))
+          if (followResult?.movedBodies.length) {
+            await rebuildMovedBodies(followResult.movedBodies, followResult.feats.map(f => f.id === editingId ? newFeats[0] : f))
+          }
         } else if (editingId) {
           const oldIds = editingFeat.groupId
             ? features.filter(f => f.groupId === editingFeat.groupId).map(f => f.id)

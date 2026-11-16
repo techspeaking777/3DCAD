@@ -116,12 +116,20 @@ function serializeFacePlane(fp) {
     uAxis:  vec3ToArr(fp.uAxis),
     vAxis:  vec3ToArr(fp.vAxis),
     ...(fp.free ? { free: true } : {}),
+    // Which body's face it was drawn on, where it was clicked, and the face's
+    // centre — so the sketch can follow that face when the body is edited
+    // (App3D followBodyEdit). Files saved before 2026-11-16 don't have them.
+    ...(fp.solidId != null ? { solidId: fp.solidId } : {}),
+    ...(fp.point ? { point: vec3ToArr(fp.point) } : {}),
+    ...(fp.viewCenter && !fp.viewCenter.equals?.(fp.origin) ? { viewCenter: vec3ToArr(fp.viewCenter) } : {}),
   }
 }
 function deserializeFacePlane(obj) {
   if (!obj) return null
-  const fp = new FacePlane(arrToVec3(obj.origin), arrToVec3(obj.normal), arrToVec3(obj.uAxis), arrToVec3(obj.vAxis))
+  const fp = new FacePlane(arrToVec3(obj.origin), arrToVec3(obj.normal), arrToVec3(obj.uAxis), arrToVec3(obj.vAxis), arrToVec3(obj.viewCenter))
   if (obj.free) fp.free = true
+  if (obj.solidId != null) fp.solidId = obj.solidId
+  if (obj.point) fp.point = arrToVec3(obj.point)
   return fp
 }
 

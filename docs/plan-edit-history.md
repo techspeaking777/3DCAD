@@ -6,7 +6,12 @@
 - the "couldn't update" message and busy banner are in
 - one-step undo already worked
 
-The downstream rebuild beyond a body's own steps and mirrors (face sketches, patterns, joins) arrives with Sessions 2 and 3. Session 2 is next.
+**Session 2 is done (2026-11-16):**
+- after a body's own sketch, depth, angle or loft changes, its fillets, shells, and the cutouts and sketches drawn on its faces find their place on the new shape
+- other bodies sketched on its faces move with the face, together with everything on them
+- the Extrude depth gear and Revolve/Loft edits no longer drop the body's cuts and fillets
+
+Not covered yet: bodies inside a Join (Session 3), a cut sketched on another body's face, and sketches on faces made by a cut. Session 3 is next.
 
 **Why:** students often want to change something they made earlier, like a base size, a sketch line, or a hole position. Today the teacher often goes in and does it for them. The goal is the parametric "change 50 to 60 and the whole model updates" moment from Fusion and Onshape, without Fusion's complexity.
 

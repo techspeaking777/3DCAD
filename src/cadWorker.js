@@ -1,6 +1,6 @@
 import opencascade from 'replicad-opencascadejs/src/replicad_single.js'
 import opencascadeWasm from 'replicad-opencascadejs/src/replicad_single.wasm?url'
-import { setOC, EdgeFinder, ProjectionCamera, Sketcher, CompoundSketch, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, Vector, importSTEP, deserializeShape, makeBSplineApproximation, assembleWire, genericSweep } from 'replicad'
+import { setOC, EdgeFinder, ProjectionCamera, Sketcher, CompoundSketch, Plane, makePlane, sketchCircle, sketchHelix, getOC, cast, localGC, FaceFinder, Vector, importSTEP, deserializeShape, makeBSplineApproximation, assembleWire, genericSweep, DistanceQuery, makeVertex } from 'replicad'
 import { projectedProfilePlane, dedupePoints3d } from './tools/sweepProject.js'
 import { springFrame } from './tools/springMath.js'
 
@@ -715,6 +715,201 @@ function softenFindEdge(table, { edgeId, point }, tol = SOFTEN_PICK_TOL) {
   return best
 }
 
+// ── Follow the face (docs/plan-edit-history.md, Session 2) ──────────────────
+// When a body's own recipe changes (new sketch, depth, angle…), whatever is
+// stored ON it by position — fillet edge points, shell face points, sketches
+// drawn on its faces — is found again on the new shape. The body's OLD and NEW
+// base shapes (no cuts or fillets) are compared: each old face a point sits on
+// is matched to the new face that faces the same way, and the point moves by
+// however much that face moved. A fillet point then lands on the new edge
+// where its two matched faces meet. Points that sit on nothing that moved come
+// back `same`, so an edit that doesn't touch them replays exactly as before.
+const RELOC_ON_FACE = 0.05
+
+function relocFaceInfo(face) {
+  const s = face.surface
+  try {
+    const type = s.surfaceType
+    if (type === 'PLANE') {
+      const n = face.normalAt()
+      return { type, n, o: n.dot(face.pointOnSurface(0.5, 0.5)) }
+    }
+    if (type === 'CYLINDRE') {
+      const cyl = s.wrapped.Cylinder(), ax = cyl.Axis(), d = ax.Direction(), l = ax.Location()
+      return { type, a: new Vector([d.X(), d.Y(), d.Z()]).normalize(), c: new Vector([l.X(), l.Y(), l.Z()]), r: cyl.Radius() }
+    }
+    return { type }
+  } finally { s.delete() }
+}
+
+function relocContext(shape) {
+  return { shape, faces: shape.faces.map(face => ({ face, info: relocFaceInfo(face) })), table: null }
+}
+
+function relocDist(p, face) {
+  const q = new DistanceQuery(makeVertex(p))
+  try { return q.distanceTo(face) } finally { q.delete() }
+}
+
+// The new face matching old face `oi` that point p (on the old face) sits on,
+// with how far it moved: {face, constraint: {n, delta} | null}. null = gone.
+function relocMatchFace(oi, p, newCtx) {
+  const pv = new Vector(p)
+  let best = null
+  for (const cand of newCtx.faces) {
+    const ni = cand.info
+    if (ni.type !== oi.type) continue
+    let q = pv, constraint = null
+    if (oi.type === 'PLANE') {
+      if (ni.n.dot(oi.n) < 0.9999) continue
+      const delta = ni.o - oi.o
+      q = pv.add(oi.n.multiply(delta))
+      constraint = { n: oi.n, delta }
+    } else if (oi.type === 'CYLINDRE') {
+      if (Math.abs(ni.a.dot(oi.a)) < 0.9999) continue
+      const rel = pv.sub(oi.c)
+      const radial = rel.sub(oi.a.multiply(rel.dot(oi.a)))
+      if (radial.Length < 1e-9) continue
+      const u = radial.normalize()
+      const reln = pv.sub(ni.c)
+      const target = ni.c.add(ni.a.multiply(reln.dot(ni.a))).add(u.multiply(ni.r))
+      const delta = u.dot(target.sub(pv))
+      q = pv.add(u.multiply(delta))
+      constraint = { n: u, delta }
+    }
+    const dist = relocDist([q.x, q.y, q.z], cand.face)
+    const score = dist + (constraint ? Math.abs(constraint.delta) * 1e-3 : 0)
+    if (!best || score < best.score) best = { face: cand.face, score, constraint }
+  }
+  return best
+}
+
+// Smallest move d with n_i·d = delta_i for every constraint (one per face the
+// point sits on; parallel duplicates dropped).
+function relocSolve(constraints) {
+  const cs = []
+  for (const c of constraints) {
+    if (!c) continue
+    if (cs.some(k => Math.abs(k.n.dot(c.n)) > 0.9999)) continue
+    cs.push(c)
+  }
+  const tryN = list => {
+    const k = list.length
+    if (k === 0) return [0, 0, 0]
+    const G = list.map(a => list.map(b => a.n.dot(b.n)))
+    const r = list.map(c => c.delta)
+    let lam
+    if (k === 1) lam = [r[0] / G[0][0]]
+    else if (k === 2) {
+      const det = G[0][0] * G[1][1] - G[0][1] * G[1][0]
+      if (Math.abs(det) < 1e-9) return null
+      lam = [(r[0] * G[1][1] - G[0][1] * r[1]) / det, (G[0][0] * r[1] - G[1][0] * r[0]) / det]
+    } else {
+      const det3 = m => m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+      const D = det3(G)
+      if (Math.abs(D) < 1e-9) return null
+      lam = [0, 1, 2].map(i => det3(G.map((row, ri) => row.map((v, ci) => ci === i ? r[ri] : v))) / D)
+    }
+    const d = [0, 0, 0]
+    list.forEach((c, i) => { d[0] += lam[i] * c.n.x; d[1] += lam[i] * c.n.y; d[2] += lam[i] * c.n.z })
+    return d
+  }
+  for (let k = Math.min(cs.length, 3); k >= 0; k--) {
+    const d = tryN(cs.slice(0, k))
+    if (d) return d
+  }
+  return [0, 0, 0]
+}
+
+// The old faces point p sits on (nearest first, at most `max`).
+function relocFacesAt(ctx, p, tol, max) {
+  return ctx.faces.map(f => ({ ...f, dist: relocDist(p, f.face) }))
+    .filter(f => f.dist <= tol).sort((a, b) => a.dist - b.dist).slice(0, max)
+}
+
+// A point on `edge` near `target`, kept away from the ends (a point at a
+// corner would also pick the neighbouring edges — EDGE_PICK_TOL).
+function relocPointOnEdge(edge, target) {
+  const N = 64
+  let bestT = 0.5, bestD = Infinity
+  for (let i = 0; i <= N; i++) {
+    const q = edge.pointAt(i / N)
+    const d = Math.hypot(q.x - target[0], q.y - target[1], q.z - target[2])
+    if (d < bestD) { bestD = d; bestT = i / N }
+  }
+  const len = edge.length
+  const margin = len > 0 ? Math.min(0.5, (EDGE_PICK_TOL * 2) / len) : 0.5
+  const t = Math.max(margin, Math.min(1 - margin, bestT))
+  const q = edge.pointAt(t)
+  return [q.x, q.y, q.z]
+}
+
+const RELOC_TINY = 1e-6
+const relocIsZero = d => Math.hypot(d[0], d[1], d[2]) < RELOC_TINY
+const relocAdd = (p, d) => [p[0] + d[0], p[1] + d[1], p[2] + d[2]]
+
+// One query → {same:true} | {point:[x,y,z], d} | {lost:true} | {none:true}.
+//  edge  {p}: a fillet's edge point
+//  face  {p}: a shell's face point
+//  plane {origin, normal, p?, strict}: a sketch drawn on a face — only the
+//        move along the normal is returned (the sketch keeps its own place on
+//        the face). `strict` (old files that don't record which body the face
+//        belonged to): only counts when p really sits on this body's face.
+function relocQuery(oldCtx, newCtx, q) {
+  if (q.kind === 'plane') {
+    const n = new Vector(q.normal).normalize()
+    const o = n.dot(new Vector(q.origin))
+    const p = q.p || q.origin
+    let bestF = null, bestD = Infinity
+    for (const f of oldCtx.faces) {
+      if (f.info.type !== 'PLANE' || f.info.n.dot(n) < 0.9999 || Math.abs(f.info.o - o) > 0.01) continue
+      const d = relocDist(p, f.face)
+      if (d < bestD) { bestD = d; bestF = f }
+    }
+    if (!bestF || (q.strict && bestD > 1)) return { none: true }
+    // Match from the point on the face nearest p, so the containment test works.
+    const onFace = [p[0] - n.x * (n.dot(new Vector(p)) - o), p[1] - n.y * (n.dot(new Vector(p)) - o), p[2] - n.z * (n.dot(new Vector(p)) - o)]
+    const m = relocMatchFace(bestF.info, onFace, newCtx)
+    if (!m || !m.constraint) return { lost: true }
+    const delta = m.constraint.delta
+    if (Math.abs(delta) < RELOC_TINY) return { same: true }
+    return { d: [n.x * delta, n.y * delta, n.z * delta] }
+  }
+  const p = q.p
+  if (q.kind === 'edge') {
+    if (!oldCtx.table) oldCtx.table = softenEdgeTable(oldCtx.shape)
+    const rec = softenFindEdge(oldCtx.table, { point: p }, EDGE_PICK_TOL)
+    if (rec && rec.faces.length === 2 && !rec.faces[0].isSame(rec.faces[1])) {
+      const infos = rec.faces.map(face => oldCtx.faces.find(f => f.face.isSame(face))?.info || relocFaceInfo(face))
+      const onEdge = relocPointOnEdge(rec.edge, p)
+      const m = infos.map(info => relocMatchFace(info, onEdge, newCtx))
+      if (m.some(x => !x)) return { lost: true }
+      const d = relocSolve(m.map(x => x.constraint))
+      if (relocIsZero(d)) return { same: true }
+      const target = relocAdd(onEdge, d)
+      if (!newCtx.table) newCtx.table = softenEdgeTable(newCtx.shape)
+      let best = null, bestD = Infinity
+      for (const r of newCtx.table.values()) {
+        if (r.faces.length !== 2) continue
+        if (!(r.faces.some(f => f.isSame(m[0].face)) && r.faces.some(f => f.isSame(m[1].face)))) continue
+        const dd = softenDistToEdge(r.edge, target)
+        if (dd < bestD) { bestD = dd; best = r }
+      }
+      if (!best) return { lost: true }
+      return { point: relocPointOnEdge(best.edge, target), d }
+    }
+    // Not on an edge of the base shape (e.g. the rim of a cut): move it with
+    // the base faces it sits on.
+  }
+  const faces = relocFacesAt(oldCtx, p, q.kind === 'edge' ? EDGE_PICK_TOL : RELOC_ON_FACE + 0.5, q.kind === 'edge' ? 3 : 1)
+  if (!faces.length) return { none: true }
+  const m = faces.map(f => relocMatchFace(f.info, p, newCtx))
+  if (m.some(x => !x)) return { lost: true }
+  const d = relocSolve(m.map(x => x.constraint))
+  if (relocIsZero(d)) return { same: true }
+  return { point: relocAdd(p, d), d }
+}
+
 // One candidate for an edge that two clearly-different faces share (not a seam,
 // not an edge between two faces that already flow into each other); null otherwise.
 function softenCandidate(rec) {
@@ -1382,6 +1577,26 @@ self.onmessage = async function(e) {
       for (const s of shapeStore.values()) { try { s.delete() } catch { /* already freed */ } }
       shapeStore.clear()
       self.postMessage({ type:'result', id, cleared: true })
+      return
+    }
+    // Follow the face (Session 2): re-find stored points after a body's own
+    // recipe changed. Both base shapes are built just for this and freed.
+    if (type==='relocatePoints') {
+      const oldBase = await buildBase(params.oldBase)
+      const newBase = await buildBase(params.newBase)
+      try {
+        const oldCtx = relocContext(oldBase), newCtx = relocContext(newBase)
+        const relocated = params.queries.map(q => {
+          try { return relocQuery(oldCtx, newCtx, q) }
+          catch (err) { console.warn('[cadWorker] relocate failed', q, err); return { lost: true } }
+        })
+        const moved = relocated.filter(r => r.point || r.d).length, lost = relocated.filter(r => r.lost).length
+        if (moved || lost) diag('points followed their faces', `${moved} moved, ${lost} lost`)
+        self.postMessage({ type:'result', id, relocated })
+      } finally {
+        try { oldBase.delete() } catch { /* freed */ }
+        try { newBase.delete() } catch { /* freed */ }
+      }
       return
     }
     if (type==='shapeHealth') {

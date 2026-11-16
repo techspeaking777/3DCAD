@@ -30,7 +30,7 @@ class CadEngine {
       )
 
       this._worker.onmessage = (e) => {
-        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, soften, softenEdges, filletEdges, filletMax, snapshots, restored, health, diagnostics, cleared, message } = e.data
+        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, soften, softenEdges, filletEdges, filletMax, snapshots, restored, health, diagnostics, cleared, relocated, message } = e.data
         const { chain, filletPartial } = e.data
 
         if (type === 'ready') {
@@ -70,6 +70,7 @@ class CadEngine {
             health ? { health } :
             diagnostics ? { diagnostics } :
             cleared ? { cleared } :
+            relocated ? { relocated } :
             { faces, edges, ...(soften ? { soften } : {}), ...(filletPartial ? { filletPartial } : {}) }
           )
         } else if (type === 'error') {
@@ -135,6 +136,10 @@ class CadEngine {
   /** Replay harness: the worker's fallback log since the last call — resolves {diagnostics:[{kind, detail}]}. */
   async takeDiagnostics() {
     return this._send('takeDiagnostics', {})
+  }
+  /** Follow the face (edit history, Session 2): re-find stored points after a body's own recipe changed. params: {oldBase, newBase (worker base params), queries:[{kind:'edge'|'face', p} | {kind:'plane', origin, normal, p?, strict?}]} (mm). Resolves {relocated:[{same} | {point, d} | {d} | {lost} | {none}]}. Nothing stored is changed. */
+  async relocatePoints(params) {
+    return this._send('relocatePoints', params)
   }
   /** Replay harness: frees every stored shape (a clean slate between projects). */
   async clearShapes() {

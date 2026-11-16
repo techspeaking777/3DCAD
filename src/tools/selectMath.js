@@ -320,3 +320,136 @@ export function carrySelectionJoins(before, after, selection) {
   }
   return { ...after, lines: out.lines, splines: out.splines }
 }
+
+// ── Follow the corner (docs/plan-edit-history.md, Session 4) ────────────────
+// Changing one line's length/angle in the Select panel moves the rest of the
+// shape the way a student expects — a rectangle stays a rectangle:
+//   - one end of the edited line stays put (defaultFixedEnd, or the anchor dot)
+//   - at each corner the moved end reaches: a line the move runs ALONG just
+//     stretches; a horizontal/vertical line the move would tilt SLIDES sideways
+//     (staying straight) and passes the sideways part on to its far corner; a
+//     sloped line stretches and tilts (as before)
+//   - an arc (rounded corner) slides with the move and passes it on, so a
+//     rounded rectangle stays rounded; a spline moves only its joined end
+//   - if the move would reach the fixed end, nothing changes ({refused})
+// H/V comes from the geometry: an exactly horizontal or vertical line (lines
+// drawn with the H/V snap are exact, and so are old ones). Dragging a line
+// off-axis therefore drops it.
+export const HV_TOL = 1e-3   // sketch px
+
+export function lineHV(l) {
+  const dx = l.x2 - l.x1, dy = l.y2 - l.y1
+  if (Math.hypot(dx, dy) < 1e-9) return null
+  if (Math.abs(dy) <= HV_TOL) return 'H'
+  if (Math.abs(dx) <= HV_TOL) return 'V'
+  return null
+}
+
+// The end (1 or 2) that stays put by default: the one nearest the sketch
+// origin, so the shape grows away from it (like Fusion); a tie keeps the left
+// end, or the bottom end of a vertical line (y is down, so the larger y).
+export function defaultFixedEnd(l) {
+  const d1 = Math.hypot(l.x1, l.y1), d2 = Math.hypot(l.x2, l.y2)
+  if (Math.abs(d1 - d2) > 1e-6) return d1 < d2 ? 1 : 2
+  if (Math.abs(l.x1 - l.x2) > 1e-6) return l.x1 < l.x2 ? 1 : 2
+  return l.y1 >= l.y2 ? 1 : 2
+}
+
+export const FOLLOW_REFUSED_MSG = 'That would move the fixed corner — choose the other end to stay put (the anchor dots).'
+
+// Line `idx` gets length newLen (px) and direction angleRad (x1→x2, sketch
+// coords), end `fixedEnd` staying put. Returns {lines, arcs, splines} (new
+// arrays) or {refused: true}.
+export function resizeLineFollowingCorners(lines, arcs, splines, idx, fixedEnd, newLen, angleRad) {
+  const l = lines[idx]
+  const nx = Math.cos(angleRad), ny = Math.sin(angleRad)
+  const F = fixedEnd === 1 ? { x: l.x1, y: l.y1 } : { x: l.x2, y: l.y2 }
+  const M = fixedEnd === 1 ? { x: l.x2, y: l.y2 } : { x: l.x1, y: l.y1 }
+  const Mn = fixedEnd === 1 ? { x: F.x + nx * newLen, y: F.y + ny * newLen } : { x: F.x - nx * newLen, y: F.y - ny * newLen }
+  const outL = lines.map(x => ({ ...x }))
+  const outA = arcs.map(a => ({ ...a }))
+  const outS = splines.map(s => (Array.isArray(s.points) ? { ...s, points: s.points.map(p => ({ ...p })) } : s))
+  if (fixedEnd === 1) { outL[idx].x2 = Mn.x; outL[idx].y2 = Mn.y } else { outL[idx].x1 = Mn.x; outL[idx].y1 = Mn.y }
+  const near = (a, b) => Math.hypot(a.x - b.x, a.y - b.y) <= CORNER_JOIN_TOL
+  const doneLines = new Set([idx]), doneArcs = new Set(), doneSplineEnds = new Set()
+  const queue = [{ p: M, d: { x: Mn.x - M.x, y: Mn.y - M.y } }]
+  let steps = 0
+  while (queue.length) {
+    const { p, d } = queue.shift()
+    if (++steps > 1000) return { refused: true }
+    if (Math.hypot(d.x, d.y) < 1e-9) continue
+    if (near(F, p)) return { refused: true }
+    lines.forEach((L, i) => {
+      if (doneLines.has(i) || L.ghostRef) return
+      const e = near({ x: L.x1, y: L.y1 }, p) ? 1 : near({ x: L.x2, y: L.y2 }, p) ? 2 : 0
+      if (!e) return
+      doneLines.add(i)
+      const far = e === 1 ? { x: L.x2, y: L.y2 } : { x: L.x1, y: L.y1 }
+      const len = Math.hypot(far.x - p.x, far.y - p.y)
+      const move = (end, v) => { if (end === 1) { outL[i].x1 += v.x; outL[i].y1 += v.y } else { outL[i].x2 += v.x; outL[i].y2 += v.y } }
+      if (len < 1e-9) { move(1, d); move(2, d); return }
+      const u = { x: (far.x - p.x) / len, y: (far.y - p.y) / len }
+      const along = d.x * u.x + d.y * u.y
+      const perp = { x: d.x - along * u.x, y: d.y - along * u.y }
+      // Stretch: the move runs along this line, or it is sloped (it tilts).
+      if (Math.hypot(perp.x, perp.y) < 1e-6 || !lineHV(L)) { move(e, d); return }
+      // Slide: stays horizontal/vertical; the sideways part goes on.
+      move(e, d); move(3 - e, perp)
+      queue.push({ p: far, d: perp })
+    })
+    arcs.forEach((A, i) => {
+      if (doneArcs.has(i) || A.ghostRef) return
+      const s = { x: A.cx + Math.cos(A.startAngle) * A.r, y: A.cy + Math.sin(A.startAngle) * A.r }
+      const en = { x: A.cx + Math.cos(A.endAngle) * A.r, y: A.cy + Math.sin(A.endAngle) * A.r }
+      const atS = near(s, p), atE = near(en, p)
+      if (!atS && !atE) return
+      doneArcs.add(i)
+      outA[i].cx += d.x; outA[i].cy += d.y
+      queue.push({ p: atS ? en : s, d })
+    })
+    splines.forEach((sp, i) => {
+      if (!isOpenEditable(sp)) return
+      const last = sp.points.length - 1
+      for (const k of [0, last]) {
+        const key = i + ':' + k
+        if (doneSplineEnds.has(key) || !near(sp.points[k], p)) continue
+        doneSplineEnds.add(key)
+        outS[i].points[k].x += d.x; outS[i].points[k].y += d.y
+      }
+    })
+  }
+  return { lines: outL, arcs: outA, splines: outS }
+}
+
+// Every line joined (end to end, through lines and arcs) to line `idx` — the
+// shape it belongs to. Used to show the H/V marks on that shape.
+export function connectedLineIdxs(lines, arcs, idx) {
+  const near = (a, b) => Math.hypot(a.x - b.x, a.y - b.y) <= CORNER_JOIN_TOL
+  const ends = l => [{ x: l.x1, y: l.y1 }, { x: l.x2, y: l.y2 }]
+  const arcEnds = a => [{ x: a.cx + Math.cos(a.startAngle) * a.r, y: a.cy + Math.sin(a.startAngle) * a.r },
+    { x: a.cx + Math.cos(a.endAngle) * a.r, y: a.cy + Math.sin(a.endAngle) * a.r }]
+  const seenL = new Set([idx]), seenA = new Set()
+  const pts = [...ends(lines[idx])]
+  while (pts.length) {
+    const p = pts.pop()
+    lines.forEach((L, i) => { if (!seenL.has(i) && !L.ghostRef && ends(L).some(q => near(q, p))) { seenL.add(i); pts.push(...ends(L)) } })
+    arcs.forEach((A, i) => { if (!seenA.has(i) && !A.ghostRef && arcEnds(A).some(q => near(q, p))) { seenA.add(i); pts.push(...arcEnds(A)) } })
+  }
+  return [...seenL]
+}
+
+// Which end of line l stays put for the Select panel's anchor dot `anchorId`
+// ('mc' = automatic: defaultFixedEnd), given the selection's handles.
+export function fixedEndForAnchor(l, anchorId, handles) {
+  const a = anchorId !== 'mc' && handles ? handles[anchorId] : null
+  if (!a) return defaultFixedEnd(l)
+  return Math.hypot(l.x1 - a.x, l.y1 - a.y) <= Math.hypot(l.x2 - a.x, l.y2 - a.y) ? 1 : 2
+}
+
+// The H/V marks and the pin for drawFollowCornerMarks.
+export function followCornerMarks(lines, arcs, idx, anchorId, handles) {
+  const l = lines[idx]
+  const fe = fixedEndForAnchor(l, anchorId, handles)
+  const hvLines = connectedLineIdxs(lines, arcs, idx).map(i => ({ ...lines[i], hv: lineHV(lines[i]) })).filter(x => x.hv)
+  return { hvLines, pin: fe === 1 ? { x: l.x1, y: l.y1 } : { x: l.x2, y: l.y2 } }
+}

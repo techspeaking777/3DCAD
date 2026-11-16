@@ -17,9 +17,9 @@ import { nearestFilletEntity, computeFilletOp } from './tools/filletMath.js'
 import { computeExtendPreview } from './tools/extendMath.js'
 import { fitSplineToPoints } from './tools/splineFit.js'
 import { sampleSpline, nearestSpline, computeSplineTrimPreview, performSplineTrim, distToSpline } from './tools/splineMath.js'
-import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform, findCorner, moveCorner, carryJoinedEnds, carrySelectionJoins } from './tools/selectMath.js'
+import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandleTransform, applySelectionTransform, findCorner, moveCorner, carrySelectionJoins, resizeLineFollowingCorners, fixedEndForAnchor, followCornerMarks, FOLLOW_REFUSED_MSG } from './tools/selectMath.js'
 import { isEditableSpline, hitSplineNode, moveSplineNode, insertSplineNode, deleteSplineNode } from './tools/splineEdit.js'
-import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine, perpLabelOffset } from './draw/drawHelpers.js'
+import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine, perpLabelOffset, drawFollowCornerMarks } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
 import { loadJSON, exportDXF, parseDXF, centreDxfResult, saveProjectAs, canPickSaveLocation, exportFaceDXF as writeFaceDXF, saveBlobAs, saveProjectFileAs, loadProjectFile, serializeProject, parseProjectData } from './tools/saveLoad.js'
 import { getAuthState, fetchMyClasses, saveNewCloudProject, updateCloudProject, loadCloudProject, saveFeedbackCopy, updateFeedbackCopy } from './tools/cloudSave.js'
@@ -3180,34 +3180,21 @@ const App3D = forwardRef(function App3D(props, ref) {
           newLen=mmToPx(parseFloat(finalPending.length))
         if (finalPending.angle&&parseFloat(finalPending.angle)>=0)
           newAngleRad=(360-parseFloat(finalPending.angle))*Math.PI/180
-        const nx=Math.cos(newAngleRad),ny=Math.sin(newAngleRad)
-        // Determine fixed point from anchor handle
+        // Follow the corner (docs/plan-edit-history.md, Session 4): one end stays
+        // put (the end nearest the origin, or the anchor dot's end); the rest of
+        // the shape follows corner by corner, so a rectangle stays a rectangle
+        // (it used to keep the middle fixed and tip the sides into a trapezoid).
         const bbox2=selectionBBox(selection,lines,circles,arcs,splines)
         const handles2=bbox2?getBBoxHandles(bbox2):null
-        const anchorPt=handles2?handles2[selectDimAnchor]||handles2['mc']:null
-        let nl
-        if (!anchorPt||selectDimAnchor==='mc'){
-          // Anchor = midpoint
-          const mx=(l.x1+l.x2)/2,my=(l.y1+l.y2)/2
-          nl={...l,x1:mx-nx*newLen/2,y1:my-ny*newLen/2,x2:mx+nx*newLen/2,y2:my+ny*newLen/2}
-        } else {
-          // Find which endpoint is closest to anchor handle — that end stays fixed
-          const d1=Math.hypot(l.x1-anchorPt.x,l.y1-anchorPt.y)
-          const d2=Math.hypot(l.x2-anchorPt.x,l.y2-anchorPt.y)
-          nl=d1<=d2
-            ? {...l,x2:l.x1+nx*newLen,y2:l.y1+ny*newLen}    // x1,y1 stays fixed — x2,y2 moves
-            : {...l,x1:l.x2-nx*newLen,y1:l.y2-ny*newLen}    // x2,y2 stays fixed — x1,y1 moves
+        const fixedEnd=fixedEndForAnchor(l,selectDimAnchor,handles2)
+        const res=resizeLineFollowingCorners(lines,arcs,splines,ent.idx,fixedEnd,newLen,newAngleRad)
+        if (res.refused){
+          setCadError(FOLLOW_REFUSED_MSG); setTimeout(() => setCadError(null), 6000)
+          return
         }
-        // Lines/splines joined to a moved end come with it, so a closed
-        // outline stays closed (before, only this line moved and the shape
-        // opened up — "No closed profile found").
-        const moved=lines.map((ln,i)=>i===ent.idx?nl:ln)
-        const carried=carryJoinedEnds(moved,splines,[
-          {from:{x:l.x1,y:l.y1},to:{x:nl.x1,y:nl.y1}},
-          {from:{x:l.x2,y:l.y2},to:{x:nl.x2,y:nl.y2}},
-        ],ent.idx)
-        setLines(carried.lines)
-        if (carried.splines!==splines) setSplines(carried.splines)
+        setLines(res.lines)
+        if (res.arcs.some((a,i)=>a.cx!==arcs[i].cx||a.cy!==arcs[i].cy)) setArcs(res.arcs)
+        if (res.splines.some((sp,i)=>sp!==splines[i]&&sp.points?.some((q,k)=>q.x!==splines[i].points[k].x||q.y!==splines[i].points[k].y))) setSplines(res.splines)
       } else if (ent.kind==='circle'&&finalPending.radius&&parseFloat(finalPending.radius)>0){
         const c=circles[ent.idx]
         const newR=mmToPx(parseFloat(finalPending.radius))
@@ -4595,6 +4582,9 @@ const App3D = forwardRef(function App3D(props, ref) {
                 if(isAnc){ctx.strokeStyle='#fff';ctx.lineWidth=1.5/sc;ctx.stroke()}
               }))
               ctx.restore()
+              // The end that stays put + H/V marks on this line's shape (Session 4).
+              const fm=followCornerMarks(curLines,curArcs,e0.idx,selectDimAnchor,getBBoxHandles(bbox))
+              drawFollowCornerMarks(ctx,fm.hvLines,fm.pin,sc)
             }
           } else if (e0.kind==='circle'){
             const c=curCircles[e0.idx];if(c){

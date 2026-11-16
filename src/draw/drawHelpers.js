@@ -115,3 +115,30 @@ export function drawPreviewLine(ctx, x1, y1, x2, y2, color='#2196F3', alpha=1, v
   ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke()
   ctx.setLineDash([]);ctx.restore()
 }
+
+// Follow the corner (edit history Session 4) — with one line selected in the
+// Select tool: a yellow pin on the end that stays put when its length/angle is
+// typed, and a small H or V beside every straight (horizontal / vertical) line
+// of the shape it belongs to — those stay straight when the shape is resized.
+// `hvLines` = [{x1,y1,x2,y2,hv:'H'|'V'}], `pin` = {x,y}.
+export function drawFollowCornerMarks(ctx, hvLines, pin, viewScale=1) {
+  ctx.save()
+  for (const l of hvLines) {
+    const mx = (l.x1 + l.x2) / 2, my = (l.y1 + l.y2) / 2
+    const len = Math.hypot(l.x2 - l.x1, l.y2 - l.y1) || 1
+    // A little off the line, on its left-hand side (screen px).
+    const ox = -(l.y2 - l.y1) / len * 10 / viewScale, oy = (l.x2 - l.x1) / len * 10 / viewScale
+    ctx.save(); ctx.translate(mx + ox, my + oy); ctx.scale(1/viewScale, 1/viewScale)
+    ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+    ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(-6, -7, 12, 14)
+    ctx.fillStyle = '#80CBC4'; ctx.fillText(l.hv, 0, 0)
+    ctx.restore()
+  }
+  if (pin) {
+    ctx.save(); ctx.translate(pin.x, pin.y); ctx.scale(1/viewScale, 1/viewScale)
+    ctx.beginPath(); ctx.arc(0, 0, 5.5, 0, Math.PI * 2)
+    ctx.fillStyle = '#FFD600'; ctx.fill(); ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5; ctx.stroke()
+    ctx.restore()
+  }
+  ctx.restore()
+}

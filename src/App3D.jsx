@@ -21,6 +21,8 @@ import { selectionBBox, entityBBox, getBBoxHandles, hitTestHandles, computeHandl
 import { isEditableSpline, hitSplineNode, moveSplineNode, insertSplineNode, deleteSplineNode } from './tools/splineEdit.js'
 import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine, perpLabelOffset, drawFollowCornerMarks } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
+import { rectCorners, rectLines, rectSize, threePointArc, arcMidPoint } from './tools/shapeMath.js'
+import { ShapeModeRow, RectPanel, ArcPanel, LINE_MODES, CIRCLE_MODES } from './tools/ShapeModePanels.jsx'
 import { loadJSON, exportDXF, parseDXF, centreDxfResult, saveProjectAs, canPickSaveLocation, exportFaceDXF as writeFaceDXF, saveBlobAs, saveProjectFileAs, loadProjectFile, serializeProject, parseProjectData } from './tools/saveLoad.js'
 import { getAuthState, fetchMyClasses, saveNewCloudProject, updateCloudProject, loadCloudProject, saveFeedbackCopy, updateFeedbackCopy } from './tools/cloudSave.js'
 import { detectProfiles, detectPath, buildSolid, openEnds } from './tools/extrudeMath.js'
@@ -50,7 +52,7 @@ import OffsetDistPanel from './tools/OffsetDistPanel.jsx'
 import SelectDimPanel from './tools/SelectDimPanel.jsx'
 import { useDraggablePanel, DragHandle } from './tools/useDraggablePanel.jsx'
 import {
-  IconLine, IconCircle, IconTrim, IconDelete, IconExtend, IconCorner, IconOffset,
+  IconLine, IconRect, IconRectCentre, IconArc3, IconCircle, IconTrim, IconDelete, IconExtend, IconCorner, IconOffset,
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace,
   IconUndo, IconRedo, IconFitView, IconReframe, IconNew, IconSave, IconLoad, IconCloudSave, IconCloudLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
   IconIncludeEdge,
@@ -2530,6 +2532,13 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [selectDimInput,setSelectDimInput]=useState('')      // value being typed in current field
   const [selectDimPending,setSelectDimPending]=useState({}) // {width:'',height:'',length:'',angle:'',radius:''}
   const [selectDimAnchor,setSelectDimAnchor]=useState('mc') // handle id that stays fixed
+  // Line / Circle tool modes (ShapeModePanels.jsx, tools/shapeMath.js):
+  // 'line' | 'rect' (corner to corner) | 'rectc' (centre to corner), and
+  // 'circle' | 'arc3' (3-point arc). shapePts = the points clicked so far.
+  const [lineMode,setLineMode]=useState('line')
+  const [circleMode,setCircleMode]=useState('circle')
+  const [shapePts,setShapePts]=useState([])
+  const [rectW,setRectW]=useState(''), [rectH,setRectH]=useState(''), [arcR,setArcR]=useState('')
 
   // Drag window select — tracks an active selection rectangle
   const [dragSelectRect,setDragSelectRect]=useState(null)
@@ -2706,7 +2715,45 @@ const App3D = forwardRef(function App3D(props, ref) {
   useEffect(()=>{snapCirclesRef.current=snapCircles},[snapCircles])
   useEffect(()=>{snapArcsRef.current=snapArcs},[snapArcs])
 
+  // Picking a sketch tool (toolbar button, or the R / A keys) — clears every tool's half-done state.
+  function pickSketchTool(t){setTool(t);resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim();resetIncludeEdge()}
+  // ── Rectangle / 3-point arc (Line / Circle tool modes) ──
+  const shapeModeOn=(tool==='line'&&lineMode!=='line')||(tool==='circle'&&circleMode==='arc3')
+  function shapeRectNow(a,b){
+    const wv=parseFloat(rectW),hv=parseFloat(rectH)
+    return rectCorners(a,b,lineMode,wv>0?mmToPx(wv):null,hv>0?mmToPx(hv):null)
+  }
+  function shapeArcNow(p1,p2,p3){
+    const rv=parseFloat(arcR)
+    return threePointArc(p1,p2,p3,lines,arcs,rv>0?mmToPx(rv):null)
+  }
+  function handleShapeClick(raw){
+    const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,null,false,splines,intersectionPts)
+    const pt=geo?{x:geo.x,y:geo.y}:raw
+    if (tool==='line'){
+      if (!shapePts.length){setShapePts([pt]);return}
+      const corners=shapeRectNow(shapePts[0],pt)
+      if (!corners) return
+      commit(snapshot())
+      const tag={...(drawStyle?{style:drawStyle}:{}),...planeTag()}
+      setLines(p=>[...p,...rectLines(corners).map(l=>({...l,...tag}))]);setRectW('');setRectH('')   // a typed size is for one shape
+      setShapePts([])
+    } else {
+      if (shapePts.length<2){
+        if (shapePts.length===1&&Math.hypot(pt.x-shapePts[0].x,pt.y-shapePts[0].y)<1e-6) return
+        setShapePts(p=>[...p,pt]);return
+      }
+      const res=shapeArcNow(shapePts[0],shapePts[1],pt)
+      if (!res) return
+      commit(snapshot())
+      setArcs(p=>[...p,{...res.arc,...(drawStyle?{style:drawStyle}:{}),...planeTag()}]);setArcR('')
+      setShapePts([])
+    }
+  }
+  function chooseLineMode(m){resetDrawState();setLineMode(m)}
+  function chooseCircleMode(m){resetDrawState();setCircleMode(m)}
   function resetDrawState(){
+    setShapePts([])
     setStartPoint(null);setCircleCenter(null)
     setCircleTanA(null);setCircleTanB(null)
     setDimInput('');setDimLocked(false);setAngleInput('');setAngleLocked(false);setFocusField('dim')
@@ -4720,6 +4767,40 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     if (!mousePos) return
 
+    // ── Rectangle / 3-point arc preview (Line / Circle tool modes) ──
+    if (shapeModeOn&&mousePos){
+      const P=shapePts
+      const ghost=path=>{
+        ctx.save();ctx.beginPath();path()
+        ctx.strokeStyle='#ffffff';ctx.lineWidth=4/sc;ctx.setLineDash([6/sc,3/sc]);ctx.stroke()
+        ctx.strokeStyle=sketchLineColor;ctx.lineWidth=1.5/sc;ctx.stroke();ctx.setLineDash([]);ctx.restore()
+      }
+      if (tool==='line'&&P.length===1){
+        const cs=shapeRectNow(P[0],mousePos)
+        if (cs){
+          ghost(()=>{ctx.moveTo(cs[0].x,cs[0].y);for(const q of cs.slice(1))ctx.lineTo(q.x,q.y);ctx.closePath()})
+          const sz=rectSize(cs),locked=parseFloat(rectW)>0||parseFloat(rectH)>0
+          drawLabel(ctx,(locked?'🔒 ':'')+pxToMm(sz.w).toFixed(1)+' × '+pxToMm(sz.h).toFixed(1)+' mm',(cs[0].x+cs[2].x)/2,Math.min(cs[0].y,cs[2].y)-14/sc,locked?'#FF9800':'#2196F3',sc)
+        }
+        if (lineMode==='rectc') drawLineIndicator(ctx,P[0].x,P[0].y,'center',sc)
+      } else if (tool==='circle'&&P.length===1){
+        ghost(()=>{ctx.moveTo(P[0].x,P[0].y);ctx.lineTo(mousePos.x,mousePos.y)})
+      } else if (tool==='circle'&&P.length===2){
+        const res=shapeArcNow(P[0],P[1],mousePos)
+        if (res){
+          const a=res.arc
+          ghost(()=>ctx.arc(a.cx,a.cy,a.r,a.startAngle,a.endAngle,false))
+          const m=arcMidPoint(a),locked=parseFloat(arcR)>0
+          drawLabel(ctx,(locked?'🔒 R ':'R ')+pxToMm(a.r).toFixed(1)+' mm'+(res.tangent?' · TANGENT':''),m.x,m.y-14/sc,res.tangent?'#4CAF50':locked?'#FF9800':'#2196F3',sc)
+        } else {
+          drawLabel(ctx,parseFloat(arcR)>0?'Radius too small for that gap':'Move off the line to bend it',mousePos.x,mousePos.y-20/sc,'#F44336',sc)
+        }
+      }
+      ctx.save();ctx.fillStyle='#FF9800'
+      for (const q of P){ctx.beginPath();ctx.arc(q.x,q.y,4/sc,0,Math.PI*2);ctx.fill()}
+      ctx.restore()
+    }
+
     // ── Line tool rubber-band ──
     if (tool==='line'&&startPoint){
       // PERP mode: completely bypass tangent/snap system — the preview must
@@ -4896,7 +4977,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (segs) for (const s of segs) drawPreviewLine(ctx,s.x1,s.y1,s.x2,s.y2,includeEdgeConstruction?'#90A4AE':'#FFEB3B',1,sc)
     }
 
-  },[lines,circles,arcs,splines,sketchCrossPt,sketchOpenPts,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,fMode,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction])
+  },[lines,circles,arcs,splines,sketchCrossPt,sketchOpenPts,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,fMode,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction,lineMode,circleMode,shapePts,rectW,rectH,arcR])
 
 
   // ── Phase 2 Step 3: plane tagging ────────────────────────────────────────
@@ -13031,6 +13112,12 @@ const App3D = forwardRef(function App3D(props, ref) {
       return
     }
 
+    // Rectangle / 3-point arc modes of the Line / Circle tools
+    if (shapeModeOn){
+      if (e.detail>1) return
+      handleShapeClick(raw)
+      return
+    }
     if (tool==='line'){
       if (e.detail > 1) return  // ignore 2nd click of a dblclick — handled by handleDoubleClick
       if (!startPoint&&!deferredTangent){
@@ -13430,6 +13517,13 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
     if ((e.key==='t'||e.key==='T')&&!e.ctrlKey&&!e.shiftKey&&(tool==='line'||tool==='circle')){setTKeyDown(p=>!p);return}
     if ((e.key==='p'||e.key==='P')&&!e.ctrlKey&&!e.shiftKey&&tool==='line'){setPKeyDown(p=>!p);return}
+    // R = Rectangle (again = centre rectangle), A = 3-point arc: the Line /
+    // Circle tool modes. Esc drops the points clicked so far.
+    if (sketchMode&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&tool!=='rotatecopy'&&tool!=='text'){
+      if (e.key==='r'||e.key==='R'){const m=tool==='line'&&lineMode==='rect'?'rectc':'rect';pickSketchTool('line');setLineMode(m);return}
+      if (e.key==='a'||e.key==='A'){pickSketchTool('circle');setCircleMode('arc3');return}
+    }
+    if (e.key==='Escape'&&shapeModeOn&&shapePts.length){setShapePts([]);return}
     if ((e.key==='d'||e.key==='D')&&!e.ctrlKey&&!e.shiftKey){
       if (tool==='select'&&selection.length>0){
         applySelectionStyle(getSelectionStyle(selection)==='construction'?null:'construction')
@@ -14259,8 +14353,9 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     const toolConfig=[
     ['select',     IconSelect,     'Select / Info',  '#64B5F6'],
-    ['line',       IconLine,       'Line',           '#2196F3'],
-    ['circle',     IconCircle,     'Circle',         '#2196F3'],
+    // The Line and Circle buttons show their current mode (Rectangle / 3-point arc).
+    ['line',       lineMode==='rect'?IconRect:lineMode==='rectc'?IconRectCentre:IconLine, lineMode==='line'?'Line (R: rectangle)':'Rectangle — a Line tool mode', '#2196F3'],
+    ['circle',     circleMode==='arc3'?IconArc3:IconCircle, circleMode==='arc3'?'3-point arc — a Circle tool mode':'Circle (A: 3-point arc)', '#2196F3'],
     ['spline',     IconSpline,     'Spline',         '#FF6F00'],
     ['fillet',     IconFillet,     'Fillet',         '#26A69A'],
     ['text',       IconText,       'Text',           '#FF9800'],
@@ -14289,6 +14384,13 @@ const App3D = forwardRef(function App3D(props, ref) {
 
   const btnBase={border:'none',borderRadius:5,cursor:'pointer',padding:4,display:'flex',alignItems:'center',justifyContent:'center',width:68,height:68,transition:'background 0.1s'}
   const zoomPct=Math.round(viewTransform.scale*100)
+
+  // Live size for the Rectangle / Arc panels' placeholder text
+  let shapeLive=null
+  if (shapeModeOn&&mousePos&&shapePts.length){
+    if (tool==='line'&&shapePts.length===1){const sz=rectSize(shapeRectNow(shapePts[0],mousePos));if(sz)shapeLive={w:pxToMm(sz.w),h:pxToMm(sz.h)}}
+    else if (tool==='circle'&&shapePts.length===2){const res=shapeArcNow(shapePts[0],shapePts[1],mousePos);if(res)shapeLive={r:pxToMm(res.arc.r),tangent:res.tangent}}
+  }
 
   // Live length/angle for the LineSnapPanel's placeholder text while mid-draw
   let lineLiveLenMm=null, lineLiveAngleDeg=null
@@ -14490,7 +14592,7 @@ const App3D = forwardRef(function App3D(props, ref) {
               <div key={t} style={{position:'relative'}}>
                 <button
                   ref={el => { toolBtnRefs.current[t] = el }}
-                  onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim();resetIncludeEdge()}}
+                  onClick={()=>pickSketchTool(t)}
                   title={title}
                   style={{...btnBase,background:tool===t?activeColor+'33':'transparent',
                     outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
@@ -14674,7 +14776,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                 textTransform:'uppercase',letterSpacing:'0.1em',marginRight:2}}>Edit</span>
               {editConfig.map(([t,Icon,title,activeColor])=>(
                 <button key={t}
-                  onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim();resetIncludeEdge()}}
+                  onClick={()=>pickSketchTool(t)}
                   title={title}
                   style={{...btnBase,background:tool===t?activeColor+'33':'transparent',
                     outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
@@ -14690,7 +14792,7 @@ const App3D = forwardRef(function App3D(props, ref) {
               {modifyConfig.map(([t,Icon,title,activeColor])=>(
                 <div key={t} style={{position:'relative'}}>
                   <button
-                    onClick={()=>{setTool(t);resetDrawState();resetOffset();resetMirror();resetCenter();resetMoveCopy();resetRotateCopy();resetResize();resetFillet();resetTrace();resetSpline();resetText();resetSelection();resetJoin();resetDim();resetIncludeEdge()}}
+                    onClick={()=>pickSketchTool(t)}
                     title={title}
                     style={{...btnBase,background:tool===t?activeColor+'33':'transparent',
                       outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
@@ -16866,8 +16968,17 @@ const App3D = forwardRef(function App3D(props, ref) {
 
       {flyoutAnchor && (
         <div style={{position:'fixed', top:flyoutAnchor.top, left:flyoutAnchor.right, zIndex:60}}>
-          {tool==='line' && (
+          {tool==='line' && lineMode!=='line' && (
+            <RectPanel
+              toolColor={toolConfig.find(([t])=>t==='line')[3]}
+              mode={lineMode} onMode={chooseLineMode} started={shapePts.length>0}
+              w={rectW} h={rectH} onW={setRectW} onH={setRectH}
+              liveW={shapeLive?.w ?? null} liveH={shapeLive?.h ?? null}
+            />
+          )}
+          {tool==='line' && lineMode==='line' && (
             <LineSnapPanel
+              modeRow={<ShapeModeRow modes={LINE_MODES} mode={lineMode} onMode={chooseLineMode} toolColor={toolConfig.find(([t])=>t==='line')[3]}/>}
               toolColor={toolConfig.find(([t])=>t==='line')[3]}
               tKeyDown={tKeyDown} pKeyDown={pKeyDown}
               onToggleT={()=>setTKeyDown(p=>!p)}
@@ -16923,8 +17034,16 @@ const App3D = forwardRef(function App3D(props, ref) {
               </div>
             )
           })()}
-          {tool==='circle' && (
+          {tool==='circle' && circleMode==='arc3' && (
+            <ArcPanel
+              toolColor={toolConfig.find(([t])=>t==='circle')[3]}
+              mode={circleMode} onMode={chooseCircleMode} step={shapePts.length}
+              r={arcR} onR={setArcR} liveR={shapeLive?.r ?? null} tangent={!!shapeLive?.tangent}
+            />
+          )}
+          {tool==='circle' && circleMode==='circle' && (
             <CircleSnapPanel
+              modeRow={<ShapeModeRow modes={CIRCLE_MODES} mode={circleMode} onMode={chooseCircleMode} toolColor={toolConfig.find(([t])=>t==='circle')[3]}/>}
               toolColor={toolConfig.find(([t])=>t==='circle')[3]}
               tKeyDown={tKeyDown}
               onToggleT={()=>setTKeyDown(p=>!p)}

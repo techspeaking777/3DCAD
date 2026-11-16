@@ -8,7 +8,7 @@ import { useDraggablePanel, DragHandle } from './useDraggablePanel.jsx'
 
 export default function CircleSnapPanel({
   toolColor, tKeyDown, onToggleT, circleTanA, circleTanB,
-  circleCenter, dimInput, dimLocked, onChangeDim, onApply, liveRadiusMm,
+  circleCenter, dimInput, dimLocked, onChangeDim, onApply, liveRadiusMm, modeRow = null,
 }){
   const { panelRef, panelStyle, handleProps } = useDraggablePanel()
   const dimRef = useRef(null)
@@ -53,6 +53,7 @@ export default function CircleSnapPanel({
         borderRight:`9px solid ${toolColor}`}}/>
 
       <DragHandle {...handleProps}>{label}</DragHandle>
+      {modeRow /* Line | Rect | Centre rect, or Circle | 3-pt arc — ShapeModePanels.jsx */}
 
       <div style={{display:'flex',justifyContent:'center'}}>
         <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:4}}>

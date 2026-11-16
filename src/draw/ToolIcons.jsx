@@ -66,6 +66,32 @@ export function IconCircle({ active }) {
   </>}</SketchIcon>
 }
 
+// Rectangle — the Line tool's corner-to-corner mode.
+export function IconRect({ active }) {
+  return <SketchIcon label="RECT" color={SK.draw} active={active}>{({ c }) => <>
+    <rect x="8" y="12" width="32" height="24" stroke={c} strokeWidth={SW}/>
+    <Pt x={8} y={36} c={c}/><Pt x={40} y={12} c={c}/>
+  </>}</SketchIcon>
+}
+
+// Rectangle — the Line tool's centre-to-corner mode.
+export function IconRectCentre({ active }) {
+  return <SketchIcon label="CTR RECT" color={SK.draw} active={active}>{({ c, g }) => <>
+    <rect x="8" y="12" width="32" height="24" stroke={c} strokeWidth={SW}/>
+    <line x1="24" y1="24" x2="40" y2="12" stroke={g} strokeWidth={SWG} strokeDasharray={DASH}/>
+    <path d="M20 24 H28 M24 20 V28" stroke={c} strokeWidth="1.5"/>
+    <Pt x={40} y={12} c={c}/>
+  </>}</SketchIcon>
+}
+
+// 3-point arc — the Circle tool's arc mode.
+export function IconArc3({ active }) {
+  return <SketchIcon label="ARC" color={SK.draw} active={active}>{({ c }) => <>
+    <path d="M8 36 A18 18 0 0 1 40 36" stroke={c} strokeWidth={SW}/>
+    <Pt x={8} y={36} c={c}/><Pt x={24} y={20.5} c={c}/><Pt x={40} y={36} c={c}/>
+  </>}</SketchIcon>
+}
+
 export function IconSpline({ active }) {
   return <SketchIcon label="SPLINE" color={SK.draw} active={active}>{({ c, g }) => <>
     <path d="M6 36 L16 12 L28 30 L42 10" stroke={g} strokeWidth="1" strokeDasharray="2 2"/>

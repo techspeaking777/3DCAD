@@ -14,7 +14,7 @@ import { useDraggablePanel, DragHandle } from './useDraggablePanel.jsx'
 export default function LineSnapPanel({
   toolColor, tKeyDown, pKeyDown, onToggleT, onToggleP,
   drawing, dimInput, angleInput, dimLocked, angleLocked,
-  onChangeDim, onChangeAngle, onApply, liveLenMm, liveAngleDeg,
+  onChangeDim, onChangeAngle, onApply, liveLenMm, liveAngleDeg, modeRow = null,
 }){
   const { panelRef, panelStyle, handleProps } = useDraggablePanel()
   const tRef = useRef(null)
@@ -78,6 +78,7 @@ export default function LineSnapPanel({
         borderRight:`9px solid ${toolColor}`}}/>
 
       <DragHandle {...handleProps}>{activeLabel}</DragHandle>
+      {modeRow /* Line | Rect | Centre rect, or Circle | 3-pt arc — ShapeModePanels.jsx */}
 
       <div style={{display:'flex',gap:10,justifyContent:'center'}}>
         <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:4}}>

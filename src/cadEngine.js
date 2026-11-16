@@ -30,7 +30,7 @@ class CadEngine {
       )
 
       this._worker.onmessage = (e) => {
-        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, soften, softenEdges, filletEdges, filletMax, snapshots, restored, health, diagnostics, cleared, relocated, message } = e.data
+        const { type, id, faces, edges, stlBlob, stepBlob, dxfData, orthoViews, soften, softenEdges, filletEdges, filletMax, snapshots, restored, health, diagnostics, cleared, relocated, centers, message } = e.data
         const { chain, filletPartial } = e.data
 
         if (type === 'ready') {
@@ -71,6 +71,7 @@ class CadEngine {
             diagnostics ? { diagnostics } :
             cleared ? { cleared } :
             relocated ? { relocated } :
+            centers ? { centers } :
             { faces, edges, ...(soften ? { soften } : {}), ...(filletPartial ? { filletPartial } : {}) }
           )
         } else if (type === 'error') {
@@ -136,6 +137,10 @@ class CadEngine {
   /** Replay harness: the worker's fallback log since the last call — resolves {diagnostics:[{kind, detail}]}. */
   async takeDiagnostics() {
     return this._send('takeDiagnostics', {})
+  }
+  /** Bounding-box centres (mm) of two base shapes built from params {oldBase, newBase}. Resolves {centers:[[x,y,z],[x,y,z]]}. */
+  async baseCenters(params) {
+    return this._send('baseCenters', params)
   }
   /** Follow the face (edit history, Session 2): re-find stored points after a body's own recipe changed. params: {oldBase, newBase (worker base params), queries:[{kind:'edge'|'face', p} | {kind:'plane', origin, normal, p?, strict?}]} (mm). Resolves {relocated:[{same} | {point, d} | {d} | {lost} | {none}]}. Nothing stored is changed. */
   async relocatePoints(params) {

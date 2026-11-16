@@ -7,6 +7,7 @@
 //   - a mirror needs its source body
 //   - a Join / Subtract needs its members
 //   - a feature sketched on a body's face needs that body
+//   - a pattern copy needs the body it repeats (patternOf)
 // Bodies are found by solidId; the "base" of a body is the feature that owns it
 // (extrude, revolve, loft, sweep, spring, mirror, join, import).
 
@@ -31,6 +32,7 @@ export function featureNeeds(feat, feats) {
   if (feat.operation === 'mirror') addBody(feat.sourceSolidId)
   if (feat.operation === 'join') for (const id of feat.memberFeatureIds || []) if (id !== feat.id) need.add(id)
   if (feat.planeId === 'face' && feat.facePlane?.solidId != null) addBody(feat.facePlane.solidId)
+  if (feat.patternOf != null && feat.patternOf !== feat.id && feats.some(f => f.id === feat.patternOf)) need.add(feat.patternOf)
   return feats.filter(f => need.has(f.id)).map(f => f.id)
 }
 

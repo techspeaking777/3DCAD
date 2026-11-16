@@ -11,7 +11,14 @@
 - other bodies sketched on its faces move with the face, together with everything on them
 - the Extrude depth gear and Revolve/Loft edits no longer drop the body's cuts and fillets
 
-Not covered yet: bodies inside a Join (Session 3), a cut sketched on another body's face, and sketches on faces made by a cut. Session 3 is next.
+Not covered yet: a cut sketched on another body's face, and sketches on faces made by a cut.
+
+**Session 3 is done (2026-11-16):**
+- body and cutout pattern copies follow their original (a body copy is rebuilt from the original's finished shape plus its own step; older copies still rebuild as before)
+- plain extrude/revolve bodies inside a Join or Subtract can be edited (✎ and gear), and the Join rebuilds
+- a moved body keeps its Move through an edit (it used to be dropped on re-sketch, or slide along when the shape changed)
+
+Session 4 (follow-the-corner) is next.
 
 **Why:** students often want to change something they made earlier, like a base size, a sketch line, or a hole position. Today the teacher often goes in and does it for them. The goal is the parametric "change 50 to 60 and the whole model updates" moment from Fusion and Onshape, without Fusion's complexity.
 

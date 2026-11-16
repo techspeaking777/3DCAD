@@ -487,6 +487,24 @@ function shiftFacePlane(fp, dMm) {
   return out
 }
 const addMm = (p, d) => [p[0] + d[0], p[1] + d[1], p[2] + d[2]]
+
+// Cutout pattern copies of cutout `orig` (edit history Session 3). New copies
+// carry patternOf; older ones are recognised by how commitCutoutPattern made
+// them (same body, a patterngroup, "<name> Pattern", the same profile).
+function cutPatternCopiesOf(orig, feats) {
+  const prefix = (orig.patternXform || []).length
+  const sameProfile = f => JSON.stringify(f.profilePts) === JSON.stringify(orig.profilePts)
+  return feats.filter(f => f.id !== orig.id && f.operation === 'cutout' && f.solidId === orig.solidId && Array.isArray(f.patternXform) && (
+    f.patternOf === orig.id ||
+    (f.patternOf == null && f.groupId?.startsWith('patterngroup-') && f.name === `${orig.name} Pattern` && f.patternXform.length > prefix && sameProfile(f))))
+}
+// A cutout pattern copy re-made from its (edited) original: the original's
+// whole recipe plus the copy's own step.
+function remakeCutCopy(copy, oldOrig, newOrig) {
+  const step = copy.patternStep || copy.patternXform.slice((oldOrig.patternXform || []).length)
+  return { ...newOrig, id: copy.id, name: copy.name, groupId: copy.groupId, color: copy.color, hidden: copy.hidden,
+    patternOf: newOrig.id, patternStep: step, patternXform: [...(newOrig.patternXform || []), ...step] }
+}
 // A feature whose sketch plane moves by d (mm): its facePlane and the plane each
 // of its sketch entities carries (same plane = same new object).
 function shiftFeaturePlanes(f, dMm) {
@@ -1555,12 +1573,12 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
 
           return (
             <div key={feat.id}
-              title={brokenReason || (isLocked ? `Part of ${features.find(f=>f.id===feat.joinedInto)?.name || 'a Join'} — delete it to edit` : undefined)}
+              title={brokenReason || (isLocked ? `Part of ${features.find(f=>f.id===feat.joinedInto)?.name || 'a Join'} — edit it here and the Join updates` : feat.patternStep ? 'A pattern copy — edit the original and every copy follows' : undefined)}
               style={{
               borderLeft, background: itemBg,
               padding: '6px 10px 6px 8px',
               borderBottom: '1px solid #2a2a4a',
-              opacity: isLocked ? 0.5 : 1,
+              opacity: isLocked ? 0.75 : 1,
               cursor: isSketch ? 'pointer' : 'default',
             }}>
               {/* Feature header row */}
@@ -1680,6 +1698,25 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                       </button>
                     </>
                   )}
+                  {/* A body inside a Join/Subtract: its sketch and depth can be
+                      edited, then the Join is rebuilt (edit history Session 3).
+                      Plain extrude / revolve members only. */}
+                  {isExtrude && isLocked && !sketchMode && !isMirror && !isJoin && !isLoft && !isSweep && !isSpring && !feat.patternStep && feat.operation !== 'import' && (
+                    <>
+                      {feat.sketchLines !== undefined && (
+                        <button title="Edit sketch"
+                          onClick={e=>{e.stopPropagation(); onEditSketch(feat.id)}}
+                          style={{background:'none',border:'none',cursor:'pointer',
+                            padding:'1px 3px', display:'flex', alignItems:'center'}}
+                        ><PencilGlyph/></button>
+                      )}
+                      <button title="Edit extrusion extent"
+                        onClick={e=>{e.stopPropagation(); onEditExtent(feat.id)}}
+                        style={{background:'none',border:'none',cursor:'pointer',
+                          padding:'1px 3px', display:'flex', alignItems:'center'}}
+                      ><RulerGlyph/></button>
+                    </>
+                  )}
                   {isExtrude && !isLocked && (
                     <>
                       {!sketchMode && (isLoft || isLoftCutout) && (
@@ -1700,14 +1737,14 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                             padding:'1px 3px', fontSize:12, color:'#4DB6AC'}}
                         >▦</button>
                       )}
-                      {!sketchMode && !isLoft && !isLoftCutout && !feat.patternXform && feat.sketchLines !== undefined && (
+                      {!sketchMode && !isLoft && !isLoftCutout && !feat.patternXform && !feat.patternStep && feat.sketchLines !== undefined && (
                         <button title="Edit sketch"
                           onClick={e=>{e.stopPropagation(); onEditSketch(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
                             padding:'1px 3px', display:'flex', alignItems:'center'}}
                         ><PencilGlyph/></button>
                       )}
-                      {!sketchMode && !isMirror && !isJoin && !isLoft && !isLoftCutout && !isSweep && !isSweepCut && !isSpring && !isSpringCut && !feat.patternXform && (
+                      {!sketchMode && !isMirror && !isJoin && !isLoft && !isLoftCutout && !isSweep && !isSweepCut && !isSpring && !isSpringCut && !feat.patternXform && !feat.patternStep && (
                         <button title={feat.operation==='cutout' ? 'Edit cutout extent' : 'Edit extrusion extent'}
                           onClick={e=>{e.stopPropagation(); onEditExtent(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
@@ -7187,7 +7224,12 @@ const App3D = forwardRef(function App3D(props, ref) {
   // on the id: a single Move/Copy commit never collided since it's one call,
   // but a tight Pattern loop calling this many times can land two calls in
   // the same millisecond, which Date.now() alone can't tell apart.
-  async function createTransformedCopy(solid, feat, workerParams, newTransform, nameFn) {
+  // asPattern: the copy is a PATTERN instance — it stores only which body it
+  // repeats (patternOf) and its own step (patternStep, a list of transformShape
+  // params applied to the original's finished shape), and is rebuilt from the
+  // original whenever that changes (edit history Session 3 — see
+  // buildPatternCopyBase). A plain Copy stays an independent body.
+  async function createTransformedCopy(solid, feat, workerParams, newTransform, nameFn, asPattern = false) {
     const newSolidId = Date.now() + Math.random()
     const base = buildBaseWorkerParams(solid)
     const ops = buildSolidOpsForWorker(solid, features)
@@ -7197,10 +7239,13 @@ const App3D = forwardRef(function App3D(props, ref) {
     const group = replicadMeshToThree(meshData, solid.color, newSolidId)
     const newFeatId = `${feat.id}-copy-${newSolidId}`
     setSolids(prev => [...prev, { ...solid, id: newSolidId, group, transform: newTransform }])
-    setFeatures(prev => [...prev, {
+    const copyFeat = {
       ...feat, id: newFeatId, solidId: newSolidId, name: nameFn(feat),
       transform: newTransform, joinedInto: undefined,
-    }])
+    }
+    delete copyFeat.patternOf; delete copyFeat.patternStep
+    if (asPattern) { copyFeat.patternOf = feat.id; copyFeat.patternStep = [workerParams] }
+    setFeatures(prev => [...prev, copyFeat])
     return newSolidId
   }
 
@@ -7216,7 +7261,10 @@ const App3D = forwardRef(function App3D(props, ref) {
         const meshData = await cadEngine.transformShape({ solidId, ...workerParams })
         const group = replicadMeshToThree(meshData, solid.color, solidId)
         setSolids(prev => prev.map(s => s.id===solidId ? { ...s, group, transform: newTransform } : s))
-        setFeatures(prev => prev.map(f => f.id===feat.id ? { ...f, transform: newTransform } : f))
+        // A pattern copy keeps its place as original + steps, so the move is
+        // one more step.
+        setFeatures(prev => prev.map(f => f.id===feat.id ? { ...f, transform: newTransform, ...(f.patternStep ? { patternStep: [...f.patternStep, workerParams] } : {}) } : f))
+        await rebuildPatternCopies({ ...solid, transform: newTransform })
         // Mirrors of this body stay put — they keep the source position
         // snapshotted when they were made. Older mirrors without a snapshot
         // get frozen at the source's position before this move.
@@ -7418,6 +7466,28 @@ const App3D = forwardRef(function App3D(props, ref) {
   // mirrors and STL export replay it like any other cut. Copies share their own
   // groupId (NOT the original's) so the tree shows one "× N" row and deleting
   // it removes just the copies.
+  // After cutouts were edited (pairs of [old, new] feature): their pattern
+  // copies take the new recipe, and each body they cut is rebuilt once.
+  // `featsAfter` = the feature list with the edit applied.
+  async function syncCutPatterns(pairs, featsAfter) {
+    const changed = new Map()
+    for (const [oldOrig, newOrig] of pairs) {
+      if (!oldOrig || !newOrig) continue
+      for (const c of cutPatternCopiesOf(oldOrig, featsAfter)) changed.set(c.id, remakeCutCopy(c, oldOrig, newOrig))
+    }
+    if (!changed.size) return
+    const feats = featsAfter.map(f => changed.get(f.id) || f)
+    setFeatures(prev => prev.map(f => changed.get(f.id) || f))
+    for (const solidId of new Set([...changed.values()].map(c => c.solidId))) {
+      const solid = solids.find(s => s.id === solidId)
+      if (!solid) continue
+      const meshData = await rebuildSolidChain(solid, {}, feats)
+      const updated = { ...solid, group: replicadMeshToThree(meshData, solid.color, solid.id) }
+      setSolids(prev => prev.map(s => s.id === solidId ? updated : s))
+      await rebuildDependentMirrors(updated)
+    }
+  }
+
   async function commitCutoutPattern(featId, xformsList) {
     const feat = features.find(f => f.id === featId)
     let target = feat ? solids.find(s => s.id === feat.solidId) : null
@@ -7429,7 +7499,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     const newFeats = []
     try {
       for (let i = 0; i < xformsList.length; i++) {
-        const copyFeat = { ...feat, patternXform: [...(feat.patternXform || []), ...xformsList[i]] }
+        // patternOf/patternStep: the copy is re-made from the original when that
+        // is edited (syncCutPatterns).
+        const copyFeat = { ...feat, patternXform: [...(feat.patternXform || []), ...xformsList[i]], patternOf: feat.id, patternStep: xformsList[i] }
         const meshData = await cadEngine.subtract({ baseSolidId: target.id, cut: buildCutWorkerParams(copyFeat), base })
         const group = replicadMeshToThree(meshData, target.color, target.id)
         target = { ...target, group }
@@ -7500,7 +7572,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       for (let i = 1; i < offsets.length; i++) {
         const { dx, dy, dz } = offsets[i]
         const newTransform = { position: [priorPos[0]+dx, priorPos[1]+dy, priorPos[2]+dz], rotation: priorRotation }
-        await createTransformedCopy(solid, feat, { position: [dx,dy,dz] }, newTransform, f => `${f.name} Pattern ${i}`)
+        await createTransformedCopy(solid, feat, { position: [dx,dy,dz] }, newTransform, f => `${f.name} Pattern ${i}`, true)
       }
     } catch (err) {
       setCadError('Pattern failed: ' + (err.message || String(err)))
@@ -7567,7 +7639,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         const Rnew = Rdelta.multiply(rotationToQuat(priorRotation))
         const newTransform = { position: priorPos, rotation: quatToAxisAngle(Rnew) }
         const workerParams = { rotation: { angleDeg: angles[i], axis: [axis.x, axis.y, axis.z], pivot } }
-        await createTransformedCopy(solid, feat, workerParams, newTransform, f => `${f.name} Pattern ${i}`)
+        await createTransformedCopy(solid, feat, workerParams, newTransform, f => `${f.name} Pattern ${i}`, true)
       }
     } catch (err) {
       setCadError('Pattern failed: ' + (err.message || String(err)))
@@ -8730,6 +8802,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       const newLoftFeat = editingLoftFeat ? { ...editingLoftFeat, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled } : null
       let followLoft = null
       if (editingLoftFeat) {
+        if (newLoftFeat.transform) newLoftFeat.transform = await keepMoveAfterEdit(featureToTempSolid(editingLoftFeat), featureToTempSolid(newLoftFeat), editingLoftFeat.transform)
         const newRec = featureToTempSolid(newLoftFeat)   // keeps a Move, like the saved feature
         followLoft = await followBodyEdit(featureToTempSolid(editingLoftFeat), newRec, features)
         meshData = await rebuildSolidChain(newRec, {}, followLoft.feats)
@@ -8740,7 +8813,7 @@ const App3D = forwardRef(function App3D(props, ref) {
 
       setSolids(prev => editingId ? prev.map(s => s.id === solidId ? solidData : s) : [...prev, solidData])
       if (editingId) {
-        setFeatures(prev => prev.map(f => f.id === editingId ? { ...f, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled } : (followLoft?.changed.get(f.id) || f)))
+        setFeatures(prev => prev.map(f => f.id === editingId ? { ...f, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled, ...(newLoftFeat?.transform ? { transform: newLoftFeat.transform } : {}) } : (followLoft?.changed.get(f.id) || f)))
         if (followLoft?.movedBodies.length) await rebuildMovedBodies(followLoft.movedBodies, followLoft.feats.map(f => f.id === editingId ? newLoftFeat : f))
       } else {
         const loftName = nextLoftName()   // outside the updater — see nextSketchName's comment
@@ -9163,6 +9236,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   async function rebuildDependentMirrors(solid) {
+    await rebuildPatternCopies(solid)
     const dependents = features.filter(f => f.operation === 'mirror' && f.sourceSolidId === solid.id)
     if (dependents.length === 0) return
     // buildBaseWorkerParams returns null for a join/mirror source — see
@@ -9181,6 +9255,83 @@ const App3D = forwardRef(function App3D(props, ref) {
         console.error('Dependent mirror rebuild failed:', err)
       }
     }
+  }
+
+  // ── Editing a body inside a Join / Subtract (edit history Session 3) ──
+  // The member was rebuilt by the normal edit path (which also put it back in
+  // `solids`); once that edit is in `features`, the member leaves `solids`
+  // again and its Join is rebuilt — then any Join that one is part of, and so on.
+  const [joinRebuild, setJoinRebuild] = useState(null)
+  useEffect(() => {
+    if (!joinRebuild) return
+    let cancelled = false
+    ;(async () => {
+      for (let id of joinRebuild.ids) {
+        while (id && !cancelled) {
+          const jf = features.find(f => f.id === id)
+          if (!jf) break
+          const memberSolidIds = new Set((jf.memberFeatureIds || []).map(m => features.find(f => f.id === m)?.solidId).filter(v => v != null))
+          setSolids(prev => prev.filter(s => !memberSolidIds.has(s.id)))
+          const joinSolid = solids.find(s => s.id === jf.solidId)
+          try {
+            const meshData = await rebuildSolidChain(joinSolid || featureToTempSolid(jf), {}, features)
+            const color = joinSolid?.color || jf.color
+            const updated = { ...(joinSolid || { ...featureToTempSolid(jf), hidden: !!jf.hidden }), color, group: replicadMeshToThree(meshData, color, jf.solidId) }
+            setSolids(prev => [...prev.filter(s => s.id !== jf.solidId && !memberSolidIds.has(s.id)), updated])
+            setBrokenEntry(jf.id, null)
+            await rebuildDependentMirrors(updated)
+          } catch (err) {
+            console.warn('[join] could not rebuild after a member was edited:', jf.name, err)
+            setBrokenEntry(jf.id, brokenStepReason(jf, err))
+            break
+          }
+          id = jf.joinedInto
+        }
+      }
+    })()
+    return () => { cancelled = true }
+  }, [joinRebuild])
+
+  // Pattern instances of body `solid` (patternOf → its feature) are rebuilt
+  // from its just-changed shape (edit history Session 3). Copies inside a Join
+  // are left to the Join.
+  async function rebuildPatternCopies(solid) {
+    const owner = features.find(f => f.solidId === solid.id && isBodyOwner(f))
+    if (!owner) return
+    const copies = features.filter(f => f.patternOf === owner.id && f.patternStep && !f.joinedInto)
+    for (const copyFeat of copies) {
+      const copySolid = solids.find(s => s.id === copyFeat.solidId)
+      if (!copySolid) continue
+      try {
+        const meshData = await rebuildSolidChain(copySolid)
+        const updated = { ...copySolid, group: replicadMeshToThree(meshData, copySolid.color, copySolid.id) }
+        setSolids(prev => prev.map(s => s.id === updated.id ? updated : s))
+        setBrokenEntry(copyFeat.id, null)
+        await rebuildDependentMirrors(updated)
+      } catch (err) {
+        console.warn('[pattern] a pattern copy could not follow its original:', copyFeat.name, err)
+        setBrokenEntry(copyFeat.id, brokenStepReason(copyFeat, err))
+      }
+    }
+  }
+
+  // A pattern instance's base: the original body's finished shape (its cuts,
+  // fillets and Move included) with the copy's steps applied in turn. Returns
+  // null when the original is gone — the copy then rebuilds from the full
+  // recipe it was given when made (how every copy worked before Session 3).
+  async function buildPatternCopyBase(copyFeat, feats, solidsLookup) {
+    const src = feats.find(f => f.id === copyFeat.patternOf)
+    if (!src) return null
+    const srcSolid = solidsLookup.find(s => s.id === src.solidId) || featureToTempSolid(src)
+    let meshData = null
+    for (let i = 0; i < copyFeat.patternStep.length; i++) {
+      meshData = await cadEngine.transformShape({
+        solidId: copyFeat.solidId,
+        ...(i === 0 ? { sourceSolidId: src.solidId, base: buildBaseWorkerParams(srcSolid), ops: buildSolidOpsForWorker(srcSolid, feats) } : {}),
+        ...copyFeat.patternStep[i],
+      })
+    }
+    return meshData
   }
 
   // Rebuilds ONE feature's own solid from scratch, purely from its stored
@@ -10736,6 +10887,29 @@ const App3D = forwardRef(function App3D(props, ref) {
     return 'Couldn’t be rebuilt: ' + (msg || 'unknown problem')
   }
 
+  // A stored Move rotates the body about its OWN centre (worker transformShape),
+  // so when an edit changes the body's shape that centre shifts and the moved
+  // body would land somewhere else. The position is adjusted to keep the SAME
+  // rigid move: the body stays put and grows/shrinks from its sketch, as in
+  // Fusion (edit history Session 3). p' = R(p − c) + c + t, so
+  // t_new = (R − I)(c_new − c_old) + t_old.
+  async function keepMoveAfterEdit(oldRec, newRec, transform) {
+    if (!transform?.rotation?.angleDeg) return transform
+    const oldBase = buildBaseWorkerParams(oldRec), newBase = buildBaseWorkerParams(newRec)
+    if (!oldBase || !newBase) return transform
+    try {
+      const { centers: [cOld, cNew] } = await cadEngine.baseCenters({ oldBase, newBase })
+      const d = new THREE.Vector3(cNew[0] - cOld[0], cNew[1] - cOld[1], cNew[2] - cOld[2])
+      if (d.lengthSq() < 1e-12) return transform
+      const shift = d.clone().applyQuaternion(rotationToQuat(transform.rotation)).sub(d)
+      const pos = transform.position || [0, 0, 0]
+      return { ...transform, position: [pos[0] + shift.x, pos[1] + shift.y, pos[2] + shift.z] }
+    } catch (err) {
+      console.warn('[move] could not keep the move after the edit:', err)
+      return transform
+    }
+  }
+
   // ── Follow the face (docs/plan-edit-history.md, Session 2) ──
   // A body's own recipe just changed (oldRec → newRec, solid-shaped records as
   // featureToTempSolid makes). Before its steps are replayed, everything stored
@@ -10840,7 +11014,10 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   async function rebuildSolidChain(baseSolid, { overrideId=null, overrideCut=null, overrideFilletRadius=null, overrideShellThickness=null, skipId=null, skipIds=null } = {}, feats = features, solidsLookup = solids) {
-    let { meshData, baseWorkerParams } = baseSolid.operation === 'join'
+    const patternFeat = feats.find(f => f.solidId === baseSolid.id && f.patternOf != null && f.patternStep && isBodyOwner(f))
+    const patternMesh = patternFeat ? await buildPatternCopyBase(patternFeat, feats, solidsLookup) : null
+    let { meshData, baseWorkerParams } = patternMesh ? { meshData: patternMesh, baseWorkerParams: null }
+      : baseSolid.operation === 'join'
       ? await rebuildJoinBaseMesh(baseSolid, feats, solidsLookup)
       : await rebuildBaseMesh(baseSolid)
     const ops = feats.filter(f => f.solidId === baseSolid.id && (f.operation === 'cutout' || f.type === 'fillet' || f.type === 'shell'))
@@ -10898,7 +11075,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     // its pristine rebuilt shape in one shot, so the worker computes the
     // pivot itself from that shape's own bounding box (see transformShape's
     // own comment).
-    if (baseSolid.transform) {
+    if (baseSolid.transform && !patternMesh) {   // a pattern copy's steps already placed it
       meshData = await cadEngine.transformShape({ solidId: baseSolid.id, position: baseSolid.transform.position, rotation: baseSolid.transform.rotation })
     }
     return meshData
@@ -11036,6 +11213,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
     const oldMemberIds = oldMembers.map(m => m.id)
     setFeatures(prev => [...prev.filter(f => !oldMemberIds.includes(f.id)), ...newFeats])
+    return newFeats
   }
 
   async function commitExtrude(overrideState=null) {
@@ -11050,7 +11228,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     // Plain-extrude-only option (never applied for a cutout or a revolve, neither
     // of which have the same "straight prismatic side wall" shape draft assumes).
     const draftAngleDeg = (!isCutout && !revolveAxis) ? (parseFloat(draftAngleInput) || 0) : 0
-    const color = isCutout ? '#e05a4e' : extrudeColor
+    // Re-sketching a body keeps its own colour (it used to take the current Extrude colour).
+    const color = isCutout ? '#e05a4e' : ((editingFeatureId && features.find(f => f.id === editingFeatureId)?.color) || extrudeColor)
     const pts = profiles[pickedIdx]
     const cached = cachedProfiles.find(p => p.pts === pts)
     const facePlane = state.facePlane || cached?.facePlane || null
@@ -11091,6 +11270,13 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     const editingFeat = editingId ? features.find(f => f.id === editingId) : null
     const sketchGeom = { sketchLines: savedLines, sketchCircles: savedCircles, sketchArcs: savedArcs, sketchSplines: savedSplines }
+    // A body inside a Join/Subtract must stay ONE body — the Join is built
+    // from it by id (edit history Session 3).
+    if (editingFeat?.joinedInto && !isCutout && !revolveAxis && profiles.length !== 1) {
+      setCadError(`This body is part of ${features.find(f => f.id === editingFeat.joinedInto)?.name || 'a Join'}, so its sketch must stay one closed shape.`)
+      setTimeout(() => setCadError(null), 8000)
+      return
+    }
 
     try {
       const lastSketch = [...features].reverse().find(f=>f.type==='sketch')
@@ -11152,6 +11338,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             await rebuildDependentMirrors(updatedSolid)
           }
           setFeatures(prev => prev.map(f => updatedById.get(f.id) || f))
+          await syncCutPatterns(groupMembers.map(m => [m, updatedById.get(m.id)]), features.map(f => updatedById.get(f.id) || f))
 
         } else {
           // Fresh profile set: a brand new cutout, or a pencil re-sketch
@@ -11200,11 +11387,16 @@ const App3D = forwardRef(function App3D(props, ref) {
             if (targets.length === 0) throw new Error("The cut doesn't reach any visible solid. Try a deeper depth, or flip the direction.")
           }
 
-          await applyCutoutToTargets(targets, {
+          const madeFeats = await applyCutoutToTargets(targets, {
             oldMembers, editingFeat, editingId, cutProfiles, profileBoxes, buildCut,
             lastSketch, sketchGeom, depthMm, cutDepthMm, cutDirection, extentMode, color,
             planeId, facePlane, revolveAxis, angleDeg, revolveReverse,
           })
+          if (editingId && madeFeats?.length) {
+            const oldIds = oldMembers.map(m => m.id)
+            await syncCutPatterns(oldMembers.map(m => [m, madeFeats.find(n => n.solidId === m.solidId)]),
+              [...features.filter(f => !oldIds.includes(f.id)), ...madeFeats])
+          }
         }
 
       } else if (revolveAxis) {
@@ -11227,8 +11419,10 @@ const App3D = forwardRef(function App3D(props, ref) {
         // shape (they used to be dropped until the next reload), after
         // followBodyEdit has moved whatever sat on a face that moved.
         let followRev = null
+        let revolveTransform = editingFeat?.transform
         if (editingFeat) {
-          const newRec = featureToTempSolid({ ...editingFeat, solidId, operation: 'revolve', profilePts: pts, planeId, facePlane, revolveAxis, angleDeg, revolveReverse, transform: undefined })
+          const newRec = featureToTempSolid({ ...editingFeat, solidId, operation: 'revolve', profilePts: pts, planeId, facePlane, revolveAxis, angleDeg, revolveReverse })
+          if (editingFeat.transform) revolveTransform = newRec.transform = await keepMoveAfterEdit(featureToTempSolid(editingFeat), newRec, editingFeat.transform)
           followRev = await followBodyEdit(featureToTempSolid(editingFeat), newRec, features)
           meshData = await rebuildSolidChain(newRec, {}, followRev.feats)
         }
@@ -11240,7 +11434,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           type: 'extrude', name: editingFeat?.name || nextExtrudeName(),
           solidId, sketchId: lastSketch?.id || null,
           angleDeg, color, operation: 'revolve', planeId, profilePts: pts, facePlane, revolveAxis, revolveReverse,
-          ...sketchGeom,
+          ...sketchGeom, ...(revolveTransform ? { transform: revolveTransform } : {}),
         }
         if (editingId) {
           setFeatures(prev => prev.map(f => f.id === editingId ? revolveFeat : (followRev?.changed.get(f.id) || f)))
@@ -11272,7 +11466,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         // stored profile/holes, keeping each solid's own shape/position and
         // only updating depth/direction.
         const groupMembers = editingFeat.groupId
-          ? features.filter(f => f.groupId === editingFeat.groupId)
+          ? features.filter(f => f.groupId === editingFeat.groupId && !f.patternStep)
           : [editingFeat]
         const updatedById = new Map()
         // The body's own cutouts, fillets and shell are replayed on the new
@@ -11284,6 +11478,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         for (const member of groupMembers) {
           const memberPts = member.profilePts
           const newMember = { ...member, depthMm, direction, extentMode, draftAngleDeg, draftDirection }
+          if (member.transform) newMember.transform = await keepMoveAfterEdit(featureToTempSolid(member), featureToTempSolid(newMember), member.transform)
           const newRec = featureToTempSolid(newMember)
           const follow = await followBodyEdit(featureToTempSolid(member), newRec, featsNow)
           featsNow = follow.feats.map(f => f.id === member.id ? newMember : f)
@@ -11333,10 +11528,10 @@ const App3D = forwardRef(function App3D(props, ref) {
         // targeted the old one. A solo groupId (exactly one member) counts
         // the same as no groupId at all.
         const wasSoloBody = !editingId || !editingFeat.groupId ||
-          features.filter(f => f.groupId === editingFeat.groupId).length === 1
+          features.filter(f => f.groupId === editingFeat.groupId && !f.patternStep).length === 1
         const reuse = editingId && wasSoloBody && profiles.length === 1
         if (editingFeat?.groupId) {
-          const oldMembers = features.filter(f => f.groupId === editingFeat.groupId)
+          const oldMembers = features.filter(f => f.groupId === editingFeat.groupId && !f.patternStep)
           const oldSolidIds = new Set(oldMembers.map(f => f.solidId))
           setSolids(prev => prev.filter(s => !oldSolidIds.has(s.id)))
         } else if (editingId && !reuse) {
@@ -11348,6 +11543,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         const newFeats = []
         const newSolidObjs = []   // plain solid records, for "Join to body" below
         let followResult = null   // reuse only — see followBodyEdit
+        let keptTransform = null  // reuse only — the body's Move, kept (keepMoveAfterEdit)
         let profIdx = -1
         for (const profPts of profiles) {
           profIdx++
@@ -11414,6 +11610,9 @@ const App3D = forwardRef(function App3D(props, ref) {
               ...editingFeat, depthMm, direction, draftAngleDeg, draftDirection, planeId, facePlane, profilePts: profPts, operation: 'extrude',
             }), features)
             followResult = follow
+            if (editingFeat.transform) keptTransform = await keepMoveAfterEdit(featureToTempSolid(editingFeat), featureToTempSolid({
+              ...editingFeat, depthMm, direction, draftAngleDeg, draftDirection, planeId, facePlane, profilePts: profPts, operation: 'extrude',
+            }), editingFeat.transform)
             const depOps = follow.feats.filter(f => f.solidId === solidId && (f.operation === 'cutout' || f.type === 'fillet' || f.type === 'shell'))
             for (const opFeat of depOps) {
               // Same rule as rebuildSolidChain: a step that can't be replayed
@@ -11431,9 +11630,14 @@ const App3D = forwardRef(function App3D(props, ref) {
                 setBrokenEntry(opFeat.id, brokenStepReason(opFeat, e))
               }
             }
-            if (depOps.length > 0) {
+            // Keep the body's Move (a Subtract's hole body always has one) —
+            // re-sketching used to drop it.
+            if (keptTransform) {
+              meshData = await cadEngine.transformShape({ solidId, position: keptTransform.position, rotation: keptTransform.rotation })
+            }
+            if (depOps.length > 0 || keptTransform) {
               const group = replicadMeshToThree(meshData, color, solidId)
-              setSolids(prev => prev.map(s => s.id === solidId ? { ...s, group } : s))
+              setSolids(prev => prev.map(s => s.id === solidId ? { ...s, group, transform: keptTransform || undefined } : s))
             }
           }
           newFeats.push({
@@ -11441,6 +11645,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             solidId, sketchId: lastSketch?.id || null,
             depthMm, direction, extentMode, draftAngleDeg, draftDirection, color, operation:'extrude', planeId,
             profilePts: profPts, facePlane, ...sketchGeom,
+            ...(reuse && keptTransform ? { transform: keptTransform } : {}),
           })
           newSolidObjs.push({ id: solidId, planeId, operation:'extrude', direction, depth: mmToPx(depthMm), depthMm,
             draftAngleDeg, draftDirection, profilePts: profPts, color, facePlane })
@@ -11463,7 +11668,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           }
         } else if (editingId) {
           const oldIds = editingFeat.groupId
-            ? features.filter(f => f.groupId === editingFeat.groupId).map(f => f.id)
+            ? features.filter(f => f.groupId === editingFeat.groupId && !f.patternStep).map(f => f.id)
             : [editingId]
           setFeatures(prev => [...prev.filter(f => !oldIds.includes(f.id)), ...newFeats])
         } else {
@@ -11487,6 +11692,9 @@ const App3D = forwardRef(function App3D(props, ref) {
       }
 
       commit(snapshot())
+      // A body inside a Join/Subtract was edited: rebuild the Join from it
+      // once the edit is in `features` (see the joinRebuild effect).
+      if (editingFeat?.joinedInto && !isCutout) setJoinRebuild({ ids: [editingFeat.joinedInto], n: Date.now() })
 
     } catch(err) {
       console.error('CAD operation failed:', err)
@@ -11575,7 +11783,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         // of them, not just this one, so re-sketching doesn't leave stale old
         // letters floating alongside the fresh sketch.
         const groupMembers = feat.groupId
-          ? features.filter(f => f.groupId === feat.groupId)
+          ? features.filter(f => f.groupId === feat.groupId && !f.patternStep)
           : [feat]
         const targetSolids = groupMembers
           .map(f => solids.find(s => s.id === f.solidId))
@@ -11639,7 +11847,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     // A grouped (multi-letter text) feature has several solids — hide them all.
     if (op !== 'cutout') {
       const groupMembers = feat.groupId
-        ? features.filter(f => f.groupId === feat.groupId)
+        ? features.filter(f => f.groupId === feat.groupId && !f.patternStep)
         : [feat]
       const targetSolids = groupMembers
         .map(f => solids.find(s => s.id === f.solidId))

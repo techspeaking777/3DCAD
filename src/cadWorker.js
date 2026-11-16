@@ -1599,6 +1599,19 @@ self.onmessage = async function(e) {
       }
       return
     }
+    // The bounding-box centres of two base shapes (old and new recipe of an
+    // edited body) — a stored Move rotates about the shape's own centre, so
+    // the app shifts the move to keep the body where it was (keepMoveAfterEdit).
+    if (type==='baseCenters') {
+      const centers = []
+      for (const p of [params.oldBase, params.newBase]) {
+        const s = await buildBase(p)
+        try { const c = s.boundingBox.center; centers.push([c[0], c[1], c[2]]) }
+        finally { try { s.delete() } catch { /* freed */ } }
+      }
+      self.postMessage({ type:'result', id, centers })
+      return
+    }
     if (type==='shapeHealth') {
       const health = []
       for (const solidId of params.solidIds) {

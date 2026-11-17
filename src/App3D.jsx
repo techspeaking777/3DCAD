@@ -2613,6 +2613,26 @@ const App3D = forwardRef(function App3D(props, ref) {
   function zoomToFit(){
     viewport3dRef.current?.zoomToFit()
   }
+  // Frame the sketch being drawn — its own lines, circles, arcs and splines.
+  // (zoomToFit measures the 3D scene, which doesn't hold the sketch lines, so
+  // after a DXF import it zoomed right in on whatever little it found.)
+  // Returns false when the sketch is empty.
+  function fitSketch(){
+    // Through the refs: it is also called from a timer right after an import.
+    const plane=activePlaneRef.current||activePlane
+    const vp=viewport3dRef.current; if (!vp||!plane) return false
+    let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity
+    const add=(x,y)=>{if(!Number.isFinite(x)||!Number.isFinite(y))return;if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y}
+    for (const l of linesRef.current){add(l.x1,l.y1);add(l.x2,l.y2)}
+    for (const c of circlesRef.current){add(c.cx-c.r,c.cy-c.r);add(c.cx+c.r,c.cy+c.r)}
+    for (const a of arcsRef.current){const span=norm2pi(a.endAngle-a.startAngle)||2*Math.PI;for(let i=0;i<=16;i++){const t=a.startAngle+span*i/16;add(a.cx+Math.cos(t)*a.r,a.cy+Math.sin(t)*a.r)}}
+    for (const sp of splinesRef.current) for (const p of sp.points||[]) add(p.x,p.y)
+    if (!(x1>=x0)) return false
+    const planeId=typeof plane==='string'?plane:null
+    const facePlane=typeof plane==='object'?plane:null
+    vp.zoomToWorldPoints([[x0,y0],[x1,y0],[x1,y1],[x0,y1]].map(([x,y])=>vp.sketchToWorld(x,y,planeId,facePlane)),{insetBottomPx:100})   // the step bar covers the bottom
+    return true
+  }
 
   const { commit, undo, redo, canUndo, canRedo } = useHistory()
   const snapshot = () => ({ lines, circles, arcs, splines, dims })
@@ -13659,7 +13679,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==='s'){e.preventDefault();if(!sketchMode)handleSaveProjectAs();return}
     if (e.ctrlKey&&e.key==='s'){e.preventDefault();sketchMode?handleSave():handleSaveProject();return}
     if (e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==='h'){e.preventDefault();setHealthOpen(v=>!v);return}
-    if ((e.key==='f'||e.key==='F')&&!e.ctrlKey){zoomToFit();return}
+    if ((e.key==='f'||e.key==='F')&&!e.ctrlKey){if(!(sketchMode&&fitSketch()))zoomToFit();return}
     if ((e.key==='x'||e.key==='X')&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&!/^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName||'')&&!e.target?.isContentEditable){setXray(v=>!v);return}
     // Sweep/Spring confirm popup: Esc always cancels the whole feature. Checked
     // FIRST — while the popup is up the active sketch tool is still Line, and
@@ -14887,15 +14907,19 @@ const App3D = forwardRef(function App3D(props, ref) {
               </div>
 
               {/* Reframe — snaps the camera back to a straight-on view of the
-                  active sketch plane, without touching zoom/pan. A recovery
+                  active sketch plane, then fits the sketch on screen (fitSketch;
+                  an empty sketch keeps its zoom). A recovery
                   button for accidental orbiting (e.g. a scroll-wheel-button
                   drag) while sketching, since there's no other way back to
                   flat short of leaving the sketch and re-entering it. */}
               <button
-                title="Reframe — snap the camera back to a flat view of this sketch plane"
+                title="Reframe — snap back to a flat view of this sketch plane and fit the sketch on screen (F)"
                 onClick={()=>{
-                  if (typeof activePlane === 'string') viewport3dRef.current?.snapToPlane(activePlane, {resetZoom:false})
-                  else if (activePlane) viewport3dRef.current?.snapToFace(activePlane, {resetZoom:false})
+                  // Flat view first, then fit what's drawn (once the camera has turned).
+                  const vp=viewport3dRef.current
+                  const turn = typeof activePlane === 'string' ? vp?.snapToPlane(activePlane, {resetZoom:false})
+                    : activePlane ? vp?.snapToFace(activePlane, {resetZoom:false}) : null
+                  Promise.resolve(turn).then(()=>fitSketch())
                 }}
                 style={{...btnBase,background:'transparent',
                   outline:'1px solid #2a2a4a',outlineOffset:'-2px',
@@ -15755,14 +15779,18 @@ const App3D = forwardRef(function App3D(props, ref) {
                     // Centred on the sketch origin and framed (DXFs usually start at the part's corner).
                     const result=centreDxfResult(parseDXF(text,2))
                     commit(snapshot())
-                    setLines(p=>[...p,...result.lines])
-                    setCircles(p=>[...p,...result.circles])
-                    setArcs(p=>[...p,...result.arcs])
-                    setSplines(p=>[...p,...result.splines])
+                    // Tagged with the sketch plane like anything drawn — untagged, the 3D
+                    // view drew them on the XY plane (seen edge-on from an XZ / YZ / face
+                    // sketch as one flat line, which looked like a huge zoom).
+                    const tag=planeTag()
+                    setLines(p=>[...p,...result.lines.map(e=>({...e,...tag}))])
+                    setCircles(p=>[...p,...result.circles.map(e=>({...e,...tag}))])
+                    setArcs(p=>[...p,...result.arcs.map(e=>({...e,...tag}))])
+                    setSplines(p=>[...p,...result.splines.map(e=>({...e,...tag}))])
                     const total=result.lines.length+result.circles.length+result.arcs.length+result.splines.length
                     setLoadError(null)
                     // After the viewport has drawn the new geometry.
-                    if (result.box) setTimeout(()=>zoomToFit(),150)
+                    if (result.box) setTimeout(()=>fitSketch(),150)
                     alert(`DXF imported: ${total} entities (${result.lines.length} lines, ${result.circles.length} circles, ${result.arcs.length} arcs, ${result.splines.length} polylines)${result.units && result.units !== 'mm' ? ` — drawing was in ${result.units}, converted to mm` : ''}`)
                   }catch(err){
                     setLoadError('DXF import failed: '+err.message)

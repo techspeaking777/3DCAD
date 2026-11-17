@@ -1513,6 +1513,39 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       controls.target.copy(centre); controls.update()
     },
 
+    // Frame a set of world points (the sketch fit — App3D fitSketch): measured
+    // in camera space like zoomToFit, so it works on any sketch plane.
+    // insetBottomPx: screen pixels covered at the bottom (the sketch step bar),
+    // so the fit lands in the part of the view that is actually visible.
+    zoomToWorldPoints(pts, { insetBottomPx = 0 } = {}) {
+      const s=stateRef.current; if (!s||!pts?.length) return
+      const {camera,controls}=s
+      camera.updateMatrixWorld()
+      const view=camera.matrixWorldInverse
+      let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity,sumZ=0
+      const v=new THREE.Vector3()
+      for (const p of pts){
+        v.set(p.x,p.y,p.z).applyMatrix4(view)
+        if (v.x<minX) minX=v.x; if (v.x>maxX) maxX=v.x
+        if (v.y<minY) minY=v.y; if (v.y>maxY) maxY=v.y
+        sumZ+=v.z
+      }
+      const W=Math.max(maxX-minX,1), H=Math.max(maxY-minY,1)
+      const aspect=camera.right/camera.top
+      const hPx=s.renderer.domElement.clientHeight||1
+      const visible=Math.max(0.3,1-insetBottomPx/hPx)
+      const frustHNew=Math.max(W/(2*aspect),H/(2*visible))*1.3
+      // Lower the camera centre so the content sits in the middle of the visible part.
+      const centre=new THREE.Vector3((minX+maxX)/2,(minY+maxY)/2-(1-visible)*frustHNew,sumZ/pts.length).applyMatrix4(camera.matrixWorld)
+      camera.left=-frustHNew*aspect; camera.right=frustHNew*aspect
+      camera.top=frustHNew; camera.bottom=-frustHNew
+      camera.zoom=1
+      camera.updateProjectionMatrix()
+      const shift=centre.clone().sub(controls.target)
+      camera.position.add(shift)
+      controls.target.copy(centre); controls.update()
+    },
+
     getScale() {
       const s=stateRef.current; if (!s) return 1
       const fh = (s.camera.top - s.camera.bottom) / s.camera.zoom

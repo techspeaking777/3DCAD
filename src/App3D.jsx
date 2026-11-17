@@ -786,7 +786,7 @@ function buildSolidOpsForWorker(solid, features) {
   return features
     .filter(f => f.solidId === solid.id && (f.operation === 'cutout' || f.type === 'fillet' || f.type === 'shell'))
     .map(f => f.type === 'fillet'
-      ? { type: 'fillet', operation: f.operation ?? 'fillet', radius: f.radius, edgePoints: f.edgePoints }
+      ? { type: 'fillet', operation: f.operation ?? 'fillet', radius: f.radius, edgePoints: f.edgePoints, ...(f.taper ? { taper: f.taper } : {}) }
       : f.type === 'shell'
         ? { type: 'shell', thickness: f.thickness, direction: f.direction ?? 'inward', facePoints: f.facePoints }
         : { type: 'cut', params: buildCutWorkerParams(f) })
@@ -1763,7 +1763,8 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                   )}
                   {isFillet && (
                     <>
-                      {!sketchMode && (
+                      {/* A tapered round (Soften) has two radii — no single-radius edit; delete and Soften again */}
+                      {!sketchMode && !feat.taper && (
                         <button title={feat.operation==='chamfer' ? 'Edit chamfer distance' : 'Edit fillet radius'}
                           onClick={e=>{e.stopPropagation(); onEditFilletRadius(feat.id)}}
                           style={{background:'none',border:'none',cursor:'pointer',
@@ -1950,7 +1951,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                     <div style={{width:8,height:8,borderRadius:'50%',
                       background:feat.color||'#9c6ade', flexShrink:0}}/>
                     <span style={{color:'#8fa0b8', fontSize:10}}>
-                      R{feat.radius}mm · {feat.operation==='chamfer' ? 'chamfer' : 'fillet'}{feat.edgePoints?.length > 1 ? ` · ${feat.edgePoints.length} edges` : ''}
+                      {feat.taper ? `R${Math.round(feat.taper.rStart*100)/100}→${Math.round(feat.taper.rEnd*100)/100}mm · tapered` : `R${feat.radius}mm`} · {feat.operation==='chamfer' ? 'chamfer' : 'fillet'}{feat.edgePoints?.length > 1 ? ` · ${feat.edgePoints.length} edges` : ''}
                     </span>
                   </div>
                 </div>
@@ -6775,12 +6776,16 @@ const App3D = forwardRef(function App3D(props, ref) {
         id: `fillet-${solidId}-${stamp}-${i}`, type: 'fillet', operation: 'fillet',
         name: nextSoftenName(),
         solidId, edgePoints: r.edgePoints, edgeIds: [], radius: r.radius, color: targetSolid.color,
+        // A tapered round (Soften's fallback) — rebuilt by the worker's roundEdgeTaper
+        ...(r.taper ? { taper: r.taper } : {}),
       }))
       setFeatures(prev => [...prev, ...newFeats])
       await rebuildDependentMirrors(updatedSolid)
       const fmt = v => String(Math.round(v * 100) / 100)
       const done = total - skipped
-      const parts = rounds.map(r => `${r.edgePoints.length} at ${fmt(r.radius)} mm`).join(', ')
+      const plain = rounds.filter(r => !r.taper), tapered = rounds.filter(r => r.taper)
+      const parts = [...plain.map(r => `${r.edgePoints.length} at ${fmt(r.radius)} mm`),
+        ...(tapered.length ? [`${tapered.length} tapered ${tapered.map(r => `${fmt(r.taper.rStart)}→${fmt(r.taper.rEnd)}`).join(', ')} mm`] : [])].join(', ')
       const note = timedOut ? ' — stopped early, the rest are still selected: press Enter to carry on'
         : skipped ? ` — ${skipped} wouldn't round, still selected: try a smaller radius, or Fillet them one by one` : ''
       flashSaved(`Softened ${done} of ${total} edges (${parts})${note}`, 7000)
@@ -11215,7 +11220,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           meshData = await cadEngine.subtract({ baseSolidId: baseSolid.id, cuts: run.map(buildCutWorkerParams), base: baseWorkerParams })
         } else if (opFeat.type === 'fillet') {
           const radius = opFeat.id === overrideId ? overrideFilletRadius : opFeat.radius
-          meshData = await cadEngine.fillet3d({ solidId: baseSolid.id, edgePoints: opFeat.edgePoints, radius, operation: opFeat.operation ?? 'fillet', base: baseWorkerParams })
+          meshData = await cadEngine.fillet3d({ solidId: baseSolid.id, edgePoints: opFeat.edgePoints, radius, operation: opFeat.operation ?? 'fillet', base: baseWorkerParams, ...(opFeat.taper ? { taper: opFeat.taper } : {}) })
         } else if (opFeat.type === 'shell') {
           const thickness = opFeat.id === overrideId ? overrideShellThickness : opFeat.thickness
           meshData = await cadEngine.shell3d({ solidId: baseSolid.id, facePoints: opFeat.facePoints, thickness, direction: opFeat.direction ?? 'inward', base: baseWorkerParams })
@@ -11786,7 +11791,7 @@ const App3D = forwardRef(function App3D(props, ref) {
               // marked broken (red in the tree) — the body keeps the rest.
               try {
                 meshData = opFeat.type === 'fillet'
-                  ? await cadEngine.fillet3d({ solidId, edgePoints: opFeat.edgePoints, radius: opFeat.radius, operation: opFeat.operation ?? 'fillet', base: memberWorkerParams })
+                  ? await cadEngine.fillet3d({ solidId, edgePoints: opFeat.edgePoints, radius: opFeat.radius, operation: opFeat.operation ?? 'fillet', base: memberWorkerParams, ...(opFeat.taper ? { taper: opFeat.taper } : {}) })
                   : opFeat.type === 'shell'
                     ? await cadEngine.shell3d({ solidId, facePoints: opFeat.facePoints, thickness: opFeat.thickness, direction: opFeat.direction ?? 'inward', base: memberWorkerParams })
                     : await cadEngine.subtract({ baseSolidId: solidId, cut: buildCutWorkerParams(opFeat), base: memberWorkerParams })
@@ -12315,7 +12320,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         const ops = features
           .filter(f => f.solidId === solid.id && (f.operation === 'cutout' || f.type === 'fillet' || f.type === 'shell'))
           .map(f => f.type === 'fillet'
-            ? { type: 'fillet', operation: f.operation ?? 'fillet', radius: f.radius, edgePoints: f.edgePoints }
+            ? { type: 'fillet', operation: f.operation ?? 'fillet', radius: f.radius, edgePoints: f.edgePoints, ...(f.taper ? { taper: f.taper } : {}) }
             : f.type === 'shell'
               ? { type: 'shell', thickness: f.thickness, direction: f.direction ?? 'inward', facePoints: f.facePoints }
               : { type: 'cut', params: buildCutWorkerParams(f) })
@@ -12402,7 +12407,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         const ops = features
           .filter(f => f.solidId === solid.id && (f.operation === 'cutout' || f.type === 'fillet' || f.type === 'shell'))
           .map(f => f.type === 'fillet'
-            ? { type: 'fillet', operation: f.operation ?? 'fillet', radius: f.radius, edgePoints: f.edgePoints }
+            ? { type: 'fillet', operation: f.operation ?? 'fillet', radius: f.radius, edgePoints: f.edgePoints, ...(f.taper ? { taper: f.taper } : {}) }
             : f.type === 'shell'
               ? { type: 'shell', thickness: f.thickness, direction: f.direction ?? 'inward', facePoints: f.facePoints }
               : { type: 'cut', params: buildCutWorkerParams(f) })

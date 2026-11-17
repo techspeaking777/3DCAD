@@ -26,6 +26,7 @@ const EDGE_PICK_TOL = 0.75
 // support existed).
 const applyFilletOrChamfer = timed('fillet/chamfer', applyFilletOrChamferUntimed)
 function applyFilletOrChamferUntimed(shape, op) {
+  if (op.taper) return roundEdgeTaper(shape, op.edgePoints[0], op.taper)
   const edgeFilter = e => e.either(op.edgePoints.map(pt => f => f.withinDistance(EDGE_PICK_TOL, pt)))
   return op.operation === 'chamfer' ? shape.chamfer(op.radius, edgeFilter) : shape.fillet(op.radius, edgeFilter)
 }
@@ -1044,6 +1045,65 @@ function filletOnce(base, edges, radius, tryCfg) {
   }
 }
 
+// ── Tapered (variable-radius) rounding ───────────────────────────────────────
+// One edge rounded from rStart at the end nearest `startPt` to rEnd at the
+// other (Soften's fallback for an edge that can't take the full radius all the
+// way along, saved as a fillet with `taper: {rStart, rEnd, startPt}`).
+// BRepFilletAPI_MakeFillet.Add(R1, R2, E) puts R1 at "the first end" of the
+// edge; rather than trust which end OCC means, the result is MEASURED: the end
+// with the bigger radius loses (or, on an inside corner, gains) more material,
+// so its point on the old edge sits further from the new surface. If it came
+// out the wrong way round it is built again swapped — same code at Soften time
+// and on every replay, so a saved taper always rebuilds the same.
+const dist3 = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2])
+function distToBoundary(pt, shape) {
+  const q = new DistanceQuery(makeVertex(pt))
+  try {
+    let best = Infinity
+    for (const f of shape.faces) best = Math.min(best, q.distanceTo(f))
+    return best
+  } finally { q.delete() }
+}
+function taperFilletBuild(base, edge, r1, r2) {
+  const oc = getOC()
+  const mk = new oc.BRepFilletAPI_MakeFillet(base.wrapped, oc.ChFi3d_FilletShape.ChFi3d_Rational)
+  try {
+    mk.Add_3(r1, r2, edge.wrapped)
+    const out = cast(mk.Shape())
+    if (!shapeIsValid(out)) { out.delete?.(); return null }
+    return out
+  } catch (_) {
+    return null
+  } finally {
+    mk.delete()
+  }
+}
+function taperFilletOnce(base, edge, rStart, rEnd, startPt) {
+  const a = vec3(edge.pointAt(0)), b = vec3(edge.pointAt(1))
+  const startIsA = dist3(a, startPt) <= dist3(b, startPt)
+  let out = taperFilletBuild(base, edge, startIsA ? rStart : rEnd, startIsA ? rEnd : rStart)
+  if (!out || Math.abs(rStart - rEnd) < 1e-9) return out
+  const nearA = vec3(edge.pointAt(0.08)), nearB = vec3(edge.pointAt(0.92))
+  const gapA = distToBoundary(nearA, out), gapB = distToBoundary(nearB, out)
+  const gapStart = startIsA ? gapA : gapB, gapOther = startIsA ? gapB : gapA
+  const right = rStart > rEnd ? gapStart >= gapOther : gapStart <= gapOther
+  if (right) return out
+  out.delete?.()
+  return taperFilletBuild(base, edge, startIsA ? rEnd : rStart, startIsA ? rStart : rEnd)
+}
+// The edge of `shape` a saved point means (nearest within the pick tolerance).
+function edgeNearPoint(shape, point) {
+  const table = softenEdgeTable(shape)
+  return softenFindEdge(table, { point }, EDGE_PICK_TOL)?.edge || null
+}
+function roundEdgeTaper(base, point, taper) {
+  const edge = edgeNearPoint(base, point)
+  if (!edge) throw new Error('Could not fillet, no edge was selected')
+  const out = taperFilletOnce(base, edge, taper.rStart, taper.rEnd, taper.startPt)
+  if (!out) throw new Error('radius too large for the selected edge(s) — try a smaller radius')
+  return out
+}
+
 // Rounds (or bevels) `base` on the edges near `edgePoints`; throws when no
 // setting works. Never stores anything. `quick` tries only OCC's defaults —
 // for the searches that run many trials (largest radius, partial fillet):
@@ -1158,6 +1218,25 @@ function softenLeftover(shape, left) {
   return out
 }
 
+// Soften's taper check: one edge rounded rStart → rEnd on `shape`, valid and
+// believable (softenLooksRight, judged at the bigger radius — a taper removes
+// less than that, never more).
+function trySoftenTaper(shape, before, c, rStart, rEnd, startPt) {
+  const edge = edgeNearPoint(shape, c.pt)
+  if (!edge) return null
+  const atHalfRadius = () => {
+    const out = taperFilletOnce(shape, edge, rStart / 2, rEnd / 2, startPt)
+    const m = out ? softenMeasure(out) : null
+    out?.delete?.()
+    return m
+  }
+  const out = taperFilletOnce(shape, edge, rStart, rEnd, startPt)
+  if (!out) return null
+  if (softenLooksRight(before, softenMeasure(out), [c], Math.max(rStart, rEnd), atHalfRadius)) return out
+  out.delete?.()
+  return null
+}
+
 function softenShape(base, { radius, minRadius, keepFacePoints, picks }) {
   const t0 = Date.now()
   const floor = Math.min(minRadius ?? SOFTEN_MIN_RADIUS, radius)
@@ -1179,11 +1258,40 @@ function softenShape(base, { radius, minRadius, keepFacePoints, picks }) {
   }
   const rounds = []
   let cur = base
+  // Taper fallback (variable-radius rounding): an edge that won't take rung r
+  // — on its own, or with the edges it meets — tries r at one end easing down
+  // to the biggest smaller rung that fits at the other (both ways round), on
+  // the shape as it is now. Kept only if valid and believable; otherwise the
+  // edge waits for a smaller rung as before. Edges that do take r keep a plain
+  // round (a taper is slower and only helps where something is tight).
+  const tryTaper = (c, r) => {
+    const rec = softenFindEdge(softenEdgeTable(cur), { point: c.pt }, 0.3)
+    const fresh = rec && softenCandidate(rec)
+    if (!fresh) return false
+    const ends = [vec3(rec.edge.pointAt(0)), vec3(rec.edge.pointAt(1))]
+    const measure = softenMeasure(cur)
+    for (const rs of ladder.filter(x => x < r - 1e-9 && x + 1e-9 >= (c.rmax ?? 0))) {
+      for (const startPt of ends) {
+        if (Date.now() - t0 > SOFTEN_TIME_BUDGET_MS) return false
+        const out = trySoftenTaper(cur, measure, fresh, r, rs, startPt)
+        if (out) {
+          rounds.push({ radius: r, edgePoints: [fresh.pt], taper: { rStart: r, rEnd: rs, startPt } })
+          cur = out
+          diag('soften tapered an edge', r + ' → ' + rs + ' mm')
+          return true
+        }
+      }
+    }
+    return false
+  }
   for (const r of ladder) {
     if (Date.now() - t0 > SOFTEN_TIME_BUDGET_MS) break
     const due = remaining.filter(c => c.rmax + 1e-9 >= r)
-    if (!due.length) continue
-    const waiting = remaining.filter(c => c.rmax + 1e-9 < r)
+    let waiting = remaining.filter(c => c.rmax + 1e-9 < r)
+    // On the first (full) rung, edges that can't take it even on their own get
+    // a taper try straight away — before they settle for a smaller round.
+    if (r === ladder[0]) waiting = waiting.filter(c => !tryTaper(c, r))
+    if (!due.length) { remaining = waiting; continue }
     // Measure each edge again on the shape as it is now (earlier roundings change an
     // edge's length and position). One swallowed by a neighbour's rounding no longer
     // exists — drop it quietly.
@@ -1195,11 +1303,12 @@ function softenShape(base, { radius, minRadius, keepFacePoints, picks }) {
       if (fresh) live.push({ ...fresh, rmax: c.rmax })
     }
     const { accepted, rejected, shape: next } = softenRound(cur, live, r, t0 + SOFTEN_TIME_BUDGET_MS)
-    remaining = [...rejected, ...waiting]
     if (accepted.length) {
       rounds.push({ radius: r, edgePoints: accepted.map(a => a.pt) })
       cur = next
     }
+    // Rejected with the others at this size: a taper first, else a smaller rung.
+    remaining = [...rejected.filter(c => !tryTaper(c, r)), ...waiting]
   }
   const left = [...unfit, ...remaining]
   return {
@@ -1920,7 +2029,9 @@ self.onmessage = async function(e) {
       // the set fails, goes straight to the partial search below.
       const bigNew = params.partial && params.edgePoints.length > 6
       try {
-        shape = roundEdges(base, params.edgePoints, params.radius, isChamferOp, bigNew)
+        shape = params.taper
+          ? roundEdgeTaper(base, params.edgePoints[0], params.taper)
+          : roundEdges(base, params.edgePoints, params.radius, isChamferOp, bigNew)
       } catch(e) {
         // `partial` (a NEW fillet, not a replay): round the biggest set of
         // the picked edges that works and report the rest, the way Fusion

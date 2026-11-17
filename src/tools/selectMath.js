@@ -300,7 +300,36 @@ export function carryJoinedEnds(lines, splines, moves, edited) {
 // moved from `before` to `after`; lines and splines NOT in the selection that
 // were joined to their ends follow live, so a closed shape stays closed — the
 // same as dragging a corner. Returns `after` with those ends carried.
+// Follow the corner (Session 4 rules) for a LIVE handle drag too: a
+// horizontal/vertical line joined to a moved end slides and stays straight
+// instead of tipping over (a stretched rectangle side used to drag the side
+// next to it off vertical). Falls back to plain end-carrying if the walk fails.
 export function carrySelectionJoins(before, after, selection) {
+  const selLines = new Set(selection.filter(e => e.kind === 'line').map(e => e.idx))
+  if (!selLines.size) return after
+  const selSplines = new Set(selection.filter(e => e.kind === 'spline').map(e => e.idx))
+  const selArcs = new Set(selection.filter(e => e.kind === 'arc').map(e => e.idx))
+  const queue = []
+  for (const i of selLines) {
+    const a = before.lines[i], b = after.lines[i]
+    if (!a || !b) continue
+    for (const [fx, fy, tx, ty] of [[a.x1, a.y1, b.x1, b.y1], [a.x2, a.y2, b.x2, b.y2]]) {
+      const d = { x: tx - fx, y: ty - fy }
+      if (Math.hypot(d.x, d.y) > 1e-9) queue.push({ p: { x: fx, y: fy }, d })
+    }
+  }
+  if (!queue.length) return after
+  const arcsB = before.arcs || [], arcsA = after.arcs || arcsB
+  const outL = after.lines.map(x => ({ ...x }))
+  const outA = arcsA.map(a => ({ ...a }))
+  const outS = after.splines.map(s => (Array.isArray(s.points) ? { ...s, points: s.points.map(p => ({ ...p })) } : s))
+  const res = spreadCornerMove(before.lines, arcsB, before.splines, outL, outA, outS, queue, [], new Set(selLines), selArcs, selSplines)
+  if (!res.refused) return { ...after, lines: res.lines, arcs: res.arcs, splines: res.splines }
+  return carrySelectionJoinsSimple(before, after, selection)
+}
+
+// The old way: joined ends just move with the selected line's ends.
+function carrySelectionJoinsSimple(before, after, selection) {
   const selLines = new Set(selection.filter(e => e.kind === 'line').map(e => e.idx))
   const selSplines = new Set(selection.filter(e => e.kind === 'spline').map(e => e.idx))
   if (!selLines.size) return after
@@ -384,7 +413,7 @@ export function moveCornerFollowing(lines, arcs, splines, P, d, fixedPts = [], s
 }
 
 // The shared walk: each queued {p, d} moves whatever meets at p (see the rules above).
-function spreadCornerMove(lines, arcs, splines, outL, outA, outS, queue, fixedPts, doneLines, doneArcs = null) {
+function spreadCornerMove(lines, arcs, splines, outL, outA, outS, queue, fixedPts, doneLines, doneArcs = null, skipSplines = null) {
   const near = (a, b) => Math.hypot(a.x - b.x, a.y - b.y) <= CORNER_JOIN_TOL
   doneArcs = doneArcs || new Set()
   const doneSplineEnds = new Set()
@@ -423,7 +452,7 @@ function spreadCornerMove(lines, arcs, splines, outL, outA, outS, queue, fixedPt
       queue.push({ p: atS ? en : s, d })
     })
     splines.forEach((sp, i) => {
-      if (!isOpenEditable(sp)) return
+      if (!isOpenEditable(sp) || skipSplines?.has(i)) return
       const last = sp.points.length - 1
       for (const k of [0, last]) {
         const key = i + ':' + k

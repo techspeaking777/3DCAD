@@ -7431,13 +7431,10 @@ const App3D = forwardRef(function App3D(props, ref) {
         // A pattern copy keeps its place as original + steps, so the move is
         // one more step.
         setFeatures(prev => prev.map(f => f.id===feat.id ? { ...f, transform: newTransform, ...(f.patternStep ? { patternStep: [...f.patternStep, workerParams] } : {}) } : f))
-        await rebuildPatternCopies({ ...solid, transform: newTransform })
-        // Mirrors of this body stay put — they keep the source position
-        // snapshotted when they were made. Older mirrors without a snapshot
-        // get frozen at the source's position before this move.
-        const oldTransform = solid.transform ?? null
-        setFeatures(prev => prev.map(f => f.operation === 'mirror' && f.sourceSolidId === solidId && !('sourceTransform' in f)
-          ? { ...f, sourceTransform: oldTransform } : f))
+        // Its pattern copies and its mirrors follow (a mirror is always the
+        // mirror image of where the source is now — user decision 2026-11-17,
+        // replacing the 9 Nov 'mirrors stay put').
+        await rebuildDependentMirrors({ ...solid, group, transform: newTransform })
       }
       // Move/Snap Move (not Copy) is the only case that skips the
       // preview-position reset: its solidId gets a freshly rebuilt group
@@ -9389,17 +9386,18 @@ const App3D = forwardRef(function App3D(props, ref) {
   // to cascade to ITS dependents in turn — always terminates without a cycle
   // guard because a mirror's sourceSolidId always points at a solid created
   // earlier, so the dependency graph can't loop back on itself.
-  // The source Move/Rotate a mirror replays: the one snapshotted when the
-  // mirror was made (null = source wasn't moved). Mirrors saved before the
-  // snapshot existed fall back to the source's current transform.
+  // The source Move/Rotate a mirror replays: the source's CURRENT one — a mirror
+  // is always the mirror image of where its source is now, so moving the
+  // source (even after mirroring) carries the mirror along, mirrored (user
+  // decision 2026-11-17). The `sourceTransform` snapshot a mirror feature
+  // still carries (from 9 Nov, when mirrors stayed put) is no longer read.
   function mirrorSourceTransform(mirrorFeat, sourceSolid) {
-    return 'sourceTransform' in mirrorFeat ? mirrorFeat.sourceTransform : sourceSolid.transform
+    return sourceSolid.transform ?? null
   }
-  // The source's stored shape can stand in for a cold rebuild only when it sits
-  // where this mirror expects it: the mirror's snapshotted source move equals the
-  // source's current one (a source moved AFTER mirroring is mirrored as it was).
-  function mirrorCanReuseSource(mirrorFeat, sourceSolid) {
-    return JSON.stringify(mirrorSourceTransform(mirrorFeat, sourceSolid) ?? null) === JSON.stringify(sourceSolid.transform ?? null)
+  // The source's stored shape already includes its current move, so it can
+  // always stand in for a cold rebuild (kept as a function for the call sites).
+  function mirrorCanReuseSource() {
+    return true
   }
 
   async function rebuildDependentMirrors(solid) {

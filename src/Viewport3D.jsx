@@ -380,6 +380,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     onScaleChange,
     onPlaneClick,
     onFaceClick,          // called with FacePlane when a solid face is clicked
+    onSmoothedFaceClick,  // a face-pick click landed on a smoothed body (App3D Smooth) instead
     sketchArmed = false,
     // true while sketchArmed's face-pick is for Export Face DXF (or another
     // multi-face-pick tool, e.g. Shell) rather than starting a sketch —
@@ -420,6 +421,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
   const overlayRedrawRef = useRef(null)
   // Face hover state
   const hoveredFaceRef   = useRef(null)  // { mesh, origMat }
+  const smoothedFaceHoverRef = useRef(false)  // the face under the cursor is on a smoothed body
   const sketchArmedRef   = useRef(false)
   const mirrorPlanePickArmedRef = useRef(false)
   const dxfPickModeRef   = useRef(false)
@@ -1227,6 +1229,10 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       // they can't shadow the real face mesh underneath during face-pick sketching.
       ? (s.raycaster.intersectObjects(s.solidsGroup.children, true).find(h => h.object.isMesh && !h.object.userData?.isSolidEdge) || null)
       : null
+    // A smoothed body (App3D's Smooth) shows a mesh that isn't the real model's
+    // faces — no face hover on it (a sketch frame there would be meaningless).
+    // The click still reaches App3D, which explains why nothing happens.
+    const faceOnSmoothed = !!faceMeshHit?.object?.parent?.userData?.smoothed
     const planeHit = (!extrudeArmedRef.current && s.workPlanes && showWorkPlanesRef.current && !s.tween?.active)
       ? hitTestPlanes(s.raycaster, s.workPlanes)
       : null
@@ -1238,10 +1244,11 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
     // Mirror's Pick Plane keeps nearest-wins: there, picking a plane that
     // passes THROUGH the body is the whole point.
     const faceWins = !!faceMeshHit && (!planeHit || !mirrorPlanePickArmedRef.current || faceMeshHit.distance < planeHit.distance)
+    smoothedFaceHoverRef.current = sketchArmedRef.current && faceWins && faceOnSmoothed
 
     // ── Face hover (only when SKETCH tool is armed) ──
     if (sketchArmedRef.current && s.solidsGroup && !s.tween?.active) {
-      const hitMesh = faceWins ? faceMeshHit.object : null
+      const hitMesh = faceWins && !faceOnSmoothed ? faceMeshHit.object : null
       if (hitMesh) {
         // A solid's faces all live on ONE Mesh (see cadMesh.js) — refresh the
         // stored hit every move so it tracks the current face/point even while
@@ -1344,6 +1351,8 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
         return
       }
     }
+
+    if (sketchArmedRef.current && smoothedFaceHoverRef.current && onSmoothedFaceClick) { onSmoothedFaceClick(); return }
 
     // ── Work plane click (same gate as hover above — belt and suspenders
     // in case hoveredPlaneRef is still set from a moment ago) ──
@@ -1721,7 +1730,7 @@ const Viewport3D = forwardRef(function Viewport3D(props, ref) {
       raycaster.setFromCamera(ndc, s.camera)
       const meshHit = raycaster.intersectObjects(s.solidsGroup.children, true)
         .find(h => h.object.isMesh && !h.object.userData?.isSolidEdge)
-      if (!meshHit?.face) { filletFaceHoverRef.current = null; return false }
+      if (!meshHit?.face || meshHit.object.parent?.userData?.smoothed) { filletFaceHoverRef.current = null; return false }
       const normal = meshHit.face.normal.clone().transformDirection(meshHit.object.matrixWorld).normalize()
       const loops = facePickBoundaryLoops({ object: meshHit.object, point: meshHit.point }, normal)
       filletFaceHoverRef.current = loops?.length ? { loops, label: meshHit.point.clone() } : null

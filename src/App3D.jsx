@@ -31,6 +31,7 @@ import { cadEngine } from './cadEngine.js'
 import ReplayPanel from './tools/ReplayPanel.jsx'
 import { featureNeeds, isBodyOwner, baseFeatureOf } from './tools/featureDeps.js'
 import { replicadMeshToThree } from './cadMesh.js'
+import { smoothMeshAsync } from './tools/smoothClient.js'
 import TracerPanel from './tools/TracerPanel.jsx'
 import TextPanel from './tools/TextPanel.jsx'
 import { springFrame, springDims, springProfileTouchesAxis } from './tools/springMath.js'
@@ -68,7 +69,7 @@ import { resamplePolyline, projectedProfilePlane, dedupePoints3d, smoothPoints3d
 const SOLID_ICON_COMPONENTS = {
   extrude: IconExtrude3D, cutout: IconCutout3D, fillet3d: IconFillet3D,
   mirror3d: IconMirror3D, loft3d: IconLoft3D, join3d: IconJoin3D, subtract3d: IconSubtract3D, movecopy3d: IconMoveCopy3D,
-  sweep3d: IconSweep3D, revolve: IconRevolve3D, spring3d: IconSpring3D, shell3d: IconShell3D, pattern3d: IconPattern3D, soften3d: IconSoften3D,
+  sweep3d: IconSweep3D, revolve: IconRevolve3D, spring3d: IconSpring3D, shell3d: IconShell3D, pattern3d: IconPattern3D, soften3d: IconSoften3D, smooth3d: IconSoften3D,
   // Reuses the additive Sweep icon's shape, rendered in Cutout's color —
   // same "one glyph, color signals cut variant" convention loftcutout/
   // revolvecut use.
@@ -91,7 +92,7 @@ const SOLID_ICON_COMPONENTS = {
 // advanced.
 const ADVANCED_SOLID_TOOL_IDS = new Set([
   'revolve', 'revolvecut', 'loft3d', 'loftcutout',
-  'sweep3d', 'sweepcut', 'spring3d', 'springcut', 'shell3d', 'pattern3d',
+  'sweep3d', 'sweepcut', 'spring3d', 'springcut', 'shell3d', 'pattern3d', 'smooth3d',
 ])
 // Shape tools that share ONE sidebar button with a "+ add / − cut" flyout.
 // (Extrude and Cutout are two separate buttons side by side — 2026-11-18.)
@@ -782,6 +783,46 @@ function computeSweepProfilePlane(basis, path) {
 // parameter (not read from component closure) so callers control exactly
 // which snapshot to use — matters for rebuildDependentMirrors, which must
 // use freshly-built state, not a stale render's closure.
+// Binary STL of `plainBlob` (the worker's binary STL, or null) plus every
+// geometry in `geos` (Three.js, scene px — 1 mm = 2 px). Used by Export STL
+// for smoothed bodies, whose shape exists only as the mesh on screen.
+async function mergeSmoothedIntoStl(plainBlob, geos) {
+  let plainTris = 0, plainBody = null
+  if (plainBlob) {
+    const buf = await plainBlob.arrayBuffer()
+    plainTris = new DataView(buf).getUint32(80, true)
+    plainBody = new Uint8Array(buf, 84, plainTris * 50)
+  }
+  const extra = geos.reduce((n, g) => n + g.index.count / 3, 0)
+  const out = new ArrayBuffer(84 + (plainTris + extra) * 50)
+  const dv = new DataView(out)
+  const header = 'Retro CAD STL (smoothed)'
+  for (let i = 0; i < header.length; i++) dv.setUint8(i, header.charCodeAt(i))
+  dv.setUint32(80, plainTris + extra, true)
+  if (plainBody) new Uint8Array(out, 84, plainBody.length).set(plainBody)
+  let o = 84 + plainTris * 50
+  for (const g of geos) {
+    const P = g.attributes.position.array, I = g.index.array
+    for (let t = 0; t < I.length; t += 3) {
+      const a = I[t] * 3, b = I[t + 1] * 3, c = I[t + 2] * 3
+      const ux = P[b] - P[a], uy = P[b + 1] - P[a + 1], uz = P[b + 2] - P[a + 2]
+      const vx = P[c] - P[a], vy = P[c + 1] - P[a + 1], vz = P[c + 2] - P[a + 2]
+      let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx
+      const l = Math.hypot(nx, ny, nz) || 1
+      nx /= l; ny /= l; nz /= l
+      dv.setFloat32(o, nx, true); dv.setFloat32(o + 4, ny, true); dv.setFloat32(o + 8, nz, true)
+      let q = o + 12
+      for (const v of [a, b, c]) {
+        dv.setFloat32(q, P[v] / 2, true); dv.setFloat32(q + 4, P[v + 1] / 2, true); dv.setFloat32(q + 8, P[v + 2] / 2, true)
+        q += 12
+      }
+      dv.setUint16(o + 48, 0, true)
+      o += 50
+    }
+  }
+  return new Blob([out], { type: 'model/stl' })
+}
+
 function buildSolidOpsForWorker(solid, features) {
   return features
     .filter(f => f.solidId === solid.id && (f.operation === 'cutout' || f.type === 'fillet' || f.type === 'shell'))
@@ -1370,6 +1411,7 @@ function featureOpColor(feat) {
   if (feat.type === 'sketch') return '#4FC3F7'
   if (feat.type === 'fillet') return '#A470F2'
   if (feat.type === 'shell') return '#4DB6AC'
+  if (feat.type === 'smooth') return '#A470F2'
   const op = feat.operation || 'extrude'
   return {
     extrude: '#FBDA2D', revolve: '#FBDA2D', cutout: '#53D3E4',
@@ -1389,6 +1431,7 @@ function RowIcon({ kind, color, size=13 }) {
     cutout:  <path d="M6.5 2v8M3 6.5L6.5 10l3.5-3.5" {...p}/>,
     revolve: <><path d="M10.5 6.5a4 4 0 1 1-1.3-2.95" {...p}/><path d="M10.8 2.2l.3 2.4-2.4-.4" {...p}/></>,
     fillet:  <path d="M2 10q0-8 8-8" {...p}/>,
+    smooth:  <rect x="2" y="3" width="9" height="7" rx="3" {...p}/>,
     shell:   <><rect x="2" y="2" width="9" height="9" rx="1" {...p}/><rect x="4" y="4" width="5" height="5" rx="0.5" strokeDasharray="1.2 1.2" {...p}/></>,
     mirror:  <><line x1="6.5" y1="1" x2="6.5" y2="12" strokeDasharray="1.5 1.5" {...p}/><path d="M4.5 4L2.5 5.5 4.5 7" {...p}/><path d="M8.5 4l2 1.5-2 1.5" {...p}/></>,
     join:    <><circle cx="5" cy="6.5" r="3.5" {...p}/><circle cx="8" cy="6.5" r="3.5" {...p}/></>,
@@ -1471,7 +1514,7 @@ function CutoutGlyph({ color='#7fa8cc' }) {
   )
 }
 
-function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, onEditShellThickness, onEditLoft, hiddenSolidIds, onToggleBodyVisible, onConvertSketch, onPatternCutout, hasSolids, brokenFeatures }) {
+function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onToggleVisible, onDelete, onRename, onEditDepth, onEditExtent, onEditFilletRadius, onEditShellThickness, onEditSmooth, onEditLoft, hiddenSolidIds, onToggleBodyVisible, onConvertSketch, onPatternCutout, hasSolids, brokenFeatures }) {
   const [editingName, setEditingName] = useState(null)
   const [hoverName, setHoverName] = useState(null)   // row whose name shows the rename cue
 
@@ -1525,6 +1568,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
           const isExtrude = feat.type === 'extrude'
           const isFillet = feat.type === 'fillet'
           const isShell = feat.type === 'shell'
+          const isSmooth = feat.type === 'smooth'
           const isMirror = isExtrude && feat.operation === 'mirror'
           const isJoin = isExtrude && feat.operation === 'join'
           const isLoft = isExtrude && feat.operation === 'loft'
@@ -1562,7 +1606,7 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
             ['extrude','revolve','loft','sweep','spring','mirror','join','import'].includes(feat.operation || 'extrude')
           const isBodyHidden = isBodyOwner && hiddenSolidIds?.includes(feat.solidId)
 
-          const rowKind = isSketch ? 'sketch' : isShell ? 'shell' : isFillet ? 'fillet' : isMirror ? 'mirror'
+          const rowKind = isSketch ? 'sketch' : isShell ? 'shell' : isSmooth ? 'smooth' : isFillet ? 'fillet' : isMirror ? 'mirror'
             : isJoin ? 'join' : isLoft ? 'loft' : isSweep ? 'sweep' : isSpring ? 'spring' : feat.operation === 'cutout' ? 'cutout'
             : feat.operation === 'revolve' ? 'revolve' : feat.operation === 'import' ? 'import' : 'extrude'
           const rowColor = featureOpColor(feat)
@@ -1778,6 +1822,22 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                       >✕</button>
                     </>
                   )}
+                  {isSmooth && (
+                    <>
+                      {!sketchMode && (
+                        <button title="Edit Smooth (radius, faces kept flat)"
+                          onClick={e=>{e.stopPropagation(); onEditSmooth(feat.id)}}
+                          style={{background:'none',border:'none',cursor:'pointer',
+                            padding:'1px 3px', display:'flex', alignItems:'center'}}
+                        ><RulerGlyph/></button>
+                      )}
+                      <button title="Delete — the body goes back to its sharp edges"
+                        onClick={e=>{e.stopPropagation(); onDelete(feat.id)}}
+                        style={{background:'none',border:'none',cursor:'pointer',
+                          padding:'1px 3px', fontSize:11, color:'#ff6b5e'}}
+                      >✕</button>
+                    </>
+                  )}
                   {isShell && (
                     <>
                       {!sketchMode && (
@@ -1796,6 +1856,13 @@ function FeatureTree({ features, activeSketchId, sketchMode, onEditSketch, onTog
                   )}
                 </div>
               </div>
+
+              {/* Smooth subtitle: radius + faces kept flat */}
+              {isSmooth && (
+                <div style={{color:'#8fa0b8', fontSize:10, marginLeft:20, marginTop:2}}>
+                  R{feat.radius}mm{(feat.keepFlat||[]).length ? ` · ${feat.keepFlat.length} face${feat.keepFlat.length>1?'s':''} kept flat` : ' · all edges'} · last step
+                </div>
+              )}
 
               {/* Sketch subtitle */}
               {isSketch && (
@@ -2225,7 +2292,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }, [features])
   const [activeSketchId,setActiveSketchId]=useState(null)  // which sketch is being edited
-  const featureCountRef=useRef({sketch:0,extrude:0,cutout:0,fillet:0,chamfer:0,mirror:0,join:0,subtract:0,loft:0,sweep:0,spring:0,shell:0,soften:0})       // for auto-naming
+  const featureCountRef=useRef({sketch:0,extrude:0,cutout:0,fillet:0,chamfer:0,mirror:0,join:0,subtract:0,loft:0,sweep:0,spring:0,shell:0,soften:0,smooth:0})       // for auto-naming
 
   const viewport3dRef=useRef(null)
   const getViewCubeAxes=useCallback(()=>viewport3dRef.current?.getCameraAxes?.()??null,[])
@@ -2296,6 +2363,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     else if (id==='fillet3d') activateFillet3DTool()
     else if (id==='shell3d') activateShell3DTool()
     else if (id==='soften3d') activateSoften3DTool()
+    else if (id==='smooth3d') activateSmooth3DTool()
     else if (id==='pattern3d') activatePattern3DTool()
     else if (id==='mirror3d') activateMirror3DTool()
     else if (id==='join3d') activateJoin3DTool()
@@ -2325,7 +2393,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // space that doesn't belong to any visible sketch. Snapping back to
   // 'select' the moment sketchMode goes false closes that off in one place
   // instead of guarding every sketch tool's click handler individually.
-  const ALWAYS_AVAILABLE_TOOLS = useRef(new Set(['select','extrude','cutout','fillet3d','shell3d','soften3d','measure','exportfacedxf','exportstl','exportstep','color','join3d','subtract3d','mirror3d','loft3d'])).current
+  const ALWAYS_AVAILABLE_TOOLS = useRef(new Set(['select','extrude','cutout','fillet3d','shell3d','soften3d','smooth3d','measure','exportfacedxf','exportstl','exportstep','color','join3d','subtract3d','mirror3d','loft3d'])).current
   useEffect(() => {
     if (!sketchMode && tool && !ALWAYS_AVAILABLE_TOOLS.has(tool)) setTool('select')
   }, [sketchMode])
@@ -2885,7 +2953,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   async function collectShapeSnapshots(budgetBytes = Infinity) {
     if (cadEngine.pendingCount > 0) return null
     const topIds = new Set(features
-      .filter(f => f.type !== 'sketch' && f.type !== 'fillet' && f.type !== 'shell' && f.operation !== 'cutout' && !f.joinedInto)
+      .filter(f => f.type !== 'sketch' && f.type !== 'fillet' && f.type !== 'shell' && f.type !== 'smooth' && f.operation !== 'cutout' && !f.joinedInto)
       .map(f => f.solidId))
     const wanted = solids.filter(s => s.group && topIds.has(s.id))
     const cache = snapshotCacheRef.current
@@ -5328,6 +5396,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     featureCountRef.current.soften = (featureCountRef.current.soften ?? 0) + 1
     return `Soften ${featureCountRef.current.soften}`
   }
+  function nextSmoothName() {
+    featureCountRef.current.smooth = (featureCountRef.current.smooth ?? 0) + 1
+    return `Smooth ${featureCountRef.current.smooth}`
+  }
   function nextChamferName() {
     featureCountRef.current.chamfer += 1
     return `Chamfer ${featureCountRef.current.chamfer}`
@@ -5434,6 +5506,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (tool==='exportfacedxf') { handleExportFaceDXFFaceClick(facePlane); return }
     if (tool==='shell3d') { handleShellFaceClick(facePlane); return }
     if (tool==='soften3d') { handleSoftenFaceClick(facePlane); return }
+    if (tool==='smooth3d') { handleSmoothFaceClick(facePlane); return }
+    // A smoothed body's faces aren't the real model — see the Smooth section.
+    if (isSmoothedSolid(facePlane.solidId)) { refuseSmoothedPick(); return }
     if (extrudeTool && extrudeOffsetMode) { handleExtrudeOffsetPlanePick({ kind:'face', facePlane }); return }
     if (extrudeState) return  // step 3 (depth): ignore stray face clicks
     enterSketch(facePlane)
@@ -6806,6 +6881,248 @@ const App3D = forwardRef(function App3D(props, ref) {
       setTimeout(() => setCadError(null), 6000)
     }
   }
+
+  // ── Smooth (3D) ───────────────────────────────────────────────────────────
+  // Rounds EVERY outside edge and corner of a body by one radius (inside corners
+  // stay sharp), optionally keeping chosen flat faces flat with a crisp edge.
+  // Unlike Fillet/Soften it never asks OpenCascade to round anything: the body's
+  // display mesh is "shrunk then grown back" on a 3D grid in a worker
+  // (tools/smoothMesh.js via smoothWorker.js), so it can't fail on awkward
+  // edges. The result is a MESH, so Smooth is always the LAST step on a body:
+  // the feature `{type:'smooth', solidId, radius, keepFlat:[{n, d, p}]}` is only
+  // ever applied to what's shown (and to Export STL) — the B-rep underneath, and
+  // every rebuild/replay, are untouched. Faces and edges of a smoothed body can't
+  // be picked by other tools (it would mean sketching on a surface that isn't
+  // there); delete the Smooth row to carry on modelling it. Step 1: pick the
+  // body (skipped when there's only one). Step 2: optionally click faces to keep
+  // flat; type the radius; Enter. Re-running Smooth on a smoothed body (or the
+  // row's ruler) edits its Smooth.
+  const [smooth3dSolidId, setSmooth3dSolidId] = useState(null)
+  const [smooth3dKeepFaces, setSmooth3dKeepFaces] = useState([])   // [{solidId, point(px), normal, key}]
+  const [smooth3dRadiusInput, setSmooth3dRadiusInput] = useState('2')
+  const [smooth3dBodyHoverId, setSmooth3dBodyHoverId] = useState(null)
+  const [smooth3dHandlePos, setSmooth3dHandlePos] = useState(null)
+
+  const smoothFeatureOf = (solidId, feats = features) => feats.find(f => f.type === 'smooth' && f.solidId === solidId) || null
+  // True when a body is shown smoothed (its faces/edges aren't the real model).
+  const isSmoothedSolid = solidId => solidId != null && !!solids.find(s => s.id === solidId)?.group?.userData?.smoothed
+  function refuseSmoothedPick() {
+    setCadError('That body is smoothed — Smooth is its last step. Delete Smooth in the Feature Tree to keep modelling it.')
+    setTimeout(() => setCadError(null), 6000)
+  }
+
+  function activateSmooth3DTool(solidId = null) {
+    resetSelection()
+    resetDrawState()
+    restoreHiddenEditSolid()
+    if (sketchModeRef.current) {
+      setSketchMode(false)
+      setActivePlane(null)
+      setActiveSketchId(null)
+      activePlaneRef.current = null
+      viewport3dRef.current?.restoreSavedView()
+    }
+    setTool('smooth3d')
+    setExtrudeTool(null)
+    setExtrudeState(null)
+    setEditingFeatureId(null)
+    resetSmooth3D()
+    if (solidId != null) pickSmoothBody(solidId)
+  }
+  function resetSmooth3D() {
+    setSmooth3dSolidId(null)
+    setSmooth3dKeepFaces([])
+    setSmooth3dBodyHoverId(null)
+    setSmooth3dHandlePos(null)
+  }
+  // Picking a body that already has a Smooth loads it for editing.
+  function pickSmoothBody(solidId, handlePos = null) {
+    setSmooth3dSolidId(solidId)
+    setSmooth3dBodyHoverId(null)
+    setSmooth3dHandlePos(handlePos)
+    const f = smoothFeatureOf(solidId)
+    if (f) {
+      setSmooth3dRadiusInput(String(f.radius))
+      setSmooth3dKeepFaces((f.keepFlat || []).map(k => ({
+        solidId, point: { x: k.p[0] * 2, y: k.p[1] * 2, z: k.p[2] * 2 }, normal: { x: k.n[0], y: k.n[1], z: k.n[2] },
+        key: `${solidId}_${k.p.map(v => (v * 2).toFixed(1)).join('_')}`,
+      })))
+    } else setSmooth3dKeepFaces([])
+  }
+  function handleSmoothHover(e) {
+    if (tool !== 'smooth3d' || smooth3dSolidId != null) return
+    const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
+    const id = hit?.solidId ?? null
+    setSmooth3dBodyHoverId(prev => id === prev ? prev : id)
+  }
+  function handleSmoothClick(e) {
+    if (tool !== 'smooth3d' || smooth3dSolidId != null) return
+    const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
+    if (!hit || hit.solidId == null) return
+    pickSmoothBody(hit.solidId, { x: e.clientX + 20, y: e.clientY - 20 })
+  }
+  // A face click toggles it in/out of the faces kept flat.
+  function handleSmoothFaceClick(facePlane) {
+    if (smooth3dSolidId == null || facePlane.solidId !== smooth3dSolidId) return
+    const point = { x: facePlane.point.x, y: facePlane.point.y, z: facePlane.point.z }
+    const normal = { x: facePlane.normal.x, y: facePlane.normal.y, z: facePlane.normal.z }
+    const key = `${facePlane.solidId}_${[point.x, point.y, point.z].map(v => v.toFixed(1)).join('_')}`
+    setSmooth3dKeepFaces(prev => {
+      // The same face clicked again (anywhere on it) = stop keeping it flat.
+      const same = prev.findIndex(f => {
+        const dot = f.normal.x * normal.x + f.normal.y * normal.y + f.normal.z * normal.z
+        const off = (point.x - f.point.x) * f.normal.x + (point.y - f.point.y) * f.normal.y + (point.z - f.point.z) * f.normal.z
+        return dot > 0.999 && Math.abs(off) < 0.05
+      })
+      return same >= 0 ? prev.filter((_, i) => i !== same) : [...prev, { solidId: facePlane.solidId, point, normal, key }]
+    })
+  }
+  function commitSmooth3D() {
+    if (smooth3dSolidId == null) return
+    const solidId = smooth3dSolidId
+    const radius = parseFloat(smooth3dRadiusInput)
+    if (!(radius > 0)) {
+      setCadError('Smooth needs a radius above 0 mm.')
+      setTimeout(() => setCadError(null), 4000)
+      return
+    }
+    const targetSolid = solids.find(s => s.id === solidId)
+    if (!targetSolid) { resetSmooth3D(); return }
+    const keepFlat = smooth3dKeepFaces.map(k => {
+      const n = [k.normal.x, k.normal.y, k.normal.z], p = [k.point.x / 2, k.point.y / 2, k.point.z / 2]
+      return { n, d: n[0] * p[0] + n[1] * p[1] + n[2] * p[2], p }
+    })
+    feat3d.commit(features)
+    const existing = smoothFeatureOf(solidId)
+    let id
+    if (existing) {
+      id = existing.id
+      setFeatures(prev => prev.map(f => f.id === id ? { ...f, radius, keepFlat } : f))
+    } else {
+      id = `smooth-${solidId}-${Date.now()}`
+      const name = nextSmoothName()
+      setFeatures(prev => [...prev, { id, type: 'smooth', name, solidId, radius, keepFlat, color: targetSolid.color }])
+    }
+    smoothNoticeRef.current = id
+    resetSmooth3D()
+    setTool('select')
+  }
+  // Feature Tree ruler on a Smooth row: re-open Smooth on its body.
+  function handleEditSmooth(featureId) {
+    const f = features.find(x => x.id === featureId)
+    if (!f || f.type !== 'smooth') return
+    if (!solids.some(s => s.id === f.solidId)) return
+    activateSmooth3DTool(f.solidId)
+  }
+
+  // Shows each body smoothed or not, to match its Smooth feature. The smoothed
+  // geometry replaces the face mesh's geometry IN the body's own Three.js group
+  // (so `solids` doesn't change and nothing re-renders); the real mesh is kept
+  // on the group to put back. A rebuilt body arrives as a new group, so it is
+  // simply smoothed again. While the Smooth tool is working on a body it shows
+  // the real faces (they're what the keep-flat clicks pick).
+  const smoothJobsRef = useRef(new Map())   // group uuid → key being worked out
+  const smoothNoticeRef = useRef(null)      // Smooth feature just applied — report how it went
+  const smoothCacheRef = useRef(new Map())  // settings + mesh checksum → smoothed geometry (last few)
+  const [smoothWorking, setSmoothWorking] = useState(0)
+  useEffect(() => {
+    const faceMeshOf = g => g.children.find(o => o.isMesh && !o.userData?.isSolidEdge)
+    // The last few smoothed geometries are kept, keyed by the Smooth settings
+    // AND the body's real mesh (a cheap checksum of it), so delete → undo
+    // (which rebuilds the bodies), or opening Smooth and cancelling, swaps
+    // back instantly instead of smoothing again.
+    const cache = smoothCacheRef.current
+    const meshSum = geo => {
+      const P = geo.attributes.position.array, I = geo.index.array
+      let a = P.length * 31 + I.length, b = 0
+      for (let i = 0; i < P.length; i++) { a = (a + P[i] * (1 + (i % 7))) % 1e9; b += P[i] * P[i] }
+      return `${P.length}:${I.length}:${a.toFixed(3)}:${b.toFixed(1)}`
+    }
+    const showRaw = g => {
+      const m = faceMeshOf(g)
+      if (m && g.userData.rawFaceGeo && m.geometry !== g.userData.rawFaceGeo) m.geometry = g.userData.rawFaceGeo
+      // Edge lines back on layer 0 (= drawn and pickable again).
+      g.traverse(o => { if (o.userData?.isSolidEdge) o.layers.set(0) })
+      g.userData.smoothed = false
+    }
+    const smoothGeometry = r => {
+      const P = r.positions
+      for (let i = 0; i < P.length; i++) P[i] *= 2   // mm → scene px
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(P, 3))
+      geo.setIndex(new THREE.BufferAttribute(r.indices, 1))
+      geo.computeVertexNormals()
+      geo.computeBoundingSphere()
+      return geo
+    }
+    const showSmooth = (g, geo) => {
+      const m = faceMeshOf(g); if (!m) return
+      if (!g.userData.rawFaceGeo) g.userData.rawFaceGeo = m.geometry
+      m.geometry = geo
+      // The sharp edge lines of the real body would float over the rounds —
+      // take them off every layer: not drawn, and not pickable by the edge tools.
+      g.traverse(o => { if (o.userData?.isSolidEdge) o.layers.disableAll() })
+      g.userData.smoothed = true
+    }
+    for (const s of solids) {
+      const g = s.group
+      if (!g?.userData?.isReplicadSolid) continue
+      const f = smoothFeatureOf(s.id)
+      const editing = tool === 'smooth3d' && smooth3dSolidId === s.id
+      const want = f && !editing ? JSON.stringify([f.radius, f.keepFlat || []]) : null
+      if (want === (g.userData.smoothKey ?? null)) continue
+      if (want == null) { smoothJobsRef.current.delete(g.uuid); showRaw(g); g.userData.smoothKey = null; continue }
+      if (smoothJobsRef.current.get(g.uuid) === want) continue
+      const raw = g.userData.rawFaceGeo || faceMeshOf(g)?.geometry
+      if (!raw?.index) continue
+      const cacheKey = want + '|' + meshSum(raw)
+      const cached = cache.get(cacheKey)
+      if (cached) { smoothJobsRef.current.delete(g.uuid); showSmooth(g, cached); g.userData.smoothKey = want; continue }
+      smoothJobsRef.current.set(g.uuid, want)
+      const src = raw.attributes.position.array
+      const positions = new Float32Array(src.length)
+      for (let i = 0; i < src.length; i++) positions[i] = src[i] / 2   // scene px → mm
+      const indices = new Uint32Array(raw.index.array)
+      const featId = f.id, radius = f.radius, keepCount = (f.keepFlat || []).length
+      setSmoothWorking(n => n + 1)
+      smoothMeshAsync(positions, indices, { radius, keepFlat: f.keepFlat || [] })
+        .then(r => {
+          const geo = smoothGeometry(r)
+          cache.set(cacheKey, geo)
+          // Keep the last few only (a student trying radii). Not disposed here —
+          // one may still be on screen; three.js frees a geometry's GPU copy when
+          // its body is removed, and re-uploads it if it's shown again.
+          for (const k of cache.keys()) { if (cache.size <= 4) break; cache.delete(k) }
+          if (smoothJobsRef.current.get(g.uuid) !== want) return   // asked again since
+          showSmooth(g, geo)
+          g.userData.smoothKey = want
+          setBrokenEntry(featId, null)
+          if (smoothNoticeRef.current === featId) {
+            smoothNoticeRef.current = null
+            const lost = keepCount - r.keptFlat
+            if (lost > 0) {
+              setCadError(`Smoothed — ${lost} kept-flat face${lost > 1 ? 's are' : ' is'} no longer on the body, so ${lost > 1 ? 'they were' : 'it was'} rounded too.`)
+              setTimeout(() => setCadError(null), 7000)
+            } else flashSaved(`Smoothed with a ${radius} mm radius`, 3000)
+          }
+        })
+        .catch(err => {
+          if (smoothJobsRef.current.get(g.uuid) !== want) return
+          showRaw(g)
+          g.userData.smoothKey = want   // don't retry the same thing in a loop
+          setBrokenEntry(featId, `Smooth couldn't be done: ${err.message}`)
+          if (smoothNoticeRef.current === featId) {
+            smoothNoticeRef.current = null
+            setCadError(`Smooth couldn't be done: ${err.message}`)
+            setTimeout(() => setCadError(null), 7000)
+          }
+        })
+        .finally(() => {
+          if (smoothJobsRef.current.get(g.uuid) === want) smoothJobsRef.current.delete(g.uuid)
+          setSmoothWorking(n => n - 1)
+        })
+    }
+  }, [solids, features, tool, smooth3dSolidId])
 
   // ── Mirror (3D feature) state machine ─────────────────────────────────────
   // Step 1: click bodies directly in the 3D view to accumulate mirror3dSel
@@ -9815,6 +10132,18 @@ const App3D = forwardRef(function App3D(props, ref) {
   useEffect(() => {
     if (tool !== 'soften3d') resetSoften3D()
   }, [tool])
+  useEffect(() => {
+    if (tool !== 'smooth3d') resetSmooth3D()
+  }, [tool])
+  useEffect(() => {
+    if (tool !== 'smooth3d' || smooth3dSolidId != null || smooth3dBodyHoverId == null) { if (tool === 'smooth3d') viewport3dRef.current?.clearSolidHover(); return }
+    viewport3dRef.current?.hoverSolid(smooth3dBodyHoverId)
+  }, [tool, smooth3dSolidId, smooth3dBodyHoverId])
+  useEffect(() => {
+    if (tool !== 'smooth3d' || smooth3dSolidId != null) return
+    const real = solids.filter(s => s.id !== '__preview__')
+    if (real.length === 1) pickSmoothBody(real[0].id)
+  }, [tool, smooth3dSolidId, solids])
   // Body hover glow while picking the body, same as Join/Mirror.
   useEffect(() => {
     if (tool !== 'soften3d' || soften3dSolidId != null || soften3dBodyHoverId == null) { if (tool === 'soften3d') viewport3dRef.current?.clearSolidHover(); return }
@@ -11293,7 +11622,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     const tRestored = performance.now()
     let rebuiltCount = 0
     for (const feat of loadedFeatures) {
-      if (feat.type === 'sketch' || feat.type === 'fillet' || feat.type === 'shell' || feat.operation === 'cutout') continue
+      if (feat.type === 'sketch' || feat.type === 'fillet' || feat.type === 'shell' || feat.type === 'smooth' || feat.operation === 'cutout') continue
       if (feat.joinedInto) continue
       try {
         let meshData = restored.get(feat.solidId)
@@ -12202,6 +12531,12 @@ const App3D = forwardRef(function App3D(props, ref) {
       return
     }
 
+    // Smooth only changes what's shown — dropping the feature puts the real mesh back.
+    if (feat.type === 'smooth') {
+      setFeatures(prev => prev.filter(f => f.id !== featureId))
+      return
+    }
+
     if (feat.type === 'fillet' || feat.type === 'shell') {
       const baseSolid = solids.find(s => s.id === feat.solidId)
       if (baseSolid) {
@@ -12233,7 +12568,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       }
       setSolids(prev => prev.filter(s => s.id !== feat.solidId))
     }
-    setFeatures(prev => prev.filter(f => f.id !== featureId))
+    setFeatures(prev => prev.filter(f => f.id !== featureId && !(f.type === 'smooth' && f.solidId === feat.solidId && isBodyOwner(feat))))
   }
 
   // Rename a feature
@@ -12311,6 +12646,26 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
     setExportSTLBusy(true)
     try {
+      // Smoothed bodies (Smooth — see that section) export the mesh on screen:
+      // the B-rep in the worker is the sharp body underneath. They go into the
+      // same STL as separate shells beside the fused rest (slicers merge them).
+      const smoothMeshes = []
+      for (const solid of targetSolids) {
+        if (!solid.group?.userData?.smoothed) continue
+        const m = solid.group.children.find(o => o.isMesh && !o.userData?.isSolidEdge)
+        if (m?.geometry?.index) smoothMeshes.push(m.geometry)
+      }
+      if (smoothMeshes.length) {
+        const plain = targetSolids.filter(sd => !sd.group?.userData?.smoothed)
+        let plainBlob = null
+        if (plain.length) {
+          const { stlBlob } = await cadEngine.exportSTL({ solids: plain.map(solid => ({ solidId: solid.id, base: buildBaseWorkerParams(solid), ops: buildSolidOpsForWorker(solid, features) })) })
+          plainBlob = stlBlob
+        }
+        const blob = await mergeSmoothedIntoStl(plainBlob, smoothMeshes)
+        await saveBlobAs(blob, 'model.stl', 'STL model', { 'model/stl': ['.stl'] })
+        return
+      }
       // Ordered ops (cutout + fillet interleaved, in feature-array order) —
       // only used by the worker's cold-rebuild fallback when a solid isn't
       // already cached in shapeStore (e.g. right after a fresh page load);
@@ -12719,6 +13074,11 @@ const App3D = forwardRef(function App3D(props, ref) {
     // on a face goes through onFaceClick instead (see handleSoftenFaceClick).
     if (tool==='soften3d') {
       handleSoftenClick(e)
+      return
+    }
+    // Smooth: a click picks the body; face clicks (keep flat) come through onFaceClick.
+    if (tool==='smooth3d') {
+      handleSmoothClick(e)
       return
     }
 
@@ -13521,6 +13881,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     // Fillet: raycasts solid edges directly (no sketch-plane projection involved)
     if (tool==='fillet3d') { handleFillet3DHover(e); return }
     if (tool==='soften3d') { handleSoftenHover(e); return }
+    if (tool==='smooth3d') { handleSmoothHover(e); return }
     if (tool==='measure') { handleMeasureHover(e); return }
     if (tool==='includeedge') { handleIncludeEdgeHover(e); return }
     // exportfacedxf's face hover is handled entirely inside Viewport3D via
@@ -13789,6 +14150,15 @@ const App3D = forwardRef(function App3D(props, ref) {
       // the tool entirely.
       if (fillet3dAccepted || fillet3dSel.length>0) { resetFillet3D(); return }
       resetFillet3D(); setTool('select'); return
+    }
+    if (e.key==='Escape'&&tool==='smooth3d'){
+      if (smooth3dSolidId!=null) { resetSmooth3D(); return }
+      setTool('select'); return
+    }
+    if (e.key==='Enter'&&tool==='smooth3d'&&smooth3dSolidId!=null){
+      e.preventDefault()
+      commitSmooth3D()
+      return
     }
     if (e.key==='Escape'&&tool==='soften3d'){
       if (soften3dBusy) return
@@ -14634,6 +15004,15 @@ const App3D = forwardRef(function App3D(props, ref) {
 
       {replayOpen && <ReplayPanel onReplay={replayForTest} onClose={() => setReplayOpen(false)} />}
 
+      {smoothWorking > 0 && !engineBusy && (
+        <div style={{position:'fixed',top:16,left:'50%',transform:'translateX(-50%)',
+          background:'#5b3a8c',color:'#fff',padding:'8px 18px',borderRadius:8,
+          zIndex:9999,fontFamily:'monospace',fontSize:12,pointerEvents:'none',
+          boxShadow:'0 4px 12px rgba(0,0,0,0.5)'}}>
+          Smoothing…
+        </div>
+      )}
+
       {engineBusy && !filletWorking && (
         <div style={{position:'fixed',top:16,left:'50%',transform:'translateX(-50%)',
           background:'#1d3a5c',color:'#fff',padding:'8px 18px',borderRadius:8,
@@ -14780,6 +15159,8 @@ const App3D = forwardRef(function App3D(props, ref) {
                 {id:'shell3d',  label:'SHELL',   color:'#4DB6AC'}, {id:'fillet3d',  label:'FILLET',  color:'#A470F2'},
                 {id:'mirror3d', label:'MIRROR',  color:'#8E65F3'}, {id:'join3d',    label:'JOIN',    color:'#FFEE88'},
                 {id:'movecopy3d',label:'MOVE/COPY', color:'#FF9800'}, {id:'pattern3d',label:'PATTERN', color:'#4DB6AC'},
+                // SMOOTH (2026-11-18) rounds a whole body on a grid instead of with OCC fillets.
+                {id:'smooth3d', label:'SMOOTH',  color:'#A470F2'},
                 // SOFTEN retired 2026-11-18 (it failed too often — rounding many edges at
                 // once is OpenCascade's weakest spot). Its tool code stays, and every
                 // softened project still rebuilds: Soften saved ordinary fillet features.
@@ -14791,7 +15172,7 @@ const App3D = forwardRef(function App3D(props, ref) {
               // keyed by the underlying add/cut tool id so both variants of a
               // shape button can light it up.
               const toolActive = id =>
-                  id==='fillet3d' ? tool==='fillet3d' : id==='shell3d' ? tool==='shell3d' : id==='soften3d' ? tool==='soften3d' : id==='pattern3d' ? tool==='pattern3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
+                  id==='fillet3d' ? tool==='fillet3d' : id==='shell3d' ? tool==='shell3d' : id==='soften3d' ? tool==='soften3d' : id==='smooth3d' ? tool==='smooth3d' : id==='pattern3d' ? tool==='pattern3d' : id==='mirror3d' ? tool==='mirror3d' : id==='join3d' ? tool==='join3d'
                 : id==='subtract3d' ? tool==='subtract3d'
                 : id==='loft3d' ? ((tool==='loft3d' || !!loftState) && loftTool!=='loftcutout')
                 : id==='loftcutout' ? ((tool==='loft3d' || !!loftState) && loftTool==='loftcutout')
@@ -15220,6 +15601,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             onScaleChange={handleScaleChange}
             onPlaneClick={handlePlaneClick}
             onFaceClick={handleFaceClick}
+            onSmoothedFaceClick={refuseSmoothedPick}
             // Each offset-plane flow (Extrude/Mirror/Sweep/Spring) stays
             // "sketch armed" for its WHOLE step 2 — picking the base plane/
             // face AND the subsequent drag-to-set-distance sub-step — since
@@ -15232,11 +15614,11 @@ const App3D = forwardRef(function App3D(props, ref) {
             // distance — confusing visual noise with nothing to click.
             // Once a base IS picked, face-hovering is no longer a pending
             // pick, so sketchArmed should go false for that offset flow.
-            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode && !extrudeOffsetBase) || (tool==='mirror3d' && mirror3dSelectionDone && !mirror3dOffsetBase) || (tool==='loft3d' && !loftState) || (tool==='sweep3d' && !sweepState && !sweepOffsetBase) || (tool==='spring3d' && !springState && !springOffsetBase) || tool==='exportfacedxf' || (tool==='shell3d' && !shell3dAccepted) || (tool==='soften3d' && !soften3dBusy && soften3dSolidId!=null && soften3dMode==='face')}
+            sketchArmed={((!!extrudeTool && !extrudeState) && !sketchMode && !extrudeOffsetBase) || (tool==='mirror3d' && mirror3dSelectionDone && !mirror3dOffsetBase) || (tool==='loft3d' && !loftState) || (tool==='sweep3d' && !sweepState && !sweepOffsetBase) || (tool==='spring3d' && !springState && !springOffsetBase) || tool==='exportfacedxf' || (tool==='shell3d' && !shell3dAccepted) || (tool==='soften3d' && !soften3dBusy && soften3dSolidId!=null && soften3dMode==='face') || (tool==='smooth3d' && smooth3dSolidId!=null)}
             mirrorPlanePickArmed={tool==='mirror3d' && mirror3dSelectionDone && !mirror3dOffsetBase}
-            dxfPickMode={tool==='exportfacedxf' || tool==='shell3d' || tool==='soften3d'}
-            dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : tool==='shell3d' ? shell3dSel : tool==='soften3d' ? soften3dKeepFaces : []}
-            facePickLabel={tool==='shell3d' ? 'click to remove' : tool==='soften3d' ? 'click to keep flat' : null}
+            dxfPickMode={tool==='exportfacedxf' || tool==='shell3d' || tool==='soften3d' || tool==='smooth3d'}
+            dxfSelectedFaces={tool==='exportfacedxf' ? exportFaceDXFSel : tool==='shell3d' ? shell3dSel : tool==='soften3d' ? soften3dKeepFaces : tool==='smooth3d' ? smooth3dKeepFaces : []}
+            facePickLabel={tool==='shell3d' ? 'click to remove' : tool==='soften3d' || tool==='smooth3d' ? 'click to keep flat' : null}
             extrudeArmed={!!extrudeState || (!!loftState && !sketchMode)}
             showWorkPlanes={!sketchMode && tool!=='fillet3d' && tool!=='shell3d' && tool!=='soften3d' && tool!=='measure' && tool!=='exportfacedxf' && tool!=='exportstl' && tool!=='exportstep' && tool!=='color' && tool!=='join3d' && tool!=='subtract3d' && tool!=='movecopy3d' && !(tool==='mirror3d' && !mirror3dSelectionDone) && !(hideWorkPlanesManual && (tool==='extrude' || tool==='cutout' || tool==='revolve' || tool==='revolvecut' || tool==='sweep3d' || tool==='loft3d'))}
             activePlane={activePlane}
@@ -15676,6 +16058,26 @@ const App3D = forwardRef(function App3D(props, ref) {
                   : []
             }
             onStepBack={step => { if (step===1) resetShell3D() }}
+          />
+
+          {/* ── SmartStep bar: overlays bottom of viewport during Smooth ── */}
+          <SmartStepBar
+            op={tool==='smooth3d' ? 'SMOOTH' : null}
+            steps={[{ id:1, label:'Pick Body' }, { id:2, label:'Keep Faces Flat · Radius' }]}
+            currentStep={smooth3dSolidId==null ? 1 : 2}
+            color="#A470F2"
+            hint={
+              smooth3dSolidId==null
+                ? 'Click the body you want to smooth.'
+                : smooth3dKeepFaces.length>0
+                  ? `${smooth3dKeepFaces.length} face${smooth3dKeepFaces.length!==1?'s':''} kept flat — click more, or type the radius and press Enter.`
+                  : 'Click any face that should stay flat (e.g. the bottom), type the radius, then press Enter.'
+            }
+            action={smooth3dSolidId!=null ? [
+              ...(smooth3dKeepFaces.length>0 ? [{label:'Clear Flat Faces', enabled:true, onClick:()=>setSmooth3dKeepFaces([])}] : []),
+              {label:'✓ Smooth', enabled:true, onClick:commitSmooth3D},
+            ] : []}
+            onStepBack={step => { if (step===1) resetSmooth3D() }}
           />
 
           {/* ── SmartStep bar: overlays bottom of viewport during Soften ── */}
@@ -16911,6 +17313,71 @@ const App3D = forwardRef(function App3D(props, ref) {
         </div>
       )}
 
+      {/* ── Smooth panel (radius) ───────────────────────────────────────────── */}
+      {tool==='smooth3d' && smooth3dSolidId!=null && (
+        <div style={{
+          position: 'fixed',
+          // Default: top-left of the view, clear of the part (it's usually centred).
+          left: Math.max(8, Math.min((smooth3dHandlePos ?? { x: 180 }).x, window.innerWidth - 260)),
+          top:  Math.max(8, Math.min((smooth3dHandlePos ?? { y: 140 }).y, window.innerHeight - 190)),
+          zIndex: 1000,
+          background: 'rgba(15,20,40,0.95)',
+          border: '1.5px solid #A470F2',
+          borderRadius: 8,
+          padding: '10px 14px',
+          width: 230,
+          boxSizing: 'border-box',
+          boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
+          fontFamily: 'monospace',
+        }}>
+          <div style={{color:'#9fb4d8', fontSize:11, marginBottom:6}}>Radius</div>
+          <div style={{display:'flex', alignItems:'center', gap:8}}>
+            <div style={{
+              flex:1, background:'#0a0e1a', border:'1px solid #2a3a5a',
+              borderRadius:4, padding:'4px 8px',
+              display:'flex', alignItems:'center', justifyContent:'space-between',
+            }}>
+              <input
+                autoFocus
+                value={smooth3dRadiusInput}
+                onChange={e=>setSmooth3dRadiusInput(e.target.value)}
+                onFocus={e=>e.target.select()}
+                onKeyDown={e=>{
+                  e.stopPropagation()
+                  if (e.key==='Enter') commitSmooth3D()
+                  else if (e.key==='Escape') resetSmooth3D()
+                }}
+                style={{
+                  background:'none', border:'none', outline:'none',
+                  color:'#dce8ff', fontFamily:'monospace', fontSize:16,
+                  fontWeight:'bold', flex:1, minWidth:0,
+                }}
+              />
+              <span style={{color:'#6688aa', fontSize:12}}>mm</span>
+            </div>
+            <button
+              onClick={()=>commitSmooth3D()}
+              style={{
+                padding:'4px 10px', background: '#A470F2', color:'#0d0d1a',
+                border:'none', borderRadius:4, cursor:'pointer',
+                fontFamily:'monospace', fontSize:12, fontWeight:'bold',
+              }}
+            >↵</button>
+          </div>
+          <div style={{color:'#9fb4d8', fontSize:11, marginTop:8}}>
+            {smooth3dKeepFaces.length>0
+              ? `${smooth3dKeepFaces.length} face${smooth3dKeepFaces.length!==1?'s':''} kept flat`
+              : 'Every outside edge gets rounded'}
+          </div>
+          <div style={{color:'#8fa0b8', fontSize:10, marginTop:4}}>
+            Anything thinner than twice the radius gets worn down, and sharp points pull back.
+          </div>
+          <div style={{color:'#445566', fontSize:10, marginTop:6, textAlign:'center'}}>
+            Smooth is the body's last step · Esc to cancel
+          </div>
+        </div>
+      )}
+
       {/* ── Soften panel (radius + which edges are picked) ─────────────────── */}
       {tool==='soften3d' && soften3dSolidId!=null && soften3dSel.length>0 && (
         <div style={{
@@ -17062,6 +17529,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         onEditExtent={handleEditExtent}
         onEditFilletRadius={handleEditFilletRadius}
         onEditShellThickness={handleEditShellThickness}
+        onEditSmooth={handleEditSmooth}
         onEditLoft={handleEditLoft}
         hiddenSolidIds={hiddenSolidIds}
         onToggleBodyVisible={handleToggleBodyVisible}

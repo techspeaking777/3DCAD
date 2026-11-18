@@ -94,10 +94,10 @@ const ADVANCED_SOLID_TOOL_IDS = new Set([
   'sweep3d', 'sweepcut', 'spring3d', 'springcut', 'shell3d', 'pattern3d',
 ])
 // Shape tools that share ONE sidebar button with a "+ add / − cut" flyout.
+// (Extrude and Cutout are two separate buttons side by side — 2026-11-18.)
 // Keys are the button ids; add/cut are the underlying tool ids the existing
 // activate* handlers and SOLID_ICON_COMPONENTS already use.
 const SHAPE_OPS = {
-  extrude:  { add:'extrude',  cut:'cutout',     label:'EXTRUDE', cutLabel:'CUTOUT',      color:'#FBDA2D' },
   revolve:  { add:'revolve',  cut:'revolvecut', label:'REVOLVE', cutLabel:'REVOLVE CUT', color:'#FBDA2D' },
   loft3d:   { add:'loft3d',   cut:'loftcutout', label:'LOFT',    cutLabel:'LOFT CUT',    color:'#FBDA2D' },
   sweep3d:  { add:'sweep3d',  cut:'sweepcut',   label:'SWEEP',   cutLabel:'SWEEP CUT',   color:'#7ED957' },
@@ -14769,14 +14769,24 @@ const App3D = forwardRef(function App3D(props, ref) {
               // opFlyout state) instead of showing a separate cut button for
               // each — halves the sidebar's size. Tools with no cut variant
               // (Shell, Fillet, ...) activate straight away as before.
-              const ROWS = [
-                [{id:'extrude',  label:'EXTRUDE', color:'#FBDA2D'}, {id:'revolve',   label:'REVOLVE', color:'#FBDA2D'}],
-                [{id:'loft3d',   label:'LOFT',    color:'#FBDA2D'}, {id:'sweep3d',   label:'SWEEP',   color:'#7ED957'}],
-                [{id:'spring3d', label:'SPRING',  color:'#F06292'}, {id:'shell3d',   label:'SHELL',   color:'#4DB6AC'}],
-                [{id:'fillet3d', label:'FILLET',  color:'#A470F2'}, {id:'mirror3d',  label:'MIRROR',  color:'#8E65F3'}],
-                [{id:'join3d',   label:'JOIN',    color:'#FFEE88'}, {id:'movecopy3d',label:'MOVE/COPY', color:'#FF9800'}],
-                [{id:'pattern3d',label:'PATTERN', color:'#4DB6AC'}, {id:'soften3d', label:'SOFTEN', color:'#A470F2'}],
+              // Extrude and Cutout sit side by side at the top as two plain buttons
+              // (the most-used pair, user 2026-11-18); the rest follow in this
+              // order. The list is packed two to a row AFTER Simple mode hides its
+              // advanced tools, so neither mode has half-empty rows.
+              const ORDER = [
+                {id:'extrude',  label:'EXTRUDE', color:'#FBDA2D'}, {id:'cutout',    label:'CUTOUT',  color:CUT_COLOR},
+                {id:'revolve',  label:'REVOLVE', color:'#FBDA2D'}, {id:'loft3d',    label:'LOFT',    color:'#FBDA2D'},
+                {id:'sweep3d',  label:'SWEEP',   color:'#7ED957'}, {id:'spring3d',  label:'SPRING',  color:'#F06292'},
+                {id:'shell3d',  label:'SHELL',   color:'#4DB6AC'}, {id:'fillet3d',  label:'FILLET',  color:'#A470F2'},
+                {id:'mirror3d', label:'MIRROR',  color:'#8E65F3'}, {id:'join3d',    label:'JOIN',    color:'#FFEE88'},
+                {id:'movecopy3d',label:'MOVE/COPY', color:'#FF9800'}, {id:'pattern3d',label:'PATTERN', color:'#4DB6AC'},
+                // SOFTEN retired 2026-11-18 (it failed too often — rounding many edges at
+                // once is OpenCascade's weakest spot). Its tool code stays, and every
+                // softened project still rebuilds: Soften saved ordinary fillet features.
               ]
+              const shown = ORDER.filter(btn => !simpleMode || !ADVANCED_SOLID_TOOL_IDS.has(btn.id))
+              const ROWS = []
+              for (let i = 0; i < shown.length; i += 2) ROWS.push(shown.slice(i, i + 2))
               // Same "is this tool currently running" checks as before, now
               // keyed by the underlying add/cut tool id so both variants of a
               // shape button can light it up.
@@ -14792,10 +14802,6 @@ const App3D = forwardRef(function App3D(props, ref) {
                 : id==='movecopy3d' ? tool==='movecopy3d'
                 : extrudeTool===id
               return ROWS
-                // Simple mode hides each advanced BUTTON (not whole rows, now
-                // that rows mix basic and advanced tools); empty rows vanish.
-                .map(row => row.filter(btn => !simpleMode || !(ADVANCED_SOLID_TOOL_IDS.has(btn.id))))
-                .filter(row => row.length > 0)
                 .map((row, rowIdx) => (
                   <div key={rowIdx} style={{display:'flex', gap:5}}>
                     {row.map(({id,label,color}) => {

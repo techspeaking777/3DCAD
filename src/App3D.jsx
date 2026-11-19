@@ -42,7 +42,6 @@ import SaveAsPanel from './tools/SaveAsPanel.jsx'
 import CloudSavePanel from './tools/CloudSavePanel.jsx'
 import CloudOpenPanel from './tools/CloudOpenPanel.jsx'
 import SplashScreen from './SplashScreen.jsx'
-import SplineSnapPanel from './tools/SplineSnapPanel.jsx'
 import SelectDimPanel from './tools/SelectDimPanel.jsx'
 import { useDraggablePanel, DragHandle } from './tools/useDraggablePanel.jsx'
 import {
@@ -2045,7 +2044,6 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [springOffsetBase,setSpringOffsetBase]=useState(null)
   const [springOffsetDistInput,setSpringOffsetDistInput]=useState('20')
   const [springOffsetDistLocked,setSpringOffsetDistLocked]=useState(false)  // see extrudeOffsetDistLocked's comment
-  const includeEdgePanelDrag = useDraggablePanel()
 
   const hiddenEditSolidRef=useRef(null)   // solid parked here while its sketch is being edited
   const [extrudeColor]=useState('#3a7bd5')
@@ -2332,39 +2330,9 @@ const App3D = forwardRef(function App3D(props, ref) {
   // a short window's height), hence measuring out to a fixed-position render
   // instead of just removing the clip.
   const toolBtnRefs = useRef({})
-  const [flyoutAnchor,setFlyoutAnchor] = useState(null)
-  useEffect(() => {
-    if (sketchMode && (tool==='spline'||tool==='includeedge')) {
-      const el = toolBtnRefs.current[tool]
-      if (el) {
-        // Scroll the button into view first — the sidebar can hold more tools
-        // than fit in a short window, and measuring before the scroll settles
-        // (or without scrolling at all, if the button was activated while
-        // still off-screen) anchors the flyout to a stale/off-canvas rect.
-        el.scrollIntoView({block:'nearest'})
-        // Cancelled on cleanup: leaving the sketch (e.g. the ribbon's Cancel)
-        // within that frame used to let it re-open the popover afterwards.
-        // The flyout opens level with its button but never higher than just
-        // below the step ribbon (it used to cover the ribbon's step and
-        // options); it follows the ribbon when that grows or shrinks.
-        let raf = 0
-        const place = () => {
-          cancelAnimationFrame(raf)
-          raf = requestAnimationFrame(() => {
-            const r = el.getBoundingClientRect()
-            const bars = [...document.querySelectorAll('[data-step-ribbon]')].map(b => b.getBoundingClientRect()).filter(b => b.height > 0 && b.right > r.right)
-            const below = bars.length ? Math.max(...bars.map(b => b.bottom)) + 8 : -Infinity
-            setFlyoutAnchor({top:Math.max(r.top, below), right:r.right})
-          })
-        }
-        place()
-        window.addEventListener('step-ribbon-resize', place)
-        window.addEventListener('resize', place)
-        return () => { cancelAnimationFrame(raf); window.removeEventListener('step-ribbon-resize', place); window.removeEventListener('resize', place) }
-      }
-    }
-    setFlyoutAnchor(null)
-  }, [tool, sketchMode])
+  // (Sketch tools used to open a flyout panel beside their button; their
+  // options now live in the second ribbon row — sketchToolRibbon.)
+  const [, setFlyoutAnchor] = useState(null)
   const [mousePos,setMousePos]=useState(null)
   // Include Edge (sketch tool): stays active across multiple picks — click any
   // edge on any solid to project it into the current sketch as a construction
@@ -3218,6 +3186,58 @@ const App3D = forwardRef(function App3D(props, ref) {
           : tKeyDown ? 'Click a circle’s edge (then a second one) for a circle touching both.'
           : 'Click the centre of the circle.',
         onStepBack: id => { if (id === 1) resetDrawState() },
+      }
+    }
+
+    // ── Spline: First point → More points, Open | Closed loop (C) ──
+    if (tool === 'spline') {
+      const color = '#FF6F00'
+      const has = splinePoints.length > 0
+      const pic = (id, lbl, title, on, onClick, draw) => ({ node: (
+        <button title={title} onClick={onClick} style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 1,
+          width: 54, height: 40, boxSizing: 'border-box', padding: '2px 0', borderRadius: 7, cursor: 'pointer', fontFamily: 'monospace',
+          background: on ? color + '33' : 'transparent', border: `1px solid ${on ? color : '#3a3a5a'}`,
+        }}>
+          <svg width="20" height="20" viewBox="0 0 22 22">{draw(on ? color : '#8a93a6')}</svg>
+          <span style={{ fontSize: 8.5, letterSpacing: '0.05em', color: on ? color : '#8a93a6' }}>{lbl}</span>
+        </button>
+      ) })
+      return {
+        op: splineClosed ? 'SPLINE LOOP' : 'SPLINE', color,
+        steps: [{ id: 1, label: 'First point' }, { id: 2, label: 'More points' }],
+        currentStep: has ? 2 : 1,
+        action: [
+          pic('open', 'OPEN', 'An open curve — ends where you stop', !splineClosed, () => setSplineClosed(false),
+            c => <><path d="M3 16 C7 4, 12 18, 19 6" stroke={c} strokeWidth="2" fill="none" strokeLinecap="round"/><circle cx="3" cy="16" r="1.8" fill={c}/><circle cx="19" cy="6" r="1.8" fill={c}/></>),
+          pic('closed', 'LOOP', 'A closed loop — joins back to the start (C)', splineClosed, () => setSplineClosed(true),
+            c => <path d="M11 3 C18 3, 20 10, 16 15 C12 20, 4 19, 3 12 C2 6, 6 3, 11 3 Z" stroke={c} strokeWidth="2" fill="none"/>),
+        ],
+        hint: !has ? 'Click points along the curve. LOOP (or C) makes it join back to the start.'
+          : `Keep clicking points — double-click, right-click or Enter to finish${splineClosed ? ' (it joins back to the start)' : ''}.`,
+        onStepBack: id => { if (id === 1) resetSpline() },
+      }
+    }
+
+    // ── Include Edge: click edges on the bodies to copy them into the sketch ──
+    if (tool === 'includeedge') {
+      const color = '#4FC3F7'
+      const n = includeEdgeSel.length
+      return {
+        op: 'INCLUDE EDGE', color,
+        steps: [{ id: 1, label: 'Pick edges' }],
+        currentStep: 1,
+        action: [
+          { node: (
+            <div style={field(color)} title="Edges copied into this sketch so far">
+              <span style={{ color: '#dce8ff', fontFamily: 'monospace', fontWeight: 'bold', fontSize: 13 }}>{n}</span>
+              {label(n === 1 ? 'EDGE' : 'EDGES')}
+            </div>
+          ) },
+          { label: 'Firm', enabled: true, active: !includeEdgeConstruction, title: 'Part of the new profile (C switches)', onClick: () => setIncludeEdgeConstruction(false) },
+          { label: 'Construction', enabled: true, active: includeEdgeConstruction, title: 'Reference only — dashed, snaps, not part of the solid (C switches)', onClick: () => setIncludeEdgeConstruction(true) },
+        ],
+        hint: `Click any edge on any body to copy it into the sketch${includeEdgeConstruction ? ' as a dashed reference line' : ''}. C switches Firm / Construction. Esc when done.`,
       }
     }
 
@@ -17355,59 +17375,6 @@ const App3D = forwardRef(function App3D(props, ref) {
         />
       )}
 
-      {flyoutAnchor && (
-        <div style={{position:'fixed', top:flyoutAnchor.top, left:flyoutAnchor.right, zIndex:250}}>
-          {tool==='includeedge' && (() => {
-            const toolColor = toolConfig.find(([t])=>t==='includeedge')[3]
-            return (
-              <div ref={includeEdgePanelDrag.panelRef} style={{
-                position:'absolute',top:0,left:'100%',marginLeft:10,
-                background:'#14142a',border:`3px solid ${toolColor}`,borderRadius:10,
-                padding:'10px 12px',boxShadow:'0 6px 20px rgba(0,0,0,0.5)',
-                zIndex:50,width:170,fontFamily:'monospace',...includeEdgePanelDrag.panelStyle,
-              }}>
-                <div style={{position:'absolute',top:18,left:-9,width:0,height:0,
-                  borderTop:'8px solid transparent',borderBottom:'8px solid transparent',
-                  borderRight:`9px solid ${toolColor}`}}/>
-                <DragHandle {...includeEdgePanelDrag.handleProps}>Include Edge</DragHandle>
-                <div style={{textAlign:'center',fontSize:20,fontWeight:'bold',color:toolColor}}>
-                  {includeEdgeSel.length}
-                </div>
-                <div style={{textAlign:'center',fontSize:9,color:'#666',marginTop:2}}>
-                  edge{includeEdgeSel.length===1?'':'s'} included
-                </div>
-                {/* Firm = becomes part of the new profile; Construction = reference
-                    only (dashed, snappable, ignored when the solid is built). */}
-                <div style={{display:'flex',gap:4,marginTop:8}}>
-                  {[[false,'FIRM','Part of the new profile'],[true,'CONSTR.','Reference only — not part of the solid']].map(([val,label,tip])=>{
-                    const on=includeEdgeConstruction===val
-                    return (
-                      <button key={label} title={tip} onClick={()=>setIncludeEdgeConstruction(val)}
-                        style={{flex:1,padding:'4px 0',fontSize:9,fontFamily:'monospace',cursor:'pointer',
-                          letterSpacing:'0.04em',borderRadius:4,
-                          background:on?`${toolColor}33`:'transparent',
-                          border:`1px solid ${on?toolColor:'#3a3a5a'}`,color:on?toolColor:'#777'}}>
-                        {label}
-                      </button>
-                    )
-                  })}
-                </div>
-                <div style={{marginTop:8,textAlign:'center',fontSize:9,color:'#666'}}>
-                  Click any edge on any solid. C switches firm / construction. Esc when done.
-                </div>
-              </div>
-            )
-          })()}
-          {tool==='spline' && (
-            <SplineSnapPanel
-              toolColor={toolConfig.find(([t])=>t==='spline')[3]}
-              splineClosed={splineClosed}
-              onToggleC={()=>setSplineClosed(p=>!p)}
-              splinePoints={splinePoints}
-            />
-          )}
-        </div>
-      )}
 
       {saveAsOpen&&(
         <SaveAsPanel

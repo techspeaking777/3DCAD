@@ -2844,6 +2844,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   // Mirror, Centre) live here; their pop-up panels (CopyModePanel,
   // ResizeScalePanel, MirrorPanel, CenterPanel) are gone.
   const modifyToolColor = { movecopy: '#FF9800', rotatecopy: '#00BCD4', resize: '#E91E63', mirror: '#8E65F3', center: '#9CCC65' }
+  const editToolColor = { trim: '#FF5722', delete: '#F44336', extend: '#00ACC1', corner: '#FF7043', join: '#76FF03' }
   const moveDistRef = useRef(null)
   const moveAngleRef = useRef(null)
   function sketchToolRibbon() {
@@ -3033,6 +3034,44 @@ const App3D = forwardRef(function App3D(props, ref) {
         steps: [{ id: 1, label: 'Select' }],
         currentStep: 1,
       }
+    }
+
+    // ── Edit tools (Trim, Delete, Extend, Trim Corner, Join) ──
+    if (tool === 'trim') return {
+      op: 'TRIM', color: editToolColor.trim, steps: [{ id: 1, label: 'Click to trim' }], currentStep: 1,
+      hint: trimPreview?.kind === 'spline' && !trimPreview.highlightPts
+        ? 'Nothing crosses this curve, so there is no piece to cut off — use Delete to remove it whole.'
+        : 'Hover the piece you want to cut away (it stops where other lines cross), then click.',
+    }
+    if (tool === 'delete') return {
+      op: 'DELETE', color: editToolColor.delete, steps: [{ id: 1, label: 'Click to delete' }], currentStep: 1,
+      hint: 'Hover a line, circle or curve — it turns red — then click to delete it.',
+    }
+    if (tool === 'extend') return {
+      op: 'EXTEND', color: editToolColor.extend, steps: [{ id: 1, label: 'Click to extend' }], currentStep: 1,
+      hint: extendPreview ? 'Click to stretch it out to the line in the way (shown dashed).'
+        : 'Hover near the END of a line or arc you want to stretch.',
+    }
+    if (tool === 'corner') {
+      const stuck = filletAccepted && (filletPreview?.parallel || filletPreview?.needLines)
+      return {
+        op: 'TRIM CORNER', color: editToolColor.corner,
+        steps: [{ id: 1, label: 'First line' }, { id: 2, label: 'Second line' }],
+        currentStep: filletSel.length === 0 ? 1 : 2,
+        hint: stuck ? (filletPreview?.parallel ? 'Those lines are parallel, so they never meet — click a line to start again.'
+                                               : 'Trim Corner needs two straight lines — click a line to start again.')
+          : filletSel.length === 0 ? 'Click the first line, on the part you want to keep.'
+          : 'Click the second line, on the part you want to keep — both are trimmed or stretched to meet.',
+        onStepBack: id => { if (id === 1) resetFillet() },
+      }
+    }
+    if (tool === 'join') return {
+      op: 'JOIN', color: editToolColor.join,
+      steps: [{ id: 1, label: 'Pick an end' }, { id: 2, label: 'Join it' }],
+      currentStep: joinFirstPt ? 2 : 1,
+      hint: joinFirstPt ? 'Click where it should join — a line end or corner snaps.'
+        : 'Click the loose end you want to move (ends light up as you hover).',
+      onStepBack: id => { if (id === 1) setJoinFirstPt(null) },
     }
     return null
   }

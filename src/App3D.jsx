@@ -2080,7 +2080,6 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [springOffsetDistInput,setSpringOffsetDistInput]=useState('20')
   const [springOffsetDistLocked,setSpringOffsetDistLocked]=useState(false)  // see extrudeOffsetDistLocked's comment
   const springPanelDrag = useDraggablePanel()
-  const sweepPanelDrag = useDraggablePanel()
   const includeEdgePanelDrag = useDraggablePanel()
 
   const hiddenEditSolidRef=useRef(null)   // solid parked here while its sketch is being edited
@@ -8781,7 +8780,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   }, [springState?.armed, springState?.profile, springState?.springAxis, springState?.springReverse,
       springState?.specBy, springState?.pitchInput, springState?.lengthInput, springState?.coilsInput, springTool, solids])
 
-  // ── Sweep confirm popup (sweepState.armed: path + profile are sketched) ──
+  // ── Sweep Check step (sweepState.armed: path + profile are sketched; options in the ribbon) ──
   // Back to the profile sketch with the drawing as it was (ghost path included).
   async function sweepEditSketch() {
     const st = sweepState
@@ -11452,6 +11451,16 @@ const App3D = forwardRef(function App3D(props, ref) {
     ]
   }
 
+  // Sweep's Check step: the reason it can't be made yet, or null. Shown in the
+  // ribbon's hint (it used to be red text in a confirm pop-up), and it greys
+  // out the ribbon's Make button.
+  function sweepProblem() {
+    if (!sweepState?.armed) return null
+    if (sweepBuildError) return sweepBuildError
+    if (sweepTool === 'sweepcut' && sweepCutTargets && sweepCutTargets.length === 0)
+      return 'This cut does not reach any visible body — go back to the sketch and move the path or shape onto one.'
+    return null
+  }
   function handleExtrudeDepthKey(e) {
     if (!extrudeStateRef.current) return
     if (e.key === 'Enter') {
@@ -14413,7 +14422,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       resetJoin3D(); setTool('select'); return
     }
     // Spring coil popup open (the sketch is finished): Esc abandons the spring.
-    // Sweep confirm popup open: Enter makes it, Esc abandons it.
+    // Sweep Check step: Enter makes it, Esc abandons it.
     if (e.key==='Enter'&&!sketchMode&&sweepState?.armed){
       e.preventDefault()
       if (!sweepBuildError && !(sweepCutTargets && sweepCutTargets.length === 0)) commitSweep(sweepState.path, sweepState.profile)
@@ -16048,7 +16057,9 @@ const App3D = forwardRef(function App3D(props, ref) {
               : !sweepState.path
                 ? 'Draw the line your shape will travel along, then press Finish.'
                 : sweepState.armed
-                  ? 'Check the preview, then press Done.'
+                  ? (sweepProblem() || (sweepTool === 'sweepcut'
+                      ? 'Check the preview — the red bodies will be cut — then press Make cut or Enter.'
+                      : 'Check the preview, then press Make sweep or Enter.'))
                   : 'Draw the shape that follows the path (a circle makes a tube), then press Finish.'}
             action={
               !sweepState
@@ -16070,7 +16081,15 @@ const App3D = forwardRef(function App3D(props, ref) {
                   : !sweepState.path
                     ? [{ label: sweepProjectOn ? '⌖ Project: ON' : '⌖ Project onto Surface', enabled:true,
                          onClick: () => setSweepProjectOn(p => !p) }]
-                    : null
+                    : sweepState.armed
+                      // Check step (was a confirm pop-up): back to the sketch, throw it away, or make it.
+                      ? [
+                          { label:'✎ Edit sketch', enabled:true, onClick: sweepEditSketch },
+                          { label:'✕ Cancel', enabled:true, danger:true, onClick: cancelFeature },
+                          { label: sweepTool === 'sweepcut' ? '✓ Make cut' : '✓ Make sweep', enabled: !sweepProblem(), success:true,
+                            onClick: () => commitSweep(sweepState.path, sweepState.profile) },
+                        ]
+                      : null
             }
             onStepBack={step => {
               if (step === 1) resetSweep3D()
@@ -17355,50 +17374,6 @@ const App3D = forwardRef(function App3D(props, ref) {
                            background: springProblem ? '#1e1e38' : accent, color: springProblem ? '#334455' : '#000',
                            border:'none', borderRadius:2, cursor: springProblem ? 'default' : 'pointer',
                            boxShadow: springProblem ? 'none' : `0 0 6px ${accent}` }}>Done ↵</button>
-              </div>
-              <div style={{ color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em' }}>
-                {isCut ? 'Red bodies will be cut · ' : ''}Esc to cancel
-              </div>
-            </div>
-          </div>
-        )
-      })()}
-      {/* ── Sweep confirm popup: shown once the path and profile are sketched, with
-          the live translucent result (red for a cut) behind it. ── */}
-      {sweepState?.armed && (() => {
-        const isCut = sweepTool === 'sweepcut'
-        const accent = isCut ? '#53D3E4' : '#7ED957'
-        const nothingToCut = isCut && sweepCutTargets && sweepCutTargets.length === 0
-        const problem = sweepBuildError
-          ? sweepBuildError
-          : nothingToCut ? 'This cut does not reach any visible body — go back and move the path or shape onto one.' : null
-        const blocked = !!problem
-        return (
-          <div style={{ position:'fixed', bottom:24, left:'50%', transform:'translateX(-50%)', zIndex:1000 }}>
-            <div ref={sweepPanelDrag.panelRef} style={{
-              background:'#000', border:`1.5px solid ${accent}`, borderRadius:2, padding:'10px 14px', minWidth:250,
-              boxShadow:`0 0 14px ${accent}77, 0 0 3px ${accent} inset`, fontFamily:'monospace',
-              ...sweepPanelDrag.panelStyle,
-            }}>
-              <DragHandle {...sweepPanelDrag.handleProps}>{isCut ? 'Sweep Cut' : 'Sweep'}</DragHandle>
-              <div style={{ color:'#889', fontSize:11, marginBottom:8, lineHeight:1.4, maxWidth:260 }}>
-                {isCut ? 'The red shape is what will be cut away.' : 'The shape travelling along your path.'}
-              </div>
-              {problem && (
-                <div style={{ color:'#ff6b6b', fontSize:10, marginBottom:8, lineHeight:1.3, maxWidth:260 }}>{problem}</div>
-              )}
-              <div style={{ display:'flex', gap:6 }}>
-                <button onClick={cancelFeature} title="Throw this sweep away (Esc)"
-                  style={{ padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold', background:'#1e1e38', color:'#c07070',
-                           border:'1px solid #5a2a2a', borderRadius:4, cursor:'pointer' }}>✕ Cancel</button>
-                <button onClick={sweepEditSketch} title="Go back to the profile sketch"
-                  style={{ padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold', background:'#1e1e38', color:'#6688aa',
-                           border:'1px solid #2a3a5a', borderRadius:4, cursor:'pointer' }}>✎ Sketch</button>
-                <button onClick={() => commitSweep(sweepState.path, sweepState.profile)} disabled={blocked} title={isCut ? 'Make the cut' : 'Make the sweep'}
-                  style={{ flex:1, padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold',
-                           background: blocked ? '#1e1e38' : accent, color: blocked ? '#334455' : '#000',
-                           border:'none', borderRadius:2, cursor: blocked ? 'default' : 'pointer',
-                           boxShadow: blocked ? 'none' : `0 0 6px ${accent}` }}>Done ↵</button>
               </div>
               <div style={{ color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em' }}>
                 {isCut ? 'Red bodies will be cut · ' : ''}Esc to cancel

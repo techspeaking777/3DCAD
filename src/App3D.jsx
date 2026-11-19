@@ -2823,6 +2823,13 @@ const App3D = forwardRef(function App3D(props, ref) {
     setDimInput('');setDimLocked(false);setAngleInput('');setAngleLocked(false);setFocusField('dim')
     setTrackedPts([]);trackedPtsRef.current=[];setDeferredTangent(null);setTKeyDown(false);setPKeyDown(false);setPerpSourceLineIdx(null)
   }
+  // Points remembered for alignment tracking (an Axis/Line start, hovered ends)
+  // belong to the sketch: drop them when it closes. Left over, the overlay kept
+  // drawing their orange guide line + dot over the 3D model (seen after a Spring,
+  // whose REV AXIS start point was still tracked).
+  useEffect(() => {
+    if (!sketchMode) { setTrackedPts([]); trackedPtsRef.current = [] }
+  }, [sketchMode])
   // Typing a length/distance and/or angle only locks that value in — placing
   // the actual line or move/copy still requires a canvas click (see
   // LineSnapPanel.jsx and CopyModePanel.jsx's Move distance+direction box,
@@ -5014,7 +5021,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       }
 
     // ── Idle snap indicator ──
-    } else if (tool!=='trim'&&tool!=='delete'&&tool!=='offset'&&tool!=='mirror'&&tool!=='movecopy'&&tool!=='rotatecopy'&&tool!=='resize'&&tool!=='trace'){
+    } else if (sketchMode&&tool!=='trim'&&tool!=='delete'&&tool!=='offset'&&tool!=='mirror'&&tool!=='movecopy'&&tool!=='rotatecopy'&&tool!=='resize'&&tool!=='trace'){
       if (tool==='line'&&pKeyDown){
         // PERP mode idle — show perp foot on nearest line (plus the
         // endpoint/midpoint marker too, when snapped onto one of those)

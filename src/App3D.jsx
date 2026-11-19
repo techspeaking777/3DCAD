@@ -45,10 +45,6 @@ import SplashScreen from './SplashScreen.jsx'
 import LineSnapPanel from './tools/LineSnapPanel.jsx'
 import CircleSnapPanel from './tools/CircleSnapPanel.jsx'
 import SplineSnapPanel from './tools/SplineSnapPanel.jsx'
-import CopyModePanel from './tools/CopyModePanel.jsx'
-import ResizeScalePanel from './tools/ResizeScalePanel.jsx'
-import MirrorPanel from './tools/MirrorPanel.jsx'
-import CenterPanel from './tools/CenterPanel.jsx'
 import FilletRadiusPanel from './tools/FilletRadiusPanel.jsx'
 import OffsetDistPanel from './tools/OffsetDistPanel.jsx'
 import SelectDimPanel from './tools/SelectDimPanel.jsx'
@@ -1179,7 +1175,11 @@ const STEP_TIPS = {
 // {divider:true}, or {node} for a field such as Extrude's depth box; `danger`
 // draws it red, `success` green); they are the current step's options. `extraActions` are added
 // after them — the shared sketch ✕ Cancel / ✓ Finish sketch pair.
-function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEPS, hint = null, action = null, extraActions = null }) {
+// `compact` (2026-11-19, trial): the SECOND ribbon, for the sketch tool in use
+// (its own steps / options / hint). It sits right under the main ribbon
+// (top: var(--ribbon-h)), is a little smaller, and publishes its height as
+// --tool-ribbon-h so the ViewCube and the sketch flyouts clear both rows.
+function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEPS, hint = null, action = null, extraActions = null, compact = false }) {
   const barRef = useRef(null)
   const [hoverStep, setHoverStep] = useState(null)
   // Publish the ribbon's height to its container (for the ViewCube); cleared on unmount.
@@ -1188,12 +1188,13 @@ function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEP
     const host = el?.parentElement
     if (!el || !host) return
     // The sketch tools' flyouts open below the ribbon; tell them when it changes size.
-    const set = () => { host.style.setProperty('--ribbon-h', el.offsetHeight + 'px'); window.dispatchEvent(new Event('step-ribbon-resize')) }
+    const cssVar = compact ? '--tool-ribbon-h' : '--ribbon-h'
+    const set = () => { host.style.setProperty(cssVar, el.offsetHeight + 'px'); window.dispatchEvent(new Event('step-ribbon-resize')) }
     set()
     const ro = new ResizeObserver(set)
     ro.observe(el)
-    return () => { ro.disconnect(); host.style.removeProperty('--ribbon-h'); window.dispatchEvent(new Event('step-ribbon-resize')) }
-  }, [op])
+    return () => { ro.disconnect(); host.style.removeProperty(cssVar); window.dispatchEvent(new Event('step-ribbon-resize')) }
+  }, [op, compact])
   if (!op) return null
   const actions = [...(action ? (Array.isArray(action) ? action : [action]) : []), ...(extraActions || [])]
   const chev = 'polygon(0 0, calc(100% - 9px) 0, 100% 50%, calc(100% - 9px) 100%, 0 100%, 7px 50%)'
@@ -1207,11 +1208,11 @@ function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEP
 
   return (
     <div ref={barRef} data-step-ribbon="1" style={{
-      position: 'absolute', top: 0, left: 0, right: 0, zIndex: 200,
+      position: 'absolute', top: compact ? 'var(--ribbon-h, 0px)' : 0, left: 0, right: 0, zIndex: compact ? 199 : 200,
       boxSizing: 'border-box', pointerEvents: 'all',
-      background: 'rgba(12,12,26,0.96)',
+      background: compact ? 'rgba(20,20,40,0.96)' : 'rgba(12,12,26,0.96)',
       borderBottom: `2px solid ${color}55`,
-      padding: '7px 12px 6px',
+      padding: compact ? '5px 12px 4px 22px' : '7px 12px 6px',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, rowGap: 6 }}>
         {/* Tool name */}
@@ -1284,12 +1285,14 @@ function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEP
           )
         })}
 
+        {!compact && (
         <span style={{ marginLeft: 'auto', fontFamily: 'monospace', fontSize: 10, color: '#4a5a70', letterSpacing: '0.05em', flexShrink: 0 }}>
           Esc · cancel
         </span>
+        )}
       </div>
       {hint && (
-        <div style={{ fontFamily: 'monospace', fontSize: 11, color, opacity: 0.9, marginTop: 5, letterSpacing: '0.03em' }}>
+        <div style={{ fontFamily: 'monospace', fontSize: compact ? 10.5 : 11, color, opacity: 0.9, marginTop: compact ? 4 : 5, letterSpacing: '0.03em' }}>
           {hint}
         </div>
       )}
@@ -2353,8 +2356,8 @@ const App3D = forwardRef(function App3D(props, ref) {
           cancelAnimationFrame(raf)
           raf = requestAnimationFrame(() => {
             const r = el.getBoundingClientRect()
-            const rb = document.querySelector('[data-step-ribbon]')?.getBoundingClientRect()
-            const below = rb && rb.height > 0 && rb.right > r.right ? rb.bottom + 8 : -Infinity
+            const bars = [...document.querySelectorAll('[data-step-ribbon]')].map(b => b.getBoundingClientRect()).filter(b => b.height > 0 && b.right > r.right)
+            const below = bars.length ? Math.max(...bars.map(b => b.bottom)) + 8 : -Infinity
             setFlyoutAnchor({top:Math.max(r.top, below), right:r.right})
           })
         }
@@ -2836,6 +2839,203 @@ const App3D = forwardRef(function App3D(props, ref) {
   // which share this same dimInput/angleInput state). The existing Tab-key
   // single-field lock (below, in handleKeyDown) keeps working as a fallback;
   // this is the visible Lock-It-In button's handler.
+  // The second ribbon's contents for the sketch tool in use (trial, 2026-11-19),
+  // or null when the tool has none. The Modify tools (Move, Rotate, Scale,
+  // Mirror, Centre) live here; their pop-up panels (CopyModePanel,
+  // ResizeScalePanel, MirrorPanel, CenterPanel) are gone.
+  const modifyToolColor = { movecopy: '#FF9800', rotatecopy: '#00BCD4', resize: '#E91E63', mirror: '#8E65F3', center: '#9CCC65' }
+  const moveDistRef = useRef(null)
+  const moveAngleRef = useRef(null)
+  function sketchToolRibbon() {
+    if (!sketchMode) return null
+    const colorOf = t => modifyToolColor[t]
+    const field = color => ({ display: 'flex', alignItems: 'center', gap: 4, height: 24, boxSizing: 'border-box',
+      background: '#0a0e1a', border: `1px solid ${color}88`, borderRadius: 12, padding: '0 10px' })
+    const label = (t, on) => <span style={{ color: on ? '#FF9800' : '#8fa0b8', fontFamily: 'monospace', fontSize: 10, letterSpacing: '0.06em' }}>{t}</span>
+    const unit = t => <span style={{ color: '#6688aa', fontFamily: 'monospace', fontSize: 11 }}>{t}</span>
+    const inputStyle = (on, w = 46) => ({ width: w, background: 'none', border: 'none', outline: 'none', color: on ? '#FF9800' : '#dce8ff',
+      fontFamily: 'monospace', fontSize: 13, fontWeight: 'bold' })
+    const smallBtn = (color, txt, onClick, enabled = true) => (
+      <button onClick={onClick} disabled={!enabled} style={{ width: 20, height: 20, borderRadius: 10, border: `1px solid ${color}66`,
+        background: 'none', color: enabled ? color : '#555', fontFamily: 'monospace', fontWeight: 'bold', fontSize: 13, lineHeight: '16px',
+        padding: 0, cursor: enabled ? 'pointer' : 'default' }}>{txt}</button>
+    )
+    // Keys typed in a box stay in the box — except Tab / Esc, which the app's
+    // key handler still needs (Tab locks the value, as it always has).
+    const keepKeys = (e, onEnter) => {
+      if (e.key !== 'Tab' && e.key !== 'Escape' && !e.ctrlKey && !e.metaKey) e.stopPropagation()
+      if (e.key === 'Enter') onEnter?.()
+    }
+    // Move | Copy (or Rotate | Copy) plus the number of copies.
+    const modeItems = (color, primary, primaryKey, isCopy, setMode, n, setCountText) => {
+      const setCount = v => setCountText(String(Math.max(1, Math.min(100, v))))
+      return [
+        { label: primary, enabled: true, active: !isCopy, title: `${primary} the picked lines (${primaryKey})`, onClick: () => setMode(primary.toLowerCase()) },
+        { label: 'Copy', enabled: true, active: isCopy, title: 'Leave the originals and add copies (C)', onClick: () => setMode('copy') },
+        ...(isCopy ? [{ node: (
+          <div style={field(color)} title="How many copies — each one a step further on">
+            {label('COPIES')}
+            {smallBtn(color, '−', () => setCount(n - 1), n > 1)}
+            <span style={{ color: '#dce8ff', fontFamily: 'monospace', fontWeight: 'bold', fontSize: 13, minWidth: 18, textAlign: 'center' }}>{n}</span>
+            {smallBtn(color, '+', () => setCount(n + 1), n < 100)}
+          </div>
+        ) }] : []),
+      ]
+    }
+    const doneSelecting = (count, accept) => ({ label: '✓ Done selecting', enabled: count > 0, title: 'Finished picking (Tab)', onClick: accept })
+    const selectHint = (count, what) => count === 0 ? `Click or drag over the lines you want to ${what}.`
+      : `${count} picked — click more, or press Done selecting (Tab).`
+
+    // ── Move / Copy: Select → Base point → Place ──
+    if (tool === 'movecopy') {
+      const color = colorOf('movecopy')
+      const isCopy = moveCopyMode === 'copy'
+      const n = Math.max(1, parseInt(moveCopyCountInput) || 1)
+      const step = !moveCopyAccepted ? 1 : !startPoint ? 2 : 3
+      // Tab hops between the two boxes; the app's key handler still sees it and locks the value.
+      const hop = e => {
+        if (e.key === 'Tab') { const other = e.target === moveDistRef.current ? moveAngleRef.current : moveDistRef.current; setTimeout(() => other?.focus(), 0); return }
+        keepKeys(e, applyDimAngleLock)
+      }
+      const modes = modeItems(color, 'Move', 'M', isCopy, setMoveCopyMode, n, setMoveCopyCountInput)
+      const canLock = (dimInput && parseFloat(dimInput) > 0) || (angleInput && parseFloat(angleInput) >= 0)
+      const actions = step === 1 ? [...modes, { divider: true }, doneSelecting(moveCopySel.length, () => setMoveCopyAccepted(true))]
+        : step === 2 ? modes
+        : [
+            { node: (
+              <div style={field(color)} title="How far it moves (type it, then Enter to lock it)">
+                {label((dimLocked ? '🔒 ' : '') + 'DISTANCE', dimLocked)}
+                <input ref={moveDistRef} autoFocus value={dimInput}
+                  onChange={e => { if (/^[0-9.]*$/.test(e.target.value)) { setDimLocked(false); setDimInput(e.target.value) } }}
+                  onKeyDown={hop} onFocus={() => setFocusField('dim')}
+                  placeholder={moveCopyLiveDistMm != null ? moveCopyLiveDistMm.toFixed(1) : '0'} style={inputStyle(dimLocked)}/>
+                {unit('mm')}
+              </div>
+            ) },
+            { node: (
+              <div style={field(color)} title="Which way it moves, in degrees (0 = right, 90 = up)">
+                {label((angleLocked ? '🔒 ' : '') + 'DIRECTION', angleLocked)}
+                <input ref={moveAngleRef} value={angleInput}
+                  onChange={e => { if (/^-?[0-9.]*$/.test(e.target.value)) { setAngleLocked(false); setAngleInput(e.target.value) } }}
+                  onKeyDown={hop} onFocus={() => setFocusField('angle')}
+                  placeholder={moveCopyLiveAngleDeg != null ? moveCopyLiveAngleDeg.toFixed(1) : '0'} style={inputStyle(angleLocked)}/>
+                {unit('°')}
+              </div>
+            ) },
+            { label: '✓ Lock it in', enabled: !!canLock, title: 'Fix the typed distance / direction (Enter)', onClick: applyDimAngleLock },
+          ]
+      const hint = step === 1 ? selectHint(moveCopySel.length, 'move or copy')
+        : step === 2 ? 'Click the point it moves FROM — a corner or centre snaps.'
+        : `Click where it goes${isCopy ? (n > 1 ? ` (${n} copies, evenly spaced)` : ' (a copy)') : ''} — or type a distance and direction, Enter, then click.`
+      return {
+        op: isCopy ? 'COPY' : 'MOVE', color, hint, action: actions,
+        steps: [{ id: 1, label: 'Select' }, { id: 2, label: 'Base point' }, { id: 3, label: 'Place' }],
+        currentStep: step,
+        onStepBack: id => {
+          if (id === 1) { setMoveCopyAccepted(false); setStartPoint(null) }
+          if (id === 2) setStartPoint(null)
+        },
+      }
+    }
+
+    // ── Rotate / Copy: Select → Centre → Angle ──
+    if (tool === 'rotatecopy') {
+      const color = colorOf('rotatecopy')
+      const isCopy = rotateCopyMode === 'copy'
+      const n = Math.max(1, parseInt(rotateCopyCountInput) || 1)
+      const step = !rotateCopyAccepted ? 1 : !startPoint ? 2 : 3
+      const lock = () => { if (angleInput) setAngleLocked(true) }
+      const modes = modeItems(color, 'Rotate', 'R', isCopy, setRotateCopyMode, n, setRotateCopyCountInput)
+      const actions = step === 1 ? [...modes, { divider: true }, doneSelecting(rotateCopySel.length, () => setRotateCopyAccepted(true))]
+        : step === 2 ? modes
+        : [
+            { node: (
+              <div style={field(color)} title="How far it turns, in degrees (anticlockwise; a minus number turns clockwise)">
+                {label((angleLocked ? '🔒 ' : '') + 'ANGLE', angleLocked)}
+                <input autoFocus value={angleInput}
+                  onChange={e => { if (/^-?[0-9.]*$/.test(e.target.value)) { setAngleLocked(false); setAngleInput(e.target.value) } }}
+                  onKeyDown={e => keepKeys(e, lock)}
+                  placeholder={rotateCopyLiveAngleDeg != null ? rotateCopyLiveAngleDeg.toFixed(1) : '0'} style={inputStyle(angleLocked)}/>
+                {unit('°')}
+              </div>
+            ) },
+            { label: '✓ Lock it in', enabled: !!angleInput, title: 'Fix the typed angle (Enter)', onClick: lock },
+          ]
+      const hint = step === 1 ? selectHint(rotateCopySel.length, 'rotate or copy round a point')
+        : step === 2 ? 'Click the centre it turns round — a corner or centre snaps.'
+        : `Move the mouse round to turn it${isCopy ? (n > 1 ? ` (${n} copies, evenly spaced)` : ' (a copy)') : ''} and click — or type an angle, Enter, then click.`
+      return {
+        op: isCopy ? 'ROTATE COPY' : 'ROTATE', color, hint, action: actions,
+        steps: [{ id: 1, label: 'Select' }, { id: 2, label: 'Centre' }, { id: 3, label: 'Angle' }],
+        currentStep: step,
+        onStepBack: id => {
+          if (id === 1) { setRotateCopyAccepted(false); setStartPoint(null) }
+          if (id === 2) setStartPoint(null)
+        },
+      }
+    }
+
+    // ── Scale: Select → Scale (type it, then click the point that stays put) ──
+    if (tool === 'resize') {
+      const color = colorOf('resize')
+      const step = !resizeAccepted ? 1 : 2
+      const sc = parseFloat(resizeScaleInput)
+      const actions = step === 1 ? [doneSelecting(resizeSel.length, () => setResizeAccepted(true))]
+        : [
+            { node: (
+              <div style={field(color)} title="How much bigger — 2 doubles it, 0.5 halves it">
+                {label('SCALE')}
+                <input autoFocus value={resizeScaleInput}
+                  onChange={e => { if (/^[0-9.]*$/.test(e.target.value)) setResizeScaleInput(e.target.value) }}
+                  onKeyDown={e => keepKeys(e, () => e.target.blur())} onFocus={e => e.target.select()}
+                  placeholder="1" style={inputStyle(false, 40)}/>
+                {unit('×')}
+              </div>
+            ) },
+            { label: '½', enabled: true, active: resizeScaleInput === '0.5', title: 'Half size', onClick: () => setResizeScaleInput('0.5') },
+            { label: '2×', enabled: true, active: resizeScaleInput === '2', title: 'Double size', onClick: () => setResizeScaleInput('2') },
+          ]
+      const hint = step === 1 ? selectHint(resizeSel.length, 'scale')
+        : !(sc > 0) ? 'Type how much bigger (2 = double, 0.5 = half).'
+        : `${sc < 1 ? 'Shrinks' : sc > 1 ? 'Grows' : 'Keeps'} it ×${sc} — click the point that stays still (a corner or centre snaps).`
+      return {
+        op: 'SCALE', color, hint, action: actions,
+        steps: [{ id: 1, label: 'Select' }, { id: 2, label: 'Scale' }],
+        currentStep: step,
+        onStepBack: id => { if (id === 1) setResizeAccepted(false) },
+      }
+    }
+
+    // ── Mirror: Select → Mirror line (two clicks) ──
+    if (tool === 'mirror') {
+      const color = colorOf('mirror')
+      const step = !mirrorAccepted ? 1 : 2
+      const hint = step === 1 ? selectHint(mirrorSel.length, 'mirror')
+        : !mirrorP1 ? 'Click the first point of the mirror line (an axis or line end snaps).'
+        : 'Click the second point — the picked lines flip across this line.'
+      return {
+        op: 'MIRROR', color, hint,
+        action: step === 1 ? [doneSelecting(mirrorSel.length, () => setMirrorAccepted(true))] : null,
+        steps: [{ id: 1, label: 'Select' }, { id: 2, label: 'Mirror line' }],
+        currentStep: step,
+        onStepBack: id => { if (id === 1) { setMirrorAccepted(false); setMirrorP1(null) } },
+      }
+    }
+
+    // ── Centre: Select → centre it on the origin ──
+    if (tool === 'center') {
+      const color = colorOf('center')
+      return {
+        op: 'CENTRE', color,
+        hint: centerSel.length === 0 ? 'Click or drag over the shape to centre on the origin.'
+          : `${centerSel.length} picked — click more, or press Centre on origin (Tab).`,
+        action: [{ label: '✓ Centre on origin', enabled: centerSel.length > 0, title: 'Moves the picked lines so their middle sits on the origin (Tab)', onClick: commitCenter }],
+        steps: [{ id: 1, label: 'Select' }],
+        currentStep: 1,
+      }
+    }
+    return null
+  }
   function applyDimAngleLock(){
     if (dimInput&&parseFloat(dimInput)>0) setDimLocked(true)
     if (angleInput&&parseFloat(angleInput)>=0) setAngleLocked(true)
@@ -15579,65 +15779,6 @@ const App3D = forwardRef(function App3D(props, ref) {
                       outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
                     <Icon active={tool===t}/>
                   </button>
-                  {t==='movecopy'&&tool==='movecopy'&&(
-                    <CopyModePanel
-                      toolColor={activeColor}
-                      primaryKey="M" primaryLabel="Move" primaryMode="move"
-                      mode={moveCopyMode} count={moveCopyCountInput}
-                      onSetMode={setMoveCopyMode}
-                      onSetCount={n=>setMoveCopyCountInput(String(Math.max(1,Math.min(100,n))))}
-                      locked={!!startPoint}
-                      selCount={moveCopySel.length} accepted={moveCopyAccepted}
-                      onAccept={()=>setMoveCopyAccepted(true)}
-                      dimInput={dimInput} dimLocked={dimLocked}
-                      onChangeDim={val=>{setDimLocked(false);setDimInput(val)}}
-                      angleInput={angleInput} angleLocked={angleLocked}
-                      onChangeAngle={val=>{setAngleLocked(false);setAngleInput(val)}}
-                      onApplyLock={applyDimAngleLock}
-                      liveDistMm={moveCopyLiveDistMm}
-                      liveAngleDeg={moveCopyLiveAngleDeg}
-                    />
-                  )}
-                  {t==='rotatecopy'&&tool==='rotatecopy'&&(
-                    <CopyModePanel
-                      toolColor={activeColor}
-                      primaryKey="R" primaryLabel="Rotate" primaryMode="rotate"
-                      mode={rotateCopyMode} count={rotateCopyCountInput}
-                      onSetMode={setRotateCopyMode}
-                      onSetCount={n=>setRotateCopyCountInput(String(Math.max(1,Math.min(100,n))))}
-                      locked={!!startPoint}
-                      selCount={rotateCopySel.length} accepted={rotateCopyAccepted}
-                      onAccept={()=>setRotateCopyAccepted(true)}
-                      angleInput={angleInput} angleLocked={angleLocked}
-                      onChangeAngle={val=>{setAngleLocked(false);setAngleInput(val)}}
-                      onApplyLock={()=>{ if(angleInput) setAngleLocked(true) }}
-                      liveAngleDeg={rotateCopyLiveAngleDeg}
-                    />
-                  )}
-                  {t==='resize'&&tool==='resize'&&(
-                    <ResizeScalePanel
-                      toolColor={activeColor}
-                      selCount={resizeSel.length} accepted={resizeAccepted}
-                      onAccept={()=>setResizeAccepted(true)}
-                      scaleInput={resizeScaleInput}
-                      onChangeScale={setResizeScaleInput}
-                    />
-                  )}
-                  {t==='mirror'&&tool==='mirror'&&(
-                    <MirrorPanel
-                      toolColor={activeColor}
-                      selCount={mirrorSel.length} accepted={mirrorAccepted}
-                      onAccept={()=>setMirrorAccepted(true)}
-                      hasAxisStart={!!mirrorP1}
-                    />
-                  )}
-                  {t==='center'&&tool==='center'&&(
-                    <CenterPanel
-                      toolColor={activeColor}
-                      selCount={centerSel.length}
-                      onApply={commitCenter}
-                    />
-                  )}
                 </div>
               ))}
 
@@ -15763,7 +15904,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           {/* ViewCube — click a face to jump to that view. Hidden while
               sketching, where the camera is locked to the sketch plane. */}
           {!sketchMode && (
-            <div style={{position:'absolute',top:'calc(var(--ribbon-h, 0px) + 8px)',right:8,zIndex:5,
+            <div style={{position:'absolute',top:'calc(var(--ribbon-h, 0px) + var(--tool-ribbon-h, 0px) + 8px)',right:8,zIndex:5,
               display:'flex',flexDirection:'column',alignItems:'center',gap:6}}>
               <ViewCube getAxes={getViewCubeAxes}
                 onSnap={(dir,up)=>viewport3dRef.current?.snapToView(dir,up)}
@@ -16113,6 +16254,9 @@ const App3D = forwardRef(function App3D(props, ref) {
             ]}
             onStepBack={step => { if (step === 1) resetMoveCopy3D() }}
           />
+
+          {/* ── Sketch-tool ribbon (second row, trial): the sketch tool in use ── */}
+          <SmartStepBar compact {...(sketchToolRibbon() || { op: null })}/>
 
           {/* ── SmartStep bar: overlays bottom of viewport during Pattern ── */}
           <SmartStepBar

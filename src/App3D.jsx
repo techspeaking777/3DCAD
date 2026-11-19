@@ -1131,6 +1131,12 @@ const EXTRUDE_STEPS = [
   { id: 3, label: 'Set Depth' },
 ]
 
+const REVOLVE_STEPS = [
+  { id: 1, label: 'Pick Plane' },
+  { id: 2, label: 'Draw Profile' },
+  { id: 3, label: 'Set Angle' },
+]
+
 // Chamfer's distinct accent — used everywhere the fillet3d tool's UI shows
 // color while in Chamfer mode (ribbon bar, edge-pick markers, radius/
 // distance popup), so it's visually obvious which mode is active while
@@ -1180,6 +1186,7 @@ const STEP_TIPS = {
   'sketch path': 'Draw the line or curve the shape travels along.',
   'sketch wire': 'Draw the wire shape and, if you like, an axis line for the spring to wind round.',
   'set depth': 'Choose how far the shape grows: drag the arrow or type a depth. One way goes toward the side your mouse is on (or type a minus number for the other side); Both ways centres it on the sketch.',
+  'set angle': 'Choose how far it spins round the axis (360° makes a full solid), which way it spins, and which axis it spins round.',
   'set a depth': 'Choose how far the shape grows: drag the arrow or type a depth.',
   'set radius': 'Type how big the rounding is, in mm.',
   'set thickness': 'Type how thick the walls are, in mm.',
@@ -2072,7 +2079,6 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [springOffsetBase,setSpringOffsetBase]=useState(null)
   const [springOffsetDistInput,setSpringOffsetDistInput]=useState('20')
   const [springOffsetDistLocked,setSpringOffsetDistLocked]=useState(false)  // see extrudeOffsetDistLocked's comment
-  const extrudePanelDrag = useDraggablePanel()
   const loftPanelDrag = useDraggablePanel()
   const springPanelDrag = useDraggablePanel()
   const sweepPanelDrag = useDraggablePanel()
@@ -2970,7 +2976,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
     setTool('select')
     setLines([]); setCircles([]); setArcs([]); setSplines([]); setDims([])
-    setExtrudeState(null); setExtrudeTool(null); setExtrudeHandlePos(null); setEditingFeatureId(null)
+    setExtrudeState(null); setExtrudeTool(null); setEditingFeatureId(null)
   }
 
   // Shared tail of "replace everything on screen with this project" — pulled
@@ -4194,26 +4200,6 @@ const App3D = forwardRef(function App3D(props, ref) {
               ctx.textAlign = 'center'
               ctx.fillText('click to ' + extrudeTool, cScreen.x, cScreen.y - 10)
 
-              // ── Dock popup at the bottom of the viewport, above the
-              // SmartStepBar — anchoring it to the centroid used to put it
-              // right on top of the shape being extruded for small/nearby
-              // profiles. A fixed, geometry-independent dock never overlaps
-              // the canvas regardless of profile size or position.
-              if (isSelected && cScreen) {
-                const vpEl = vp.getDomElement?.()
-                const vpRect = vpEl?.parentElement?.getBoundingClientRect?.()
-                if (vpRect) {
-                  // 200 clears the SmartStepBar (52px) plus the popup's own
-                  // tallest variant (cutout, ~130px). Clamped against both
-                  // vpRect and window.innerHeight — on layouts where the two
-                  // disagree (e.g. viewport scaling), take whichever keeps
-                  // the popup higher up, so it can never render past either.
-                  setExtrudeHandlePos({
-                    x: vpRect.left + vpRect.width / 2,
-                    top: Math.min(vpRect.bottom - 200, window.innerHeight - 220),
-                  })
-                }
-              }
             }
             ctx.restore()
           })
@@ -5308,6 +5294,14 @@ const App3D = forwardRef(function App3D(props, ref) {
     featureCountRef.current.extrude += 1
     return `Extrude ${featureCountRef.current.extrude}`
   }
+  function nextRevolveName() {
+    featureCountRef.current.revolve = (featureCountRef.current.revolve ?? 0) + 1
+    return `Revolve ${featureCountRef.current.revolve}`
+  }
+  function nextRevolveCutName() {
+    featureCountRef.current.revolvecut = (featureCountRef.current.revolvecut ?? 0) + 1
+    return `Revolve Cut ${featureCountRef.current.revolvecut}`
+  }
   function nextCutoutName() {
     featureCountRef.current.cutout += 1
     return `Cutout ${featureCountRef.current.cutout}`
@@ -5514,7 +5508,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       }])
     }
     setLines([]); setCircles([]); setArcs([]); setSplines([]); setDims([])
-    setExtrudeHandlePos(null)
+
     viewport3dRef.current?.restoreSavedView()
   }
 
@@ -6001,7 +5995,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     setTool(op)
     setExtrudeTool(op)
     setExtrudeState(null)
-    setExtrudeHandlePos(null)
+
     setEditingFeatureId(null)
     setHideWorkPlanesManual(false)
     setExtrudeOffsetMode(false)
@@ -10251,7 +10245,6 @@ const App3D = forwardRef(function App3D(props, ref) {
   // Phase 2 (armed):  first click on profile → extrudeState.armed=true, mouse moves freely
   // Phase 3 (commit): second click → commitExtrude() → OCC builds real solid
 
-  const [extrudeHandlePos, setExtrudeHandlePos] = useState(null)
   const extrudeMouseRef = useRef(null)   // latest mouse client coords while armed
   const previewSolidRef = useRef(null)
 
@@ -11241,46 +11234,18 @@ const App3D = forwardRef(function App3D(props, ref) {
           depthInput: prev.depthInput, direction: prev.direction,
           depthLocked: prev.depthLocked, directionLocked: prev.directionLocked } })
   }
-  function directionToggle(color, { compact = false } = {}) {
-    const oneWay = extrudeState.direction !== 'both'
-    // A cut sketched on a body's face always goes into that body — there is no other side to flip to.
-    const faceCut = extrudeTool === 'cutout' && extrudeState.planeId === 'face' && !extrudeState.facePlane?.free
-    const btn = (key, label, active, enabled, onClick, title) => (
-      <button key={key} onClick={onClick} title={title} disabled={!enabled}
-        style={{
-          flex: compact ? '0 0 auto' : 1, padding: compact ? '2px 8px' : '4px 0', fontSize: compact ? 10 : 11,
-          cursor: enabled ? 'pointer' : 'default', fontFamily: 'monospace', fontWeight: 'bold',
-          background: active ? color : '#050505', color: active ? '#000' : color,
-          border: `1px solid ${color}`, borderRadius: 2, opacity: enabled ? 1 : 0.35,
-          textShadow: active ? 'none' : `0 0 4px ${color}`,
-        }}>{label}</button>
-    )
-    return (
-      <div style={{ display: 'flex', gap: 4 }}>
-        {btn('one', 'One way', oneWay, true,
-          () => updateExtrudeState(prev => ({ direction: prev.direction === 'both' ? 'front' : prev.direction, directionLocked: false })),
-          'One way — grows to one side of the sketch. Hover either side of the plane to choose, or press Flip')}
-        {btn('both', 'Both ways', !oneWay, true,
-          () => updateExtrudeState(() => ({ direction: 'both' })),
-          'Both ways — grows equally on both sides of the sketch')}
-        {btn('flip', '⇄ Flip', false, oneWay && !faceCut,
-          () => updateExtrudeState(prev => ({ direction: prev.direction === 'back' ? 'front' : 'back', directionLocked: true })),
-          faceCut ? 'A cut on a face always goes into the body' : 'Flip to the other side of the sketch')}
-      </div>
-    )
-  }
 
   // Extrude / Cutout depth step (step 3) as ribbon options, in the order a
   // student meets them (user's order, 2026-11-19): depth → One way / Both ways
   // → To face → draft → (new body / join) → Apply. No Flip: the mouse's side of the plane picks the side, or a
-  // negative depth (see setDepthText). These used to live in a floating panel by the sketch (still used
-  // for Revolve). Same state writes as that panel: every change goes through
-  // updateExtrudeState so Enter straight after a click sees it.
+  // negative depth (see setDepthText). Revolve gets its own list (below).
+  // These used to live in a floating panel by the sketch. Every change goes
+  // through updateExtrudeState so Enter straight after a click sees it.
   function extrudeDepthActions() {
     const st = extrudeState
-    if (!st?.armed || st.revolveAxis) return null
+    if (!st?.armed) return null
     const isCut = extrudeTool === 'cutout'
-    const color = isCut ? '#e05a4e' : '#3a7bd5'
+    const color = (isCut || extrudeTool === 'revolvecut') ? '#e05a4e' : '#3a7bd5'
     const oneWay = st.direction !== 'both'
     const faceCut = isCut && st.planeId === 'face' && !st.facePlane?.free
     const through = st.extentMode === 'through'
@@ -11311,8 +11276,50 @@ const App3D = forwardRef(function App3D(props, ref) {
       const vp = viewport3dRef.current
       const oc = vp?.getOverlayCanvas()
       if (oc) { const ctx = oc.getContext('2d'); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, oc.width, oc.height) }
+      const pc = vp?.getExtrudePreviewCanvas()
+      if (pc) { const ctx = pc.getContext('2d'); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, pc.width, pc.height) }
       setSolids(prev => prev.filter(s => s.id !== '__preview__'))
       commitExtrude()
+    }
+    // Revolve / Revolve Cut: angle first (with the quick 90/180/270/360), then
+    // which way it spins, then the axis it spins round, then New body / Join.
+    if (st.revolveAxis) {
+      const drawnAxis = st.sketchLines?.find(l => l.style === 'axis' && (l.plane || 'XY') === st.planeId)
+      const axisKind = st.revolveAxis.preset || 'drawn'
+      const angleNow = String(parseFloat(st.depthInput))
+      const rev = st.revolveReverse || false
+      const pickAxis = a => updateExtrudeState(() => ({ revolveAxis: a }))
+      return [
+        { node: (
+          <div style={field()} title="How far it spins, in degrees — 360 makes a full solid">
+            {label('ANGLE')}
+            <input autoFocus value={st.depthInput}
+              onChange={e => updateExtrudeState(() => ({ depthInput: e.target.value }))}
+              onKeyDown={e => { e.stopPropagation(); handleExtrudeDepthKey(e) }}
+              onFocus={e => e.target.select()}
+              style={inputStyle(40)}/>
+            {unit('°')}
+          </div>
+        ) },
+        ...[90, 180, 270, 360].map(a => ({ label: a + '°', enabled: true, active: angleNow === String(a),
+          onClick: () => updateExtrudeState(() => ({ depthInput: String(a) })) })),
+        { divider: true },
+        { label: '↺ Counter-clockwise', enabled: true, active: rev === false, onClick: () => updateExtrudeState(() => ({ revolveReverse: false })) },
+        { label: '↻ Clockwise', enabled: true, active: rev === true, onClick: () => updateExtrudeState(() => ({ revolveReverse: true })) },
+        { label: '⇆ Both ways', enabled: true, active: rev === 'both', onClick: () => updateExtrudeState(() => ({ revolveReverse: 'both' })) },
+        { divider: true },
+        { label: 'Vertical axis', enabled: true, active: axisKind === 'vertical', onClick: () => pickAxis(originRevolveAxis('vertical')) },
+        { label: 'Horizontal axis', enabled: true, active: axisKind === 'horizontal', onClick: () => pickAxis(originRevolveAxis('horizontal')) },
+        ...(drawnAxis ? [{ label: 'Your line', enabled: true, active: axisKind === 'drawn',
+          onClick: () => pickAxis({ x1: drawnAxis.x1, y1: drawnAxis.y1, x2: drawnAxis.x2, y2: drawnAxis.y2 }) }] : []),
+        ...(extrudeTool === 'revolve' && joinableBodyId != null && !editingFeatureId ? [
+          { divider: true },
+          { label: 'New body', enabled: true, active: !st.joinBody, onClick: () => updateExtrudeState(() => ({ joinBody: false })) },
+          { label: 'Join to body', enabled: true, active: !!st.joinBody, onClick: () => updateExtrudeState(() => ({ joinBody: true })) },
+        ] : []),
+        { divider: true },
+        { label: '✓ Apply', enabled: true, onClick: apply },
+      ]
     }
     return [
       ...(through ? [
@@ -11735,7 +11742,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       for (const p of hits) {
         newFeats.push({
           id: reuseId ? editingId : `cutout-${target.id}-${Date.now()}-${newFeats.length}`,
-          type: 'extrude', name: editingFeat?.name || nextCutoutName(), groupId,
+          type: 'extrude', name: editingFeat?.name || (revolveAxis ? nextRevolveCutName() : nextCutoutName()), groupId,
           solidId: target.id, sketchId: lastSketch?.id || null,
           depthMm, cutDepthMm, cutDirection, extentMode, color, operation: 'cutout', planeId, profilePts: p, facePlane,
           revolveAxis, angleDeg, revolveReverse, ...sketchGeom,
@@ -11795,7 +11802,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     hiddenEditSolidRef.current = null   // committed — new solid replaces the hidden one
     setExtrudeState(null)
     setExtrudeTool(null)
-    setExtrudeHandlePos(null)
+
     setEditingFeatureId(null)
     // Clear integrated sketch canvas (geometry now baked into the solid)
     setLines([]); setCircles([]); setArcs([]); setSplines([]); setDims([])
@@ -11964,7 +11971,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         setSolids(prev => [...prev.filter(s => s.id !== solidId), solid])
         const revolveFeat = {
           id: editingId || `revolve-${solidId}`,
-          type: 'extrude', name: editingFeat?.name || nextExtrudeName(),
+          type: 'extrude', name: editingFeat?.name || nextRevolveName(),
           solidId, sketchId: lastSketch?.id || null,
           angleDeg, color, operation: 'revolve', planeId, profilePts: pts, facePlane, revolveAxis, revolveReverse,
           ...sketchGeom, ...(revolveTransform ? { transform: revolveTransform } : {}),
@@ -12302,7 +12309,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       // only detectable by revolveAxis's presence, same as that function.
       const op = feat.operation === 'cutout' && feat.revolveAxis ? 'revolvecut' : (feat.operation || 'extrude')
       resetSelection(); resetDrawState()
-      setExtrudeTool(op); setExtrudeState(null); setExtrudeHandlePos(null)
+      setExtrudeTool(op); setExtrudeState(null);
       setCachedProfiles([])
       setEditingFeatureId(featureId)
 
@@ -12373,7 +12380,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     resetSelection(); resetDrawState()
     setExtrudeTool(op === 'cutout' && feat.revolveAxis ? 'revolvecut' : op)
     setEditingFeatureId(featureId)
-    setExtrudeHandlePos(null)
+
     setCachedProfiles([{ planeId: feat.planeId, facePlane: feat.facePlane || null, pts, centroid }])
 
     // Hide the solid being edited — for cutouts, feat.solidId is the *base* solid
@@ -15655,6 +15662,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           {/* ── SmartStep bar: overlays bottom of viewport during Extrude/Cutout/Revolve ── */}
           <SmartStepBar
             op={extrudeTool === 'revolvecut' ? 'revolve cut' : extrudeTool}
+            steps={(extrudeTool === 'revolve' || extrudeTool === 'revolvecut') ? REVOLVE_STEPS : EXTRUDE_STEPS}
             extraActions={sketchFinishActions()}
             currentStep={
               extrudeState  ? 3 :
@@ -15665,7 +15673,12 @@ const App3D = forwardRef(function App3D(props, ref) {
               const isRev = extrudeTool === 'revolve' || extrudeTool === 'revolvecut'
               const isCut = extrudeTool === 'cutout' || extrudeTool === 'revolvecut'
               if (extrudeState) {
-                if (isRev) return 'Pick the axis, how far to spin it and which way. 360° makes a full solid.'
+                if (isRev) {
+                  const prof = extrudeState.profiles?.[extrudeState.pickedIdx]
+                  if (prof && extrudeState.revolveAxis && profileCrossesAxis(prof, extrudeState.revolveAxis))
+                    return 'The shape crosses this axis — pick the other axis, or edit the sketch.'
+                  return 'Type an angle (360° makes a full solid), choose which way it spins and the axis, then press Enter.'
+                }
                 if (extrudeState.toFace) return `Point at a face and click to ${isCut ? 'cut down' : 'extrude up'} to it. Esc goes back.`
                 return isCut ? 'Type a depth, then press Enter. Red bodies will be cut. Hover a corner, midpoint or centre to snap to it.'
                              : 'Drag or type how far to extrude, then press Enter. Hover a corner, midpoint or centre to snap to it.'
@@ -15707,7 +15720,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                 const plane = saved?.sketchPlane
                 if (plane) {
                   setExtrudeState(null)
-                  setExtrudeHandlePos(null)
+
                   enterSketch(plane, null, {
                     lines:   saved.sketchLines   || [],
                     circles: saved.sketchCircles || [],
@@ -15725,7 +15738,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                 setActiveSketchId(null)
                 activePlaneRef.current = null
                 setExtrudeState(null)
-                setExtrudeHandlePos(null)
+
                 setLines([]); setCircles([]); setArcs([]); setSplines([]); setDims([])
                 viewport3dRef.current?.restoreSavedView()
               }
@@ -16431,25 +16444,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                 }}>
                   {p.action}
                 </span>
-                {/* Inline angle input — Revolve only (Extrude/Cutout's depth is in the ribbon) */}
-                {extrudeState?.revolveAxis && (
-                  <input
-                    autoFocus
-                    value={extrudeState.depthInput}
-                    onChange={e=>setExtrudeState(prev=>({...prev,depthInput:e.target.value,depthLocked:true}))}
-                    onKeyDown={e=>{ e.stopPropagation(); handleExtrudeDepthKey(e) }}
-                    style={{
-                      width:70, background:'#1e1e38',
-                      border:`1.5px solid ${(extrudeTool==='cutout'||extrudeTool==='revolvecut')?'#e05a4e':'#3a7bd5'}`,
-                      borderRadius:4, color:'#dce8ff',
-                      fontFamily:'monospace', fontSize:13,
-                      padding:'3px 8px', outline:'none',
-                    }}
-                  />
-                )}
-                {extrudeState?.revolveAxis && (
-                  <span style={{color:'#6688aa',fontFamily:'monospace',fontSize:12,flexShrink:0}}>°</span>
-                )}
+                {/* (Extrude / Cutout / Revolve size boxes are in the step ribbon.) */}
                 {/* Key badges */}
                 {p.hints && p.hints.length>0 && <>
                   <span style={{color:'#2a2a4a',fontSize:11,flexShrink:0}}>·</span>
@@ -16498,293 +16493,6 @@ const App3D = forwardRef(function App3D(props, ref) {
           </div>
         </div>
       </div>
-
-      {/* ── Extrude popup (solid creation only) ─────────────────────────── */}
-      {extrudeState?.armed && extrudeHandlePos && extrudeState.revolveAxis && (
-        <div style={{
-          position: 'fixed',
-          left: extrudeHandlePos.x,
-          top: extrudeHandlePos.top,
-          transform: 'translateX(-50%)',
-          zIndex: 1000,
-        }}>
-        <div ref={extrudePanelDrag.panelRef} style={{
-          background: '#000',
-          border: `1.5px solid ${(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'}`,
-          borderRadius: 2,
-          padding: '10px 14px',
-          minWidth: 180,
-          boxShadow: `0 0 14px ${(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'}77, 0 0 3px ${(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'} inset`,
-          fontFamily: 'monospace',
-          ...extrudePanelDrag.panelStyle,
-        }}>
-          <DragHandle {...extrudePanelDrag.handleProps}>{extrudeState.revolveAxis ? (extrudeTool==='revolvecut' ? 'Revolve Cut' : 'Revolve') : (extrudeTool==='cutout'||extrudeTool==='revolvecut') ? 'Cutout' : 'Extrude'}</DragHandle>
-          {extrudeState.revolveAxis ? (
-            <>
-              {/* Revolve (extrude or cutout): axis, direction, sweep angle.
-                  The axis (an origin axis or the drawn Axis line) plus a
-                  degrees value and sweep direction fully defines a solid —
-                  or cut volume — of revolution. */}
-              {(() => {
-                const accent = (extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'
-                const chip = (active, small) => ({
-                  flex:1, padding: small ? '3px 0' : '4px 2px', fontSize: small ? 11 : 11, cursor:'pointer',
-                  background: active ? accent : '#050505', color: active ? '#000' : accent,
-                  border:`1px solid ${accent}`, borderRadius:2, fontFamily:'monospace', fontWeight:'bold',
-                  textShadow: active ? 'none' : `0 0 4px ${accent}`,
-                })
-                const st = extrudeState
-                const prof = st.profiles?.[st.pickedIdx]
-                const drawnAxis = st.sketchLines?.find(l => l.style === 'axis' && (l.plane||'XY') === st.planeId)
-                const axisKind = st.revolveAxis.preset || 'drawn'
-                const crosses = !!prof && profileCrossesAxis(prof, st.revolveAxis)
-                const angleNow = String(parseFloat(st.depthInput))
-                const rev = st.revolveReverse || false
-                const pickAxis = (a) => updateExtrudeState(() => ({ revolveAxis: a }))
-                return (
-                  <>
-                    <div style={{color:'#889', fontSize:10, marginBottom:3, letterSpacing:'0.05em'}}>SPIN AROUND</div>
-                    <div style={{display:'flex', gap:4, marginBottom: crosses ? 4 : 8}}>
-                      <button style={chip(axisKind==='vertical')} title="The up-and-down origin axis of the sketch"
-                        onClick={()=>pickAxis(originRevolveAxis('vertical'))}>Vertical axis</button>
-                      <button style={chip(axisKind==='horizontal')} title="The left-to-right origin axis of the sketch"
-                        onClick={()=>pickAxis(originRevolveAxis('horizontal'))}>Horizontal axis</button>
-                      {drawnAxis && (
-                        <button style={chip(axisKind==='drawn')} title="The axis line you drew in the sketch"
-                          onClick={()=>pickAxis({ x1:drawnAxis.x1, y1:drawnAxis.y1, x2:drawnAxis.x2, y2:drawnAxis.y2 })}>Your line</button>
-                      )}
-                    </div>
-                    {crosses && (
-                      <div style={{color:'#ff6b6b', fontSize:10, marginBottom:8, lineHeight:1.3}}>
-                        The shape crosses this axis — try the other one, or edit the sketch.
-                      </div>
-                    )}
-                    <div style={{color:'#889', fontSize:10, marginBottom:3, letterSpacing:'0.05em'}}>DIRECTION</div>
-                    <div style={{display:'flex', gap:4, marginBottom:4}}>
-                      <button style={chip(rev===false)} title="Spin counter-clockwise (right-hand rule about the axis)"
-                        onClick={()=>updateExtrudeState(()=>({revolveReverse:false}))}>↺ Counter-clockwise</button>
-                      <button style={chip(rev===true)} title="Spin clockwise"
-                        onClick={()=>updateExtrudeState(()=>({revolveReverse:true}))}>↻ Clockwise</button>
-                    </div>
-                    <button style={{...chip(rev==='both'), width:'100%', flex:'none', marginBottom:8}}
-                      title="Spin half the angle each way, so the sketch sits in the middle of the shape"
-                      onClick={()=>updateExtrudeState(()=>({revolveReverse:'both'}))}>⇆ Both ways</button>
-                    <div style={{display:'flex', gap:4, marginBottom:6}}>
-                      {[90,180,270,360].map(a => (
-                        <button key={a} style={chip(angleNow===String(a), true)}
-                          onClick={()=>updateExtrudeState(()=>({depthInput:String(a)}))}>{a}°</button>
-                      ))}
-                    </div>
-                    {/* New body | Join to body — only when the sketch sits on a body's face. */}
-                    {joinableBodyId != null && !editingFeatureId && (
-                      <div style={{display:'flex', gap:4, marginBottom:8}}>
-                        {[
-                          {k:false, label:'New body',     title:'Keep the revolve as its own body'},
-                          {k:true,  label:'Join to body', title:'Fuse the revolve into the body you sketched on'},
-                        ].map(({k,label,title}) => (
-                          <button key={label} title={title} style={chip(!!st.joinBody === k)}
-                            onClick={()=>updateExtrudeState(()=>({joinBody:k}))}>{label}</button>
-                        ))}
-                      </div>
-                    )}
-                  </>
-                )
-              })()}
-              <div style={{display:'flex', alignItems:'center', gap:8}}>
-                <div style={{
-                  flex:1, background:'#000', border:`1px solid ${(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C55' : '#3ad6ff55'}`,
-                  borderRadius:2, padding:'4px 8px',
-                  display:'flex', alignItems:'center', justifyContent:'space-between',
-                }}>
-                  <input
-                    autoFocus
-                    value={extrudeState.depthInput}
-                    onChange={e=>{
-                      const val = e.target.value
-                      setExtrudeState(prev=>({...prev,depthInput:val}))
-                      // Ghost preview restarts automatically via the useEffect
-                      // keyed on extrudeState.depthInput — no manual redraw needed.
-                    }}
-                    onKeyDown={e=>{ e.stopPropagation(); handleExtrudeDepthKey(e) }}
-                    style={{
-                      background:'none', border:'none', outline:'none',
-                      color: (extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff',
-                      textShadow: `0 0 5px ${(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'}`,
-                      fontFamily:'monospace', fontSize:16,
-                      fontWeight:'bold', flex:1, minWidth:0,
-                    }}
-                  />
-                  <span style={{color:'#556', fontSize:12}}>°</span>
-                </div>
-                <button
-                  onClick={()=>{
-                    const vp = viewport3dRef.current
-                    const oc = vp?.getOverlayCanvas()
-                    if (oc) { const ctx=oc.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,oc.width,oc.height) }
-                    const pc = vp?.getExtrudePreviewCanvas()
-                    if (pc) { const ctx=pc.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,pc.width,pc.height) }
-                    commitExtrude()
-                  }}
-                  style={{
-                    padding:'4px 10px', background: (extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff', color:'#000',
-                    border:'none', borderRadius:2, cursor:'pointer',
-                    fontFamily:'monospace', fontSize:12, fontWeight:'bold',
-                    boxShadow: `0 0 6px ${(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#FF3B5C' : '#3ad6ff'}`,
-                  }}
-                >↵</button>
-              </div>
-              <div style={{color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em'}}>
-                {(extrudeTool==='cutout'||extrudeTool==='revolvecut') ? 'Revolve cutout angle' : 'Revolve angle'} · ↵ to accept · Esc to cancel
-              </div>
-            </>
-          ) : (
-            <>
-              {/* Extent mode — One Way (direction/sign follows which side of the
-                  plane the mouse is hovering, see handleExtrudeDragMove) vs
-                  Symmetric (grows equally both ways, side ignored). */}
-              <div style={{marginBottom:8}}>{directionToggle('#3ad6ff')}</div>
-              {/* New body | Join to body — only when the sketch sits on a body's face.
-                  Join fuses the result into that body (one Join row in the tree). */}
-              {joinableBodyId != null && !editingFeatureId && (
-                <div style={{display:'flex', gap:4, marginBottom:8}}>
-                  {[
-                    {k:false, label:'New body',     title:'Keep the extrude as its own body'},
-                    {k:true,  label:'Join to body', title:'Fuse the extrude into the body you sketched on'},
-                  ].map(({k,label,title}) => {
-                    const active = !!extrudeState.joinBody === k
-                    return (
-                      <button key={label} title={title}
-                        onClick={()=>updateExtrudeState(()=>({joinBody:k}))}
-                        style={{
-                          flex:1, padding:'4px 0', fontSize:11, cursor:'pointer', fontFamily:'monospace', fontWeight:'bold',
-                          background: active ? '#3ad6ff' : '#050505', color: active ? '#000' : '#3ad6ff',
-                          border:'1px solid #3ad6ff', borderRadius:2,
-                          textShadow: active ? 'none' : '0 0 4px #3ad6ff',
-                        }}>{label}</button>
-                    )
-                  })}
-                </div>
-              )}
-              {/* Draft angle — optional taper of this extrude's side walls, in/out
-                  from the sketch plane (0° = off, the default). No face-picking:
-                  the worker derives every side face and the neutral plane itself
-                  from the extrude's own direction/sketch plane (see buildExtrude's
-                  draft branch in cadWorker.js). */}
-              <div style={{display:'flex', alignItems:'center', gap:6, marginBottom:8}}>
-                <div style={{
-                  flex:1, background:'#000', border:'1px solid #3ad6ff55',
-                  borderRadius:2, padding:'4px 8px',
-                  display:'flex', alignItems:'center', justifyContent:'space-between',
-                }}>
-                  <input
-                    value={extrudeState.draftAngleInput}
-                    onChange={e=>setExtrudeState(prev=>{
-                      // Sync the ref synchronously — see the direction toggle's
-                      // own comment a few hundred lines up for why: commitExtrude()
-                      // prefers extrudeStateRef.current, which only otherwise
-                      // catches up via a useEffect that runs AFTER this render
-                      // commits, so pressing Enter right after typing could
-                      // silently commit the PRE-edit angle.
-                      const next = {...prev, draftAngleInput:e.target.value}
-                      extrudeStateRef.current = next
-                      return next
-                    })}
-                    onKeyDown={e=>{ e.stopPropagation(); if (e.key==='Enter') commitExtrude() }}
-                    title="Draft angle — 0 = straight walls"
-                    style={{
-                      background:'none', border:'none', outline:'none',
-                      color:'#3ad6ff', textShadow:'0 0 5px #3ad6ff',
-                      fontFamily:'monospace', fontSize:16,
-                      fontWeight:'bold', flex:1, minWidth:0,
-                    }}
-                  />
-                  <span style={{color:'#556', fontSize:12}}>°</span>
-                </div>
-                {[
-                  {k:'in',  label:'In'},
-                  {k:'out', label:'Out'},
-                ].map(({k,label}) => {
-                  const active = extrudeState.draftDirection===k
-                  return (
-                    <button key={k}
-                      onClick={()=>setExtrudeState(prev=>{
-                        // Same synchronous ref-sync as the angle input above —
-                        // clicking In/Out then hitting Enter right away must not
-                        // race the useEffect that otherwise syncs this ref.
-                        const next = {...prev, draftDirection:k}
-                        extrudeStateRef.current = next
-                        return next
-                      })}
-                      title={k==='in' ? 'Draft In — walls narrow away from the sketch' : 'Draft Out — walls flare away from the sketch'}
-                      style={{
-                        padding:'4px 10px', fontSize:12, cursor:'pointer',
-                        background: active ? '#3ad6ff' : '#050505',
-                        color: active ? '#000' : '#3ad6ff',
-                        border:'1px solid #3ad6ff',
-                        borderRadius: 2, fontFamily:'monospace', fontWeight:'bold',
-                        textShadow: active ? 'none' : '0 0 4px #3ad6ff',
-                      }}
-                    >{label}</button>
-                  )
-                })}
-              </div>
-              {/* Distance display + input */}
-              <div style={{display:'flex', alignItems:'center', gap:8}}>
-                <div style={{
-                  flex:1, background:'#000', border:'1px solid #3ad6ff55',
-                  borderRadius:2, padding:'4px 8px',
-                  display:'flex', alignItems:'center', justifyContent:'space-between',
-                }}>
-                  <input
-                    autoFocus
-                    value={extrudeState.depthInput}
-                    onChange={e=>setExtrudeState(prev=>({...prev,depthInput:e.target.value,depthLocked:true}))}
-                    onKeyDown={e=>{ e.stopPropagation(); handleExtrudeDepthKey(e) }}
-                    style={{
-                      background:'none', border:'none', outline:'none',
-                      color:'#3ad6ff', textShadow:'0 0 5px #3ad6ff',
-                      fontFamily:'monospace', fontSize:16,
-                      fontWeight:'bold', flex:1, minWidth:0,
-                    }}
-                  />
-                  <span style={{color:'#556', fontSize:12}}>mm</span>
-                </div>
-                <button
-                  onClick={()=>{
-                    const vp = viewport3dRef.current
-                    const oc = vp?.getOverlayCanvas()
-                    if (oc) { const ctx=oc.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,oc.width,oc.height) }
-                    setSolids(prev=>prev.filter(s=>s.id!=='__preview__'))
-                    commitExtrude()
-                  }}
-                  style={{
-                    padding:'4px 10px', background:'#3ad6ff', color:'#000',
-                    border:'none', borderRadius:2, cursor:'pointer',
-                    fontFamily:'monospace', fontSize:12, fontWeight:'bold',
-                    boxShadow:'0 0 6px #3ad6ff',
-                  }}
-                >↵</button>
-              </div>
-              {/* To Face — the depth follows whichever surface the cursor is on; a click on it accepts. */}
-              <button
-                onClick={toggleToFace}
-                title="Extrude exactly up to another face: point at it and click"
-                style={{
-                  width:'100%', marginTop:8, padding:'4px 0', fontSize:11, cursor:'pointer', fontFamily:'monospace', fontWeight:'bold',
-                  background: extrudeState.toFace ? '#3ad6ff' : '#050505', color: extrudeState.toFace ? '#000' : '#3ad6ff',
-                  border:'1px solid #3ad6ff', borderRadius:2,
-                  textShadow: extrudeState.toFace ? 'none' : '0 0 4px #3ad6ff',
-                }}>⇥ To face</button>
-              <div style={{color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em'}}>
-                {extrudeState.toFace
-                  ? 'Click a face to extrude up to it · Esc to go back'
-                  : <>Move mouse to set depth{gridSnap ? ` (snap ${gridSizeMm}mm)` : ''} · type or ↵ to accept · Esc to cancel</>}
-              </div>
-            </>
-          )}
-        </div>
-        </div>
-      )}
 
       {/* ── Loft: unified between-profiles panel ─────────────────────────────
           Shown whenever a loft is mid-flight and not actively sketching —

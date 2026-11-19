@@ -15,6 +15,12 @@ const MODE_ICONS = {
 }
 
 // modes: [[id, label, hotkey hint], …]
+// One mode's picture (line / rect / rectc / circle / arc3), for the sketch-tool
+// ribbon's mode buttons in App3D.
+export function ShapeModeIcon({ id, color, size = 20 }) {
+  return <svg width={size} height={size} viewBox="0 0 22 22">{MODE_ICONS[id](color)}</svg>
+}
+
 export function ShapeModeRow({ modes, mode, onMode, toolColor }) {
   return (
     <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>

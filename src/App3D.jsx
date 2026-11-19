@@ -22,7 +22,7 @@ import { isEditableSpline, hitSplineNode, moveSplineNode, insertSplineNode, dele
 import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine, perpLabelOffset, drawFollowCornerMarks } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
 import { rectCorners, rectLines, rectSize, threePointArc, arcMidPoint } from './tools/shapeMath.js'
-import { ShapeModeRow, RectPanel, ArcPanel, LINE_MODES, CIRCLE_MODES } from './tools/ShapeModePanels.jsx'
+import { ShapeModeIcon } from './tools/ShapeModePanels.jsx'
 import { ensureIds, linkTwoPointDim, resolveDim, sameMeasure, dimLabelPoint, applyDimValue, dimClash, dimText } from './tools/sketchDims.js'
 import { loadJSON, exportDXF, parseDXF, centreDxfResult, saveProjectAs, canPickSaveLocation, exportFaceDXF as writeFaceDXF, saveBlobAs, saveProjectFileAs, loadProjectFile, serializeProject, parseProjectData } from './tools/saveLoad.js'
 import { getAuthState, fetchMyClasses, saveNewCloudProject, updateCloudProject, loadCloudProject, saveFeedbackCopy, updateFeedbackCopy } from './tools/cloudSave.js'
@@ -42,8 +42,6 @@ import SaveAsPanel from './tools/SaveAsPanel.jsx'
 import CloudSavePanel from './tools/CloudSavePanel.jsx'
 import CloudOpenPanel from './tools/CloudOpenPanel.jsx'
 import SplashScreen from './SplashScreen.jsx'
-import LineSnapPanel from './tools/LineSnapPanel.jsx'
-import CircleSnapPanel from './tools/CircleSnapPanel.jsx'
 import SplineSnapPanel from './tools/SplineSnapPanel.jsx'
 import SelectDimPanel from './tools/SelectDimPanel.jsx'
 import { useDraggablePanel, DragHandle } from './tools/useDraggablePanel.jsx'
@@ -2336,7 +2334,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   const toolBtnRefs = useRef({})
   const [flyoutAnchor,setFlyoutAnchor] = useState(null)
   useEffect(() => {
-    if (sketchMode && (tool==='line'||tool==='circle'||tool==='spline'||tool==='includeedge')) {
+    if (sketchMode && (tool==='spline'||tool==='includeedge')) {
       const el = toolBtnRefs.current[tool]
       if (el) {
         // Scroll the button into view first — the sidebar can hold more tools
@@ -2844,6 +2842,8 @@ const App3D = forwardRef(function App3D(props, ref) {
   const modifyToolColor = { movecopy: '#FF9800', rotatecopy: '#00BCD4', resize: '#E91E63', mirror: '#8E65F3', center: '#9CCC65' }
   const editToolColor = { trim: '#FF5722', delete: '#F44336', extend: '#00ACC1', corner: '#FF7043', join: '#76FF03' }
   const moveDistRef = useRef(null)
+  const lineLenRef = useRef(null)
+  const lineAngRef = useRef(null)
   const moveAngleRef = useRef(null)
   function sketchToolRibbon() {
     if (!sketchMode) return null
@@ -3103,6 +3103,121 @@ const App3D = forwardRef(function App3D(props, ref) {
           : offsetDistInput ? `${offsetDistInput} mm — move the mouse to the side you want, then click to place it.`
           : 'Move the mouse to set the distance and side (or type a distance), then click to place it.',
         onStepBack: id => { if (id === 1) resetOffset() },
+      }
+    }
+
+    // ── Draw tools: Line (and its Rectangle modes), Circle (and 3-point arc) ──
+    // (Their flyouts — LineSnapPanel, RectPanel, CircleSnapPanel, ArcPanel —
+    // are gone; the mode buttons, T / P and the size boxes live here.)
+    if (tool === 'line' || tool === 'circle') {
+      const color = '#2196F3'
+      const isLine = tool === 'line'
+      // Mode buttons with their picture above a small label (as in the old flyout).
+      const modeBtn = (id, lbl, title, on, pick) => ({ node: (
+        <button title={title} onClick={pick} style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 1,
+          width: 54, height: 40, boxSizing: 'border-box', padding: '2px 0', borderRadius: 7, cursor: 'pointer', fontFamily: 'monospace',
+          background: on ? color + '33' : 'transparent', border: `1px solid ${on ? color : '#3a3a5a'}`,
+        }}>
+          <ShapeModeIcon id={id} color={on ? color : '#8a93a6'} size={20}/>
+          <span style={{ fontSize: 8.5, letterSpacing: '0.05em', color: on ? color : '#8a93a6' }}>{lbl}</span>
+        </button>
+      ) })
+      const modeBtns = isLine
+        ? [['line', 'LINE', 'Draw lines'], ['rect', 'RECT', 'Rectangle — corner to corner (R)'], ['rectc', 'CENTRE', 'Rectangle — centre to corner (R again)']]
+            .map(([id, lbl, title]) => modeBtn(id, lbl, title, lineMode === id, () => chooseLineMode(id)))
+        : [['circle', 'CIRCLE', 'Draw circles'], ['arc3', '3-PT ARC', '3-point arc — start, end, then bend it (A)']]
+            .map(([id, lbl, title]) => modeBtn(id, lbl, title, circleMode === id, () => chooseCircleMode(id)))
+      // A size box: shows the live value until you type; Enter locks it and
+      // hands the keys back to the sketch (so the next Enter finishes).
+      const sizeBox = ({ name, value, locked, onChange, live, onEnter, unitTxt = 'mm', title, autoFocus = false, re = /^[0-9.]*$/, ref }) => ({ node: (
+        <div style={field(color)} title={title}>
+          {label((locked ? '🔒 ' : '') + name, locked)}
+          <input ref={ref} autoFocus={autoFocus} value={value}
+            onChange={e => { if (re.test(e.target.value)) onChange(e.target.value) }}
+            onKeyDown={e => {
+              if (e.key === 'Tab' && ref) { const other = ref === lineLenRef ? lineAngRef.current : lineLenRef.current; if (other) setTimeout(() => other.focus(), 0) }
+              keepKeys(e, () => { onEnter?.(); e.target.blur() })
+            }}
+            placeholder={live != null ? live.toFixed(1) : '—'} style={inputStyle(locked, 46)}/>
+          {unit(unitTxt)}
+        </div>
+      ) })
+
+      if (isLine && lineMode !== 'line') {
+        const centre = lineMode === 'rectc'
+        const step = shapePts.length > 0 ? 2 : 1
+        return {
+          op: centre ? 'CENTRE RECTANGLE' : 'RECTANGLE', color,
+          steps: [{ id: 1, label: centre ? 'Centre' : 'First corner' }, { id: 2, label: 'Opposite corner' }],
+          currentStep: step,
+          action: [...modeBtns, { divider: true },
+            sizeBox({ name: 'WIDTH', value: rectW, locked: rectW !== '' && parseFloat(rectW) > 0, onChange: setRectW, live: shapeLive?.w ?? null, title: 'Type a width to lock it (used for one rectangle)' }),
+            sizeBox({ name: 'HEIGHT', value: rectH, locked: rectH !== '' && parseFloat(rectH) > 0, onChange: setRectH, live: shapeLive?.h ?? null, title: 'Type a height to lock it (used for one rectangle)' }),
+          ],
+          hint: step === 1 ? (centre ? 'Click the centre of the rectangle.' : 'Click the first corner.') + ' Typing a width or height locks it. Esc starts again.'
+            : 'Click the opposite corner.' + (rectW || rectH ? ' The typed size is locked.' : ''),
+          onStepBack: id => { if (id === 1) setShapePts([]) },
+        }
+      }
+      if (isLine) {
+        const drawing = !!startPoint && !deferredTangent
+        const canLock = (dimInput && parseFloat(dimInput) > 0) || (!pKeyDown && angleInput && parseFloat(angleInput) >= 0)
+        return {
+          op: tKeyDown ? 'TANGENT LINE' : pKeyDown ? 'SQUARE LINE' : 'LINE', color,
+          steps: [{ id: 1, label: 'Start' }, { id: 2, label: 'End' }],
+          currentStep: drawing ? 2 : 1,
+          action: [...modeBtns, { divider: true },
+            { label: 'T', enabled: true, active: tKeyDown, title: 'Tangent — start the line touching a circle (T)', onClick: () => setTKeyDown(p => !p) },
+            { label: 'P', enabled: true, active: pKeyDown, title: 'Perpendicular — square off a line (P)', onClick: () => setPKeyDown(p => !p) },
+            ...(drawing ? [{ divider: true },
+              sizeBox({ name: 'LENGTH', value: dimInput, locked: dimLocked, onChange: v => { setDimLocked(false); setDimInput(v) }, live: lineLiveLenMm,
+                onEnter: applyDimAngleLock, title: 'Type a length, Enter locks it', autoFocus: true, ref: lineLenRef }),
+              ...(pKeyDown ? [] : [sizeBox({ name: 'ANGLE', value: angleInput, locked: angleLocked, onChange: v => { setAngleLocked(false); setAngleInput(v) }, live: lineLiveAngleDeg,
+                onEnter: applyDimAngleLock, unitTxt: '°', title: 'Type an angle (0 = right, 90 = up), Enter locks it', ref: lineAngRef })]),
+              { label: '✓ Lock it in', enabled: !!canLock, title: 'Fix the typed length / angle', onClick: applyDimAngleLock },
+            ] : []),
+          ],
+          hint: !drawing
+            ? (tKeyDown ? 'Click near a circle’s edge to start a line that touches it.'
+              : pKeyDown ? 'Click a line to start a line square off it.'
+              : 'Click to start a line — it snaps to ends, middles and centres.')
+            : 'Click the end — or type a length / angle and press Enter to lock it. Enter or double-click finishes the line.',
+          onStepBack: id => { if (id === 1) resetDrawState() },
+        }
+      }
+      if (circleMode === 'arc3') {
+        const step = shapePts.length + 1
+        return {
+          op: '3-POINT ARC', color,
+          steps: [{ id: 1, label: 'Start' }, { id: 2, label: 'End' }, { id: 3, label: 'Bend' }],
+          currentStep: Math.min(3, step),
+          action: [...modeBtns, { divider: true },
+            sizeBox({ name: 'RADIUS', value: arcR, locked: arcR !== '' && parseFloat(arcR) > 0, onChange: setArcR, live: shapeLive?.r ?? null, title: 'Type a radius to lock it (used for one arc)' })],
+          hint: step === 1 ? 'Click where the arc starts.' : step === 2 ? 'Click where it ends.'
+            : shapeLive?.tangent ? 'Tangent! Click to place it.' : 'Move the mouse to bend it, then click. It snaps to a tangent when it lines up with a line it starts or ends on.',
+          onStepBack: id => { if (id === 1) setShapePts([]); if (id === 2) setShapePts(p => p.slice(0, 1)) },
+        }
+      }
+      const drawing = !!circleCenter || (!!circleTanA && !!circleTanB)
+      return {
+        op: tKeyDown || circleTanA ? 'TANGENT CIRCLE' : 'CIRCLE', color,
+        steps: [{ id: 1, label: tKeyDown || circleTanA ? 'Two circles' : 'Centre' }, { id: 2, label: 'Size' }],
+        currentStep: drawing ? 2 : 1,
+        action: [...modeBtns, { divider: true },
+          { label: 'T', enabled: true, active: tKeyDown, title: 'Tangent — a circle touching two others (T)', onClick: () => setTKeyDown(p => !p) },
+          ...(drawing ? [{ divider: true },
+            sizeBox({ name: 'RADIUS', value: dimInput, locked: dimLocked, onChange: v => { setDimLocked(false); setDimInput(v) }, live: circleLiveRadiusMm,
+              onEnter: applyCircleRadius, title: 'Type a radius, Enter locks it', autoFocus: true }),
+            { label: '✓ Lock it in', enabled: !!(dimInput && parseFloat(dimInput) > 0), title: 'Fix the typed radius', onClick: applyCircleRadius },
+          ] : []),
+        ],
+        hint: circleTanA && circleTanB ? 'Move to size it (or type a radius), then click to place it.'
+          : circleTanA ? 'Click a different circle’s edge.'
+          : circleCenter ? 'Click to set the size — or type a radius and press Enter.'
+          : tKeyDown ? 'Click a circle’s edge (then a second one) for a circle touching both.'
+          : 'Click the centre of the circle.',
+        onStepBack: id => { if (id === 1) resetDrawState() },
       }
     }
 
@@ -17242,31 +17357,6 @@ const App3D = forwardRef(function App3D(props, ref) {
 
       {flyoutAnchor && (
         <div style={{position:'fixed', top:flyoutAnchor.top, left:flyoutAnchor.right, zIndex:250}}>
-          {tool==='line' && lineMode!=='line' && (
-            <RectPanel
-              toolColor={toolConfig.find(([t])=>t==='line')[3]}
-              mode={lineMode} onMode={chooseLineMode} started={shapePts.length>0}
-              w={rectW} h={rectH} onW={setRectW} onH={setRectH}
-              liveW={shapeLive?.w ?? null} liveH={shapeLive?.h ?? null}
-            />
-          )}
-          {tool==='line' && lineMode==='line' && (
-            <LineSnapPanel
-              modeRow={<ShapeModeRow modes={LINE_MODES} mode={lineMode} onMode={chooseLineMode} toolColor={toolConfig.find(([t])=>t==='line')[3]}/>}
-              toolColor={toolConfig.find(([t])=>t==='line')[3]}
-              tKeyDown={tKeyDown} pKeyDown={pKeyDown}
-              onToggleT={()=>setTKeyDown(p=>!p)}
-              onToggleP={()=>setPKeyDown(p=>!p)}
-              drawing={!!startPoint&&!deferredTangent}
-              dimInput={dimInput} angleInput={angleInput}
-              dimLocked={dimLocked} angleLocked={angleLocked}
-              onChangeDim={v=>{setDimLocked(false);setDimInput(v)}}
-              onChangeAngle={v=>{setAngleLocked(false);setAngleInput(v)}}
-              onApply={applyDimAngleLock}
-              liveLenMm={lineLiveLenMm}
-              liveAngleDeg={lineLiveAngleDeg}
-            />
-          )}
           {tool==='includeedge' && (() => {
             const toolColor = toolConfig.find(([t])=>t==='includeedge')[3]
             return (
@@ -17308,27 +17398,6 @@ const App3D = forwardRef(function App3D(props, ref) {
               </div>
             )
           })()}
-          {tool==='circle' && circleMode==='arc3' && (
-            <ArcPanel
-              toolColor={toolConfig.find(([t])=>t==='circle')[3]}
-              mode={circleMode} onMode={chooseCircleMode} step={shapePts.length}
-              r={arcR} onR={setArcR} liveR={shapeLive?.r ?? null} tangent={!!shapeLive?.tangent}
-            />
-          )}
-          {tool==='circle' && circleMode==='circle' && (
-            <CircleSnapPanel
-              modeRow={<ShapeModeRow modes={CIRCLE_MODES} mode={circleMode} onMode={chooseCircleMode} toolColor={toolConfig.find(([t])=>t==='circle')[3]}/>}
-              toolColor={toolConfig.find(([t])=>t==='circle')[3]}
-              tKeyDown={tKeyDown}
-              onToggleT={()=>setTKeyDown(p=>!p)}
-              circleTanA={circleTanA} circleTanB={circleTanB}
-              circleCenter={circleCenter}
-              dimInput={dimInput} dimLocked={dimLocked}
-              onChangeDim={v=>{setDimLocked(false);setDimInput(v)}}
-              onApply={applyCircleRadius}
-              liveRadiusMm={circleLiveRadiusMm}
-            />
-          )}
           {tool==='spline' && (
             <SplineSnapPanel
               toolColor={toolConfig.find(([t])=>t==='spline')[3]}

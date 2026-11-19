@@ -5672,19 +5672,17 @@ const App3D = forwardRef(function App3D(props, ref) {
           setTimeout(() => setCadError(null), 6000)
           return
         }
+        setCadError(prev => prev && prev.startsWith('Draw the axis line') ? null : prev)
       } else {
-        // No axis drawn: coil about one of the sketch's own origin axes — the
-        // nearer one the wire stays clear of (the popup lets the user switch).
-        const gap = a => Math.min(...best.pts.map(p => Math.abs(a.preset === 'vertical' ? p.x : p.y)))
-        const opts = ['vertical', 'horizontal'].map(originRevolveAxis).filter(a => !springProfileTouchesAxis(profile, a))
-        if (opts.length === 0) {
-          setSketchMode(true)
-          setActivePlane(plane)
-          setCadError('The wire shape touches both origin axes — move it clear of one, or draw your own axis line.')
-          setTimeout(() => setCadError(null), 6000)
-          return
-        }
-        springAxis = opts.sort((a, b) => gap(a) - gap(b))[0]
+        // No axis drawn: ask for one (user, 2026-11-19 — the Vertical / Horizontal
+        // origin-axis choice is gone, like Revolve) and switch to REV AXIS.
+        setSketchMode(true)
+        setActivePlane(plane)
+        pickSketchTool('axis')
+        const msg = 'Draw the axis line the spring coils round (the REV AXIS tool is on) — it grows the way you draw the line — then press Finish.'
+        setCadError(msg)
+        setTimeout(() => setCadError(prev => prev === msg ? null : prev), 8000)
+        return
       }
       // A sensible first pitch: a bit more than the wire is thick along the spring.
       const f = springFrame(profile, springAxis)
@@ -11237,7 +11235,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     const first = detectProfiles(ownLines, own(arcs), planeId, own(circles), own(splines))[0]
     if (!first) return null
     const drawn = ownLines.find(l => l.style === 'axis' && (l.plane || 'XY') === planeId)
-    if (!drawn && !springSketching) return null   // Revolve: Finish asks for the axis line
+    if (!drawn) return null   // Revolve / Spring: Finish asks for the axis line
     const axes = drawn ? [drawn] : [originRevolveAxis('vertical'), originRevolveAxis('horizontal')]
     if (axes.some(a => !profileCrossesAxis(first, a))) return null
     return drawn
@@ -11511,9 +11509,6 @@ const App3D = forwardRef(function App3D(props, ref) {
     const keys = e => { e.stopPropagation(); if (e.key === 'Enter') commitSpring(); else if (e.key === 'Escape') cancelFeature() }
     const byLength = st.specBy === 'length'
     const dims = springDims(st)
-    const drawnAxis = st.sketchLines?.find(l => l.style === 'axis' && (l.plane || 'XY') === 'face')
-    const axisKind = st.springAxis.preset || 'drawn'
-    const pickAxis = a => patch({ springAxis: a })
     return [
       { node: (
         <div style={field} title={byLength ? 'Overall length of the spring' : 'Gap from one coil to the next'}>
@@ -11538,14 +11533,6 @@ const App3D = forwardRef(function App3D(props, ref) {
       ) }] : []),
       { label: 'Pitch', enabled: true, active: !byLength, onClick: () => patch({ specBy: 'pitch' }) },
       { label: 'Length', enabled: true, active: byLength, onClick: () => patch({ specBy: 'length' }) },
-      { divider: true },
-      { label: 'Vertical axis', enabled: true, active: axisKind === 'vertical', onClick: () => pickAxis(originRevolveAxis('vertical')) },
-      { label: 'Horizontal axis', enabled: true, active: axisKind === 'horizontal', onClick: () => pickAxis(originRevolveAxis('horizontal')) },
-      ...(drawnAxis ? [{ label: 'Your line', enabled: true, active: axisKind === 'drawn',
-        onClick: () => pickAxis({ x1: drawnAxis.x1, y1: drawnAxis.y1, x2: drawnAxis.x2, y2: drawnAxis.y2 }) }] : []),
-      { divider: true },
-      { label: 'Along axis', enabled: true, active: !st.springReverse, onClick: () => patch({ springReverse: false }) },
-      { label: 'Other way', enabled: true, active: !!st.springReverse, onClick: () => patch({ springReverse: true }) },
       { divider: true },
       { label: 'Right-hand', enabled: true, active: !st.lefthand, onClick: () => patch({ lefthand: false }) },
       { label: 'Left-hand', enabled: true, active: !!st.lefthand, onClick: () => patch({ lefthand: true }) },
@@ -16225,7 +16212,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                     ? 'Click a plane or face to offset from'
                     : 'Click the plane your spring will be drawn on.')
               : !springState.armed
-                ? (revolveSketchWarning || 'Draw the wire\'s cross-section (a circle is usual) beside the X or Y axis, or draw your own axis line, then press Finish.')
+                ? (revolveSketchWarning || 'Draw the wire\'s cross-section (a circle is usual) and an axis line (REV AXIS) beside it — the spring grows the way you draw the line — then press Finish.')
                 : ((springProblem || springBuildError)
                     || (springTool === 'springcut'
                         ? 'Type the pitch (or length) and turns, then press Make cut or Enter. The red bodies will be cut.'

@@ -2079,7 +2079,6 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [springOffsetBase,setSpringOffsetBase]=useState(null)
   const [springOffsetDistInput,setSpringOffsetDistInput]=useState('20')
   const [springOffsetDistLocked,setSpringOffsetDistLocked]=useState(false)  // see extrudeOffsetDistLocked's comment
-  const loftPanelDrag = useDraggablePanel()
   const springPanelDrag = useDraggablePanel()
   const sweepPanelDrag = useDraggablePanel()
   const includeEdgePanelDrag = useDraggablePanel()
@@ -11385,6 +11384,74 @@ const App3D = forwardRef(function App3D(props, ref) {
       { label: '✓ Finish sketch', enabled: true, success: true, onClick: handleFinishSketch },
     ]
   }
+  // Loft's options in the step ribbon while it is between sketches (they used
+  // to be a floating panel at the bottom of the view). Value first, like
+  // Extrude: the distance to the next shape (when placing one), what the next
+  // shape is (draw / copy / point, with its size for a copy), then Prev / Next,
+  // Ruled, New body / Join, and Finish loft.
+  function loftRibbonActions() {
+    const st = loftState
+    if (!st || sketchMode) return null
+    const color = loftTool === 'loftcutout' ? '#53D3E4' : '#FBDA2D'
+    const armed = isLoftDragArmed()
+    const mode = st.nextMode || 'draw'
+    const count = st.profiles.filter(Boolean).length
+    const field = { display: 'flex', alignItems: 'center', gap: 4, height: 26, boxSizing: 'border-box',
+      background: '#0a0e1a', border: `1px solid ${color}88`, borderRadius: 13, padding: '0 10px' }
+    const inputStyle = w => ({ width: w, background: 'none', border: 'none', outline: 'none', color: '#dce8ff',
+      fontFamily: 'monospace', fontSize: 13, fontWeight: 'bold' })
+    const label = t => <span style={{ color: '#8fa0b8', fontFamily: 'monospace', fontSize: 10, letterSpacing: '0.06em' }}>{t}</span>
+    const unit = t => <span style={{ color: '#6688aa', fontFamily: 'monospace', fontSize: 11 }}>{t}</span>
+    return [
+      ...(armed ? [
+        { node: (
+          <div style={field} title="How far along the next shape sits — type it, or drag in the view">
+            {label('DISTANCE')}
+            <input autoFocus value={st.distanceInput}
+              onChange={e => setLoftState(prev => ({ ...prev, distanceInput: e.target.value }))}
+              onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter') loftAcceptNext(); else if (e.key === 'Escape') cancelFeature() }}
+              onFocus={e => e.target.select()}
+              style={inputStyle(44)}/>
+            {unit('mm')}
+          </div>
+        ) },
+        { divider: true },
+        { label: '✏ Draw it', enabled: true, active: mode === 'draw', onClick: () => setLoftState(prev => ({ ...prev, nextMode: 'draw' })) },
+        { label: '⧉ Copy', enabled: true, active: mode === 'copy', onClick: () => setLoftState(prev => ({ ...prev, nextMode: 'copy' })) },
+        { label: '▲ Point', enabled: true, active: mode === 'point', onClick: () => setLoftState(prev => ({ ...prev, nextMode: 'point' })) },
+        ...(mode === 'copy' ? [
+          { node: (
+            <div style={field} title="Size of the copy — 100% the same, less for a taper">
+              {label('SIZE')}
+              <input value={st.scaleInput ?? '100'}
+                onChange={e => setLoftState(prev => ({ ...prev, scaleInput: e.target.value }))}
+                onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter') loftAddCopy(); else if (e.key === 'Escape') cancelFeature() }}
+                onFocus={e => e.target.select()}
+                style={inputStyle(32)}/>
+              {unit('%')}
+            </div>
+          ) },
+          { label: '100%', enabled: true, active: (st.scaleInput ?? '100') === '100', onClick: () => setLoftState(prev => ({ ...prev, scaleInput: '100' })) },
+          { label: '50%', enabled: true, active: st.scaleInput === '50', onClick: () => setLoftState(prev => ({ ...prev, scaleInput: '50' })) },
+        ] : []),
+        { label: { draw: '↵ Place, then sketch', copy: '↵ Add copy', point: '↵ Add point' }[mode], enabled: true, active: true, onClick: loftAcceptNext },
+      ] : [
+        { label: 'Next ▶', enabled: !!st.profiles[st.currentIdx], onClick: loftNextProfile },
+      ]),
+      { divider: true },
+      { label: '◀ Prev', enabled: st.currentIdx > 0, onClick: loftPreviousProfile },
+      { label: st.ruled ? '▦ Ruled: on' : '▦ Ruled: off', enabled: true, active: !!st.ruled,
+        onClick: () => setLoftState(prev => ({ ...prev, ruled: !prev.ruled })) },
+      ...(loftJoinableId != null ? [
+        { divider: true },
+        { label: 'New body', enabled: true, active: !st.joinBody, onClick: () => setLoftState(prev => ({ ...prev, joinBody: false })) },
+        { label: 'Join to body', enabled: true, active: !!st.joinBody, onClick: () => setLoftState(prev => ({ ...prev, joinBody: true })) },
+      ] : []),
+      { divider: true },
+      { label: '✓ Finish loft', enabled: count >= 2, success: true, onClick: () => commitLoft() },
+    ]
+  }
+
   function handleExtrudeDepthKey(e) {
     if (!extrudeStateRef.current) return
     if (e.key === 'Enter') {
@@ -15944,12 +16011,16 @@ const App3D = forwardRef(function App3D(props, ref) {
             currentStep={loftState ? 2 : 1}
             color={loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}
             hint={loftState
-              ? `Draw a shape, then Next to add another further along. (Profile ${loftState.currentIdx+1} of ${Math.max(loftState.profiles.length, loftState.currentIdx+1)})`
+              ? (!sketchMode && isLoftDragArmed()
+                  ? `Drag in the view or type how far along the next shape sits, then press Enter. (Shape ${loftState.currentIdx+2})`
+                  : !sketchMode && loftState.profiles.filter(Boolean).length < 2
+                    ? `Add at least one more shape, then Finish loft. (Shape ${loftState.currentIdx+1} of ${Math.max(loftState.profiles.length, loftState.currentIdx+1)})`
+                    : `Draw a shape, then Next to add another further along. (Shape ${loftState.currentIdx+1} of ${Math.max(loftState.profiles.length, loftState.currentIdx+1)})`)
               : 'Click the plane or a face for your first shape.'}
             action={!loftState ? [
               { label: hideWorkPlanesManual ? '◻ Show Planes' : '◻ Hide Planes', enabled:true,
                 onClick: () => setHideWorkPlanesManual(p => !p) },
-            ] : null}
+            ] : loftRibbonActions()}
             onStepBack={step => {
               if (step === 1) resetLoft3D()
             }}
@@ -16494,210 +16565,8 @@ const App3D = forwardRef(function App3D(props, ref) {
         </div>
       </div>
 
-      {/* ── Loft: unified between-profiles panel ─────────────────────────────
-          Shown whenever a loft is mid-flight and not actively sketching —
-          replaces what used to be TWO separate surfaces (a persistent top
-          banner with Ruled/Prev/Finish, plus this popup showing only the
-          distance-to-next input) that duplicated each other's "which profile
-          am I on" display and were visible at the same time. The SmartStepBar
-          already covers that display (see its Loft hint below), so this
-          panel is purely controls: Ruled, Prev, Finish, and — swapping
-          depending on whether the next profile already exists — either the
-          distance-to-position input (isLoftDragArmed, same drag/click-
-          anywhere/Enter-to-accept mechanics as before, all unchanged) or a
-          plain Next button. That Next button is new: previously, stepping
-          Prev back to review an already-fully-sketched profile left no way
-          to move forward again — loftNextProfile() already handled that
-          case correctly (reuses the existing profile's stored offset), it
-          just had no button to reach it. */}
-      {loftState && !sketchMode && (
-        <div style={{
-          position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
-          zIndex: 1000,
-        }}>
-        <div ref={loftPanelDrag.panelRef} style={{
-          background: '#000',
-          border: `1.5px solid ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}`,
-          borderRadius: 2,
-          padding: '10px 14px',
-          minWidth: 220,
-          boxShadow: `0 0 14px ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}77, 0 0 3px ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'} inset`,
-          fontFamily: 'monospace',
-          ...loftPanelDrag.panelStyle,
-        }}>
-          <DragHandle {...loftPanelDrag.handleProps}>
-            {loftTool==='loftcutout' ? 'Loft Cutout' : 'Loft'} · Profile {loftState.currentIdx+1}
-          </DragHandle>
-
-          <label
-            title="Off: smooth blended surface between profiles. On: straight faceted panels instead."
-            style={{display:'flex', gap:6, alignItems:'center', cursor:'pointer', color:'#6688aa', fontSize:11, marginBottom:8}}
-          >
-            <input
-              type="checkbox"
-              checked={!!loftState.ruled}
-              onChange={e=>setLoftState(prev=>({...prev, ruled:e.target.checked}))}
-              style={{accentColor: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D', cursor:'pointer'}}
-            />
-            Ruled
-          </label>
-
-          {/* New body | Join to body — only for a loft started on a body's face. */}
-          {loftJoinableId != null && (
-            <div style={{display:'flex', gap:4, marginBottom:8}}>
-              {[
-                {k:false, label:'New body',     title:'Keep the loft as its own body'},
-                {k:true,  label:'Join to body', title:'Fuse the loft into the body you started on'},
-              ].map(({k,label,title}) => {
-                const active = !!loftState.joinBody === k
-                return (
-                  <button key={label} title={title}
-                    onClick={()=>setLoftState(prev=>({...prev, joinBody:k}))}
-                    style={{
-                      flex:1, padding:'4px 0', fontSize:11, cursor:'pointer', fontFamily:'monospace', fontWeight:'bold',
-                      background: active ? '#FBDA2D' : '#050505', color: active ? '#000' : '#FBDA2D',
-                      border:'1px solid #FBDA2D', borderRadius:2, textShadow: active ? 'none' : '0 0 4px #FBDA2D',
-                    }}>{label}</button>
-                )
-              })}
-            </div>
-          )}
-
-          {/* Next shape — Draw it (sketch as before), Copy this one (optionally
-              scaled, for a taper), or finish To a point (cone / pyramid). */}
-          {isLoftDragArmed() && (() => {
-            const accent = loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'
-            const mode = loftState.nextMode || 'draw'
-            const chip = active => ({
-              flex:1, padding:'4px 2px', fontSize:11, cursor:'pointer', fontFamily:'monospace', fontWeight:'bold',
-              background: active ? accent : '#050505', color: active ? '#000' : accent,
-              border:`1px solid ${accent}`, borderRadius:2, textShadow: active ? 'none' : `0 0 4px ${accent}`,
-            })
-            return (
-              <div style={{marginBottom:8}}>
-                <div style={{color:'#889', fontSize:10, marginBottom:3, letterSpacing:'0.05em'}}>NEXT SHAPE</div>
-                <div style={{display:'flex', gap:4, alignItems:'center'}}>
-                  <button style={chip(mode==='draw')} title="Sketch the next profile yourself"
-                    onClick={()=>setLoftState(prev=>({...prev, nextMode:'draw'}))}>✏ Draw it</button>
-                  <button style={chip(mode==='copy')} title="Add a copy of this shape, optionally scaled — no sketching"
-                    onClick={()=>setLoftState(prev=>({...prev, nextMode:'copy'}))}>⧉ Copy</button>
-                  <button style={chip(mode==='point')} title="End in a point — a cone or pyramid"
-                    onClick={()=>setLoftState(prev=>({...prev, nextMode:'point'}))}>▲ Point</button>
-                </div>
-                {mode==='copy' && (
-                  <div style={{display:'flex', alignItems:'center', gap:6, marginTop:6}}>
-                    <span style={{color:'#889', fontSize:10, letterSpacing:'0.05em'}}>SIZE</span>
-                    <div style={{
-                      flex:1, background:'#000', border:`1px solid ${accent}55`, borderRadius:2, padding:'3px 8px',
-                      display:'flex', alignItems:'center', justifyContent:'space-between',
-                    }}>
-                      <input
-                        value={loftState.scaleInput ?? '100'}
-                        onChange={e=>setLoftState(prev=>({...prev, scaleInput:e.target.value}))}
-                        onKeyDown={e=>{ e.stopPropagation(); if (e.key==='Enter') loftAddCopy(); else if (e.key==='Escape') cancelFeature() }}
-                        style={{background:'none', border:'none', outline:'none', color:accent, fontFamily:'monospace', fontSize:14, fontWeight:'bold', flex:1, minWidth:0}}
-                      />
-                      <span style={{color:'#556', fontSize:12}}>%</span>
-                    </div>
-                    {[100, 50].map(p => (
-                      <button key={p} style={{...chip(false), flex:'none', padding:'3px 6px'}}
-                        onClick={()=>setLoftState(prev=>({...prev, scaleInput:String(p)}))}>{p}%</button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )
-          })()}
-
-          <div style={{display:'flex', alignItems:'center', gap:6}}>
-            <button
-              onClick={loftPreviousProfile}
-              disabled={loftState.currentIdx===0}
-              title="Previous profile"
-              style={{
-                padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold',
-                background:'#1e1e38', color: loftState.currentIdx===0 ? '#334455' : '#6688aa',
-                border:'1px solid #2a3a5a', borderRadius:4,
-                cursor: loftState.currentIdx===0 ? 'default' : 'pointer',
-              }}
-            >◀ Prev</button>
-
-            {isLoftDragArmed() ? (
-              <>
-                <div style={{
-                  flex:1, background:'#000', border:`1px solid ${loftTool==='loftcutout' ? '#53D3E455' : '#FBDA2D55'}`,
-                  borderRadius:2, padding:'4px 8px',
-                  display:'flex', alignItems:'center', justifyContent:'space-between',
-                }}>
-                  <input
-                    autoFocus
-                    value={loftState.distanceInput}
-                    onChange={e=>setLoftState(prev=>({...prev, distanceInput:e.target.value}))}
-                    onKeyDown={e=>{
-                      e.stopPropagation()
-                      if (e.key==='Enter') loftAcceptNext()
-                      else if (e.key==='Escape') cancelFeature()
-                    }}
-                    style={{
-                      background:'none', border:'none', outline:'none',
-                      color: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D',
-                      textShadow: `0 0 5px ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}`,
-                      fontFamily:'monospace', fontSize:16, fontWeight:'bold', flex:1, minWidth:0,
-                    }}
-                  />
-                  <span style={{color:'#556', fontSize:12}}>mm</span>
-                </div>
-                <button
-                  onClick={loftAcceptNext}
-                  title={{draw:'Accept distance, sketch next profile', copy:'Add a copy of this shape', point:'Add a point and finish the loft'}[loftState.nextMode || 'draw']}
-                  style={{
-                    padding:'4px 10px', background: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D', color:'#000',
-                    border:'none', borderRadius:2, cursor:'pointer',
-                    fontFamily:'monospace', fontSize:12, fontWeight:'bold',
-                    boxShadow: `0 0 6px ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}`,
-                  }}
-                >↵</button>
-              </>
-            ) : (
-              <button
-                onClick={loftNextProfile}
-                disabled={!loftState.profiles[loftState.currentIdx]}
-                title="Next profile"
-                style={{
-                  flex:1, padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold',
-                  background: loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D', color:'#000',
-                  border:'none', borderRadius:2, cursor:'pointer',
-                  boxShadow: `0 0 6px ${loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}`,
-                }}
-              >Next ▶</button>
-            )}
-
-            <button
-              onClick={()=>commitLoft()}
-              disabled={loftState.profiles.filter(Boolean).length < 2}
-              title="Finish loft"
-              style={{
-                padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold',
-                background: loftState.profiles.filter(Boolean).length < 2 ? '#1e1e38' : '#4caf50',
-                color: loftState.profiles.filter(Boolean).length < 2 ? '#334455' : '#fff',
-                border:'none', borderRadius:4,
-                cursor: loftState.profiles.filter(Boolean).length < 2 ? 'default' : 'pointer',
-              }}
-            >✓ Finish</button>
-          </div>
-
-          <div style={{color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em'}}>
-            {isLoftDragArmed()
-              ? `Drag or type distance to next${gridSnap ? ` (snap ${gridSizeMm}mm)` : ''} · Esc to cancel`
-              : (loftState.profiles.filter(Boolean).length < 2 ? 'Need 2+ profiles to finish' : 'Esc to cancel')}
-          </div>
-        </div>
-        </div>
-      )}
-
       {/* ── Body Color: pick a swatch to apply to every currently-selected
-          body — same floating draggable-panel convention as the Loft popup
-          above. Swatches apply immediately on click (no separate "Apply"
+          body — a floating draggable panel. Swatches apply immediately on click (no separate "Apply"
           step) since there's nothing to preview/adjust first, unlike a
           typed distance value. ── */}
       {tool==='color' && (

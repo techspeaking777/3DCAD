@@ -1528,7 +1528,7 @@ function extendLoftCutProfiles(profiles) {
   if (profiles.length < 2) return profiles
   const extended = profiles.map(p => ({ ...p }))
   extended[0].offsetMm -= LOFT_CUT_OVH_MM
-  extended[extended.length - 1].offsetMm += LOFT_CUT_OVH_MM
+  if (!extended[extended.length - 1].tip) extended[extended.length - 1].offsetMm += LOFT_CUT_OVH_MM
   return extended
 }
 
@@ -2911,8 +2911,22 @@ function buildRevolve({ pts, planeId, normal, origin, uAxis, circle=null, axis, 
  * ruled=false (smooth blend) is the default; ruled=true gives a faceted
  * transition within each segment instead — passed through unchanged to
  * every pairwise loftWith() call.
+ *
+ * CURVED (2026-11-19): a loft saved with `curved: true` (every new one whose
+ * Curved | Straight choice is Curved) is ONE loftWith() through every
+ * profile, so 3+ shapes flow smoothly with no crease at the middle ones —
+ * the pairwise build above can't do that (a two-section loft is always a
+ * straight taper, so Ruled made no visible difference). Straight (ruled) and
+ * every loft saved before this (no `curved`) keep the pairwise build, so old
+ * files rebuild exactly as before. A curved build that OCC refuses throws a
+ * plain message pointing at Straight — no silent fallback to a different shape.
+ *
+ * TIP: the last profile may carry `tip: {x, y}` (sketch px, the loft Point
+ * tool) — then it is not a section but a single point the loft closes to
+ * (replicad's endPoint → ThruSections AddVertex): a real sharp apex. Its
+ * `pts` (a tiny square round the point) are only for the app's previews.
  */
-function buildLoft({ profiles, normal, viewNormal, origin, uAxis, ruled=false }) {
+function buildLoft({ profiles, normal, viewNormal, origin, uAxis, ruled=false, curved=false }) {
   if (!profiles || profiles.length < 2) throw new Error('Loft needs at least 2 profiles')
   // A fresh Sketch per (segment, side) rather than one Sketch array reused
   // across segments — every middle profile participates in TWO loftWith()
@@ -2931,10 +2945,34 @@ function buildLoft({ profiles, normal, viewNormal, origin, uAxis, ruled=false })
   const buildSketch = viewNormal
     ? p => makeProfile(p.pts, 'face', 0, viewNormal, origin.map((o, i) => o + (normal[i] || 0) * p.offsetMm), uAxis, p.circle)
     : p => makeProfile(p.pts, 'face', p.offsetMm, normal, origin, uAxis, p.circle)
-  const segments = []
-  for (let i = 0; i < profiles.length - 1; i++) {
-    segments.push(buildSketch(profiles[i]).loftWith([buildSketch(profiles[i + 1])], { ruled }))
+  // A tip profile → its 3D point (mm), on the same plane its outline would use.
+  const tipPoint = p => {
+    const plane = viewNormal
+      ? buildProfilePlane('face', 0, viewNormal, origin.map((o, i) => o + (normal[i] || 0) * p.offsetMm), uAxis)
+      : buildProfilePlane('face', p.offsetMm, normal, origin, uAxis)
+    const v = plane.origin.add(plane.xDir.multiply(p.tip.x / SCALE)).add(plane.yDir.multiply(-p.tip.y / SCALE))
+    const out = [v.x, v.y, v.z]
+    plane.delete()
+    return out
   }
+  const last = profiles[profiles.length - 1]
+  const endPoint = last.tip ? tipPoint(last) : null
+  const sections = endPoint ? profiles.slice(0, -1) : profiles
+  if (sections.length < 1 || sections.some(p => p.tip)) throw new Error('A loft can only end at a point — draw a shape before it.')
+
+  if (curved && !ruled && (sections.length > 2 || (endPoint && sections.length > 1))) {
+    try {
+      return buildSketch(sections[0]).loftWith(sections.slice(1).map(buildSketch), { ruled: false, ...(endPoint ? { endPoint } : {}) })
+    } catch (err) {
+      console.warn('Curved loft failed:', err)
+      throw new Error("The shapes couldn't be blended into one curved surface — try Straight, or make the shapes more alike.", { cause: err })
+    }
+  }
+  const segments = []
+  for (let i = 0; i < sections.length - 1; i++) {
+    segments.push(buildSketch(sections[i]).loftWith([buildSketch(sections[i + 1])], { ruled }))
+  }
+  if (endPoint) segments.push(buildSketch(sections[sections.length - 1]).loftWith([], { ruled, endPoint }))
   return segments.length === 1 ? segments[0] : segments.reduce((a, b) => fuseTolerant(a, b))
 }
 

@@ -12,7 +12,7 @@ import { nearestMirrorEntity, buildMirror } from './tools/mirrorMath.js'
 import { nearestMoveCopyEntity, buildCopies, removeSelected } from './tools/moveCopyMath.js'
 import { nearestRotateCopyEntity, buildRotatedCopies } from './tools/rotateCopyMath.js'
 import { buildRectangularOffsets, buildCircularAngles, circularStepAngleDeg } from './tools/patternMath.js'
-import { nearestScaleEntity, buildScaled, scaleSketchAbout } from './tools/scaleMath.js'
+import { nearestScaleEntity, buildScaled } from './tools/scaleMath.js'
 import { nearestFilletEntity, computeFilletOp } from './tools/filletMath.js'
 import { computeExtendPreview } from './tools/extendMath.js'
 import { fitSplineToPoints } from './tools/splineFit.js'
@@ -56,7 +56,7 @@ import { useDraggablePanel, DragHandle } from './tools/useDraggablePanel.jsx'
 import {
   IconLine, IconRect, IconRectCentre, IconArc3, IconCircle, IconTrim, IconDelete, IconExtend, IconCorner, IconOffset,
   IconMirror, IconCenter, IconMoveCopy, IconRotateCopy, IconResize, IconFillet, IconTrace,
-  IconUndo, IconRedo, IconFitView, IconReframe, IconNew, IconSave, IconLoad, IconCloudSave, IconCloudLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis,
+  IconUndo, IconRedo, IconFitView, IconReframe, IconNew, IconSave, IconLoad, IconCloudSave, IconCloudLoad, IconDXF, IconSpline, IconText, IconSelect, IconJoin, IconDim, IconAxis, IconLoftPoint,
   IconIncludeEdge,
   IconExtrude3D, IconCutout3D, IconFillet3D, IconMirror3D, IconLoft3D, IconJoin3D, IconSubtract3D, IconMeasure3D, IconMoveCopy3D, IconSweep3D, IconRevolve3D, IconSpring3D, IconShell3D, IconPattern3D, IconSoften3D, IconXray3D,
 } from './draw/ToolIcons.jsx'
@@ -430,8 +430,8 @@ function buildCutWorkerParamsBase(cutFeat) {
   // plane.
   if (cutFeat.profiles) {
     return {
-      profiles: cutFeat.profiles.map(p => ({ pts: p.pts, circle: p.circle, offsetMm: p.offsetMm })),
-      normal: cutFeat.normal, viewNormal: cutFeat.viewNormal, origin: cutFeat.origin, uAxis: cutFeat.uAxis, ruled: !!cutFeat.ruled,
+      profiles: cutFeat.profiles.map(loftWorkerProfile),
+      normal: cutFeat.normal, viewNormal: cutFeat.viewNormal, origin: cutFeat.origin, uAxis: cutFeat.uAxis, ruled: !!cutFeat.ruled, curved: !!cutFeat.curved,
     }
   }
   if (cutFeat.revolveAxis) {
@@ -559,8 +559,8 @@ function buildBaseWorkerParams(solid) {
   // in mm on the solid, see commitLoft) rebuilt via cadWorker.js's buildLoft.
   if (solid.operation === 'loft') {
     return {
-      profiles: solid.profiles.map(p => ({ pts: p.pts, circle: p.circle, offsetMm: p.offsetMm })),
-      normal: solid.normal, origin: solid.origin, uAxis: solid.uAxis, ruled: !!solid.ruled,
+      profiles: solid.profiles.map(loftWorkerProfile),
+      normal: solid.normal, origin: solid.origin, uAxis: solid.uAxis, ruled: !!solid.ruled, curved: !!solid.curved,
     }
   }
   if (solid.operation === 'revolve') {
@@ -663,56 +663,19 @@ function buildLoftFacePlane(basis, offsetMm) {
 // are kept, so the loft doesn't twist, and it still works at tip sizes where
 // detectProfiles' joining tolerance would throw the shape away. The sketch entities
 // are scaled too so the copy can be re-opened and edited like a drawn profile.
-function scalePtsAbout(pts, ax, ay, s) {
-  const k = Math.abs(s)
-  const pt = p => ({ x: ax + (p.x - ax) * s, y: ay + (p.y - ay) * s })
-  const out = pts.map(pt)
-  if (pts.circleMeta) {
-    const c = pt({ x: pts.circleMeta.cx, y: pts.circleMeta.cy })
-    out.circleMeta = { cx: c.x, cy: c.y, r: pts.circleMeta.r * k }
-  }
-  if (pts.curveSegments) {
-    out.curveSegments = pts.curveSegments.map(seg => {
-      const c = { ...seg }
-      if (seg.controlPoints) c.controlPoints = seg.controlPoints.map(pt)
-      if (seg.type === 'arc') Object.assign(c, { cx: ax + (seg.cx - ax) * s, cy: ay + (seg.cy - ay) * s, r: seg.r * k })
-      return c
-    })
-  }
-  if (pts.holes) out.holes = pts.holes.map(h => scalePtsAbout(h, ax, ay, s))
-  return out
+// One loft profile as the worker wants it (a Point-tool tip carries `tip`).
+function loftWorkerProfile(p) {
+  return { pts: p.pts, circle: p.circle, offsetMm: p.offsetMm, ...(p.tip ? { tip: p.tip } : {}) }
 }
 
-function scaledLoftProfile(src, s, offsetMm) {
-  const { x: ax, y: ay } = src.centroid
-  const sk = scaleSketchAbout(
-    { lines: src.sketchLines, circles: src.sketchCircles, arcs: src.sketchArcs, splines: src.sketchSplines }, ax, ay, s)
-  const pts = scalePtsAbout(src.pts, ax, ay, s)
-  return {
-    sketchLines: sk.lines, sketchCircles: sk.circles, sketchArcs: sk.arcs, sketchSplines: sk.splines,
-    pts, circle: pts.circleMeta || null, offsetMm, centroid: { x: ax, y: ay },
-  }
-}
-
-// "To a point": the last profile shrinks to a tip about 0.2 mm across — a true
-// single point can't be lofted to, and this reads as one.
-function loftTipScale(src) {
-  const xs = src.pts.map(p => p.x), ys = src.pts.map(p => p.y)
-  const sizeMm = pxToMm(Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)))
-  return Math.min(0.5, Math.max(0.0005, 0.2 / Math.max(sizeMm, 0.4)))
-}
-
-// The profile list the loft preview should show: everything sketched so far, plus —
-// while the next-shape popup is open on Copy or Point — the shape that would be added.
-function loftPreviewProfiles(st, armed) {
-  const list = st.profiles.filter(Boolean)
-  const mode = st.nextMode || 'draw'
-  const cur = st.profiles[st.currentIdx]
-  if (armed && cur && mode !== 'draw') {
-    const s = mode === 'point' ? loftTipScale(cur) : Math.min(500, Math.max(1, parseFloat(st.scaleInput) || 100)) / 100
-    list.push(scaledLoftProfile(cur, s, st.currentOffsetMm + (parseFloat(st.distanceInput) || 20)))
-  }
-  return list
+// A loft that ends at a single point (the loft Point tool): the profile keeps a
+// tiny square round the point as `pts` so every preview / box / snap that reads
+// outlines keeps working; the worker builds a true apex from `tip`.
+function loftTipProfile(pt, offsetMm) {
+  const h = 0.2   // px = 0.1 mm
+  const pts = [{ x: pt.x - h, y: pt.y - h }, { x: pt.x + h, y: pt.y - h }, { x: pt.x + h, y: pt.y + h }, { x: pt.x - h, y: pt.y + h }]
+  return { sketchLines: [], sketchCircles: [], sketchArcs: [], sketchSplines: [],
+    pts, circle: null, offsetMm, centroid: { x: pt.x, y: pt.y }, tip: { x: pt.x, y: pt.y } }
 }
 
 // Worker mesh data (mm) → one BufferGeometry in scene px, for the translucent preview.
@@ -1311,7 +1274,7 @@ function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEP
                   : { background: 'transparent', color: color, border: `1px solid ${color}88` }
                 return (
                   <div key={'a' + k} style={{ position: 'relative', flexShrink: 0 }}>
-                    <button onClick={a.onClick} disabled={!a.enabled} style={{ ...base, ...look }}>{a.label}</button>
+                    <button onClick={a.onClick} disabled={!a.enabled} title={a.title} style={{ ...base, ...look }}>{a.label}</button>
                     {a.popover}
                   </div>
                 )
@@ -4093,6 +4056,8 @@ const App3D = forwardRef(function App3D(props, ref) {
   // Sketch px where the profile crosses itself, ringed red until the sketch
   // changes (set by blockCrossingProfile).
   const [sketchCrossPt, setSketchCrossPt] = useState(null)
+  // Loft POINT tool: where the loft's tip goes in this profile sketch (sketch px), or null.
+  const [loftTipPt, setLoftTipPt] = useState(null)
   // Loose line ends when Finish finds no closed outline — ringed the same way
   // (set by handleFinishSketch's showNoProfile), cleared when the sketch changes.
   const [sketchOpenPts, setSketchOpenPts] = useState([])
@@ -4235,6 +4200,26 @@ const App3D = forwardRef(function App3D(props, ref) {
         ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI*2); ctx.stroke()
         ctx.restore()
       }
+    }
+    // Loft POINT tool: the placed tip (solid) and, with the tool on, where a click
+    // would put it (faint, snapped like the click).
+    if (sketchMode && (loftTipPt || (tool === 'loftpoint' && mousePos))) {
+      const dot = (pt, a) => {
+        ctx.save(); ctx.translate(pt.x, pt.y); ctx.scale(1/sc, 1/sc); ctx.globalAlpha = a
+        ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 5
+        ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI*2); ctx.stroke()
+        ctx.fillStyle = '#FBDA2D'; ctx.strokeStyle = '#222'; ctx.lineWidth = 1.5
+        ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI*2); ctx.fill(); ctx.stroke()
+        ctx.beginPath(); ctx.moveTo(-12, 0); ctx.lineTo(12, 0); ctx.moveTo(0, -12); ctx.lineTo(0, 12); ctx.stroke()
+        ctx.restore()
+      }
+      if (tool === 'loftpoint' && mousePos) {
+        const g = getGeoSnap(mousePos, snapLines, circles, arcs, null, false, splines, intersectionPts)
+        const hp = g ? { x: g.x, y: g.y } : mousePos
+        dot(hp, 0.45)
+        if (g) drawLineIndicator(ctx, hp.x, hp.y, g.type, sc)
+      }
+      if (loftTipPt) { dot(loftTipPt, 1); drawLabel(ctx, 'TIP', loftTipPt.x, loftTipPt.y - 22/sc, '#b8860b', sc) }
     }
     if (sketchMode && sweepState?.path && sweepState?.ghostEndpoint) {
       const gp = sweepState.ghostEndpoint
@@ -5046,7 +5031,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (segs) for (const s of segs) drawPreviewLine(ctx,s.x1,s.y1,s.x2,s.y2,includeEdgeConstruction?'#90A4AE':'#FFEB3B',1,sc)
     }
 
-  },[lines,circles,arcs,splines,sketchCrossPt,sketchOpenPts,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,fMode,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,viewDims,dimEdit,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction,lineMode,circleMode,shapePts,rectW,rectH,arcR])
+  },[lines,circles,arcs,splines,sketchCrossPt,sketchOpenPts,loftTipPt,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,fMode,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,viewDims,dimEdit,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction,lineMode,circleMode,shapePts,rectW,rectH,arcR])
 
 
   // ── Phase 2 Step 3: plane tagging ────────────────────────────────────────
@@ -5762,6 +5747,23 @@ const App3D = forwardRef(function App3D(props, ref) {
         ...prev, armed: true, profile: { pts: best.pts, circle: best.pts.circleMeta || null }, profileBasis: plane,
         sketchLines: [...lines], sketchCircles: [...circles], sketchArcs: [...arcs], sketchSplines: [...splines],
       }))
+      return
+    }
+
+    if (loftState && loftTipPt) {
+      // ── Loft ending at a point (POINT tool): the point must be the whole
+      //    sketch; it becomes the last "shape" and the loft is made at once. ──
+      const others = ownLines.filter(l => l.style !== 'axis').length + ownCircles.length + ownArcs.length + ownSplines.length
+      const refuse = msg => {
+        setSketchMode(true); setActivePlane(plane)
+        setCadError(msg); setTimeout(() => setCadError(prev => prev === msg ? null : prev), 6000)
+      }
+      if (loftState.currentIdx === 0) return refuse('The first shape of a loft must be drawn — a loft can only END at a point.')
+      if (others > 0) return refuse('A point must be on its own — delete the other lines in this sketch, or delete the point (Esc, then pick another tool).')
+      const tipProfile = loftTipProfile(loftTipPt, loftState.currentOffsetMm)
+      const profiles = [...loftState.profiles.slice(0, loftState.currentIdx).filter(Boolean), tipProfile]
+      setLoftTipPt(null)
+      commitLoft({ ...loftState, profiles, currentIdx: profiles.length - 1 })
       return
     }
 
@@ -8392,6 +8394,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   function resetLoft3D() {
+    setLoftTipPt(null)
     cancelLoftAnim()
     clearLoftPreviewCanvas()
     setLoftState(null)
@@ -8904,8 +8907,8 @@ const App3D = forwardRef(function App3D(props, ref) {
         })()
     // solidId: the body a face-started loft can be fused into ("Join to body").
     setLoftState({ basis: { ...basis, solidId: pick.kind === 'face' ? (pick.facePlane.solidId ?? null) : null },
-      ruled: false, profiles: [], currentIdx: 0, currentOffsetMm: 0, distanceInput: '20',
-      nextMode: 'draw', scaleInput: '100', joinBody: false })
+      ruled: false, curved: true, profiles: [], currentIdx: 0, currentOffsetMm: 0, distanceInput: '20',
+      joinBody: false })
     const plane = buildLoftFacePlane(basis, 0)
     // Await the camera tween BEFORE opening the sketch — snapToFace's Promise
     // resolves when the ~420ms animation finishes. The camera position itself
@@ -8990,6 +8993,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     const nextOffsetMm = existingNext ? existingNext.offsetMm : st.currentOffsetMm + (parseFloat(st.distanceInput) || 20)
     const ghostProfile = st.profiles[st.currentIdx]
     setLoftState(prev => ({ ...prev, currentIdx: nextIdx, currentOffsetMm: nextOffsetMm }))
+    setLoftTipPt(existingNext?.tip || null)
     const plane = buildLoftFacePlane(st.basis, nextOffsetMm)
     // Await the camera settling before opening the sketch — see startLoftProfile1.
     await viewport3dRef.current?.snapToFace(plane)
@@ -9009,6 +9013,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (!prevProfile) return
     const ghostProfile = st.profiles[prevIdx - 1]
     setLoftState(prev => ({ ...prev, currentIdx: prevIdx, currentOffsetMm: prevProfile.offsetMm }))
+    setLoftTipPt(prevProfile.tip || null)
     const plane = buildLoftFacePlane(st.basis, prevProfile.offsetMm)
     await viewport3dRef.current?.snapToFace(plane)
     enterSketch(
@@ -9018,40 +9023,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     injectLoftGhost(ghostProfile)
   }
 
-  // "Copy" next shape: the current profile, scaled about its centre by the % in the
-  // popup, placed `distanceInput` mm further along. Stays in the popup (no sketch
-  // step) so copies can be chained, then Finish.
-  function loftAddCopy() {
-    const st = loftState
-    const cur = st?.profiles[st.currentIdx]
-    if (!cur) return
-    const pct = Math.min(500, Math.max(1, parseFloat(st.scaleInput) || 100))
-    const next = scaledLoftProfile(cur, pct / 100, st.currentOffsetMm + (parseFloat(st.distanceInput) || 20))
-    setLoftState(prev => {
-      const profiles = [...prev.profiles]
-      profiles[prev.currentIdx + 1] = next
-      return { ...prev, profiles, currentIdx: prev.currentIdx + 1, currentOffsetMm: next.offsetMm }
-    })
-  }
-
-  // ↵ / Enter on the distance box: does whichever NEXT SHAPE is chosen.
-  function loftAcceptNext() {
-    const mode = loftState?.nextMode || 'draw'
-    if (mode === 'copy') loftAddCopy()
-    else if (mode === 'point') loftFinishToPoint()
-    else loftNextProfile()
-  }
-
-  // "To a point": adds a tiny last profile (loftTipScale) and finishes the loft.
-  function loftFinishToPoint() {
-    const st = loftState
-    const cur = st?.profiles[st.currentIdx]
-    if (!cur) return
-    const tip = scaledLoftProfile(cur, loftTipScale(cur), st.currentOffsetMm + (parseFloat(st.distanceInput) || 20))
-    const profiles = [...st.profiles]
-    profiles[st.currentIdx + 1] = tip
-    commitLoft({ ...st, profiles, currentIdx: st.currentIdx + 1 })
-  }
+  // ↵ / Enter on the distance box: place the next shape there and sketch it.
+  function loftAcceptNext() { loftNextProfile() }
 
   // Rebuilds a loft feature's shared plane basis (THREE.Vector3, scene px)
   // from its stored plain-array fields (mm) — shared by handleEditLoft and
@@ -9094,7 +9067,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     setTool('loft3d')
     setLoftTool(isLoftCutoutFeat ? 'loftcutout' : 'loft')
     const basis = featureLoftBasisPx(feat)
-    setLoftState({ basis, ruled: !!feat.ruled, profiles: feat.profiles, currentIdx: 0, currentOffsetMm: feat.profiles[0].offsetMm, distanceInput: '20' })
+    setLoftState({ basis, ruled: !!feat.ruled, curved: !!feat.curved, profiles: feat.profiles, currentIdx: 0, currentOffsetMm: feat.profiles[0].offsetMm, distanceInput: '20' })
     setLoftEditingFeatureId(featureId)
     const p0 = feat.profiles[0]
     const plane = buildLoftFacePlane(basis, p0.offsetMm)
@@ -9120,6 +9093,9 @@ const App3D = forwardRef(function App3D(props, ref) {
     const editingId = loftEditingFeatureId
     const basis = st.basis
     const ruled = !!st.ruled
+    // Curved (one smooth loft through every shape) — every new loft; an old one
+    // opened for editing keeps its straight-sections build until Curved is picked.
+    const curved = !!st.curved
     const isLoftCutout = loftTool === 'loftcutout'
     feat3d.commit(features)
     resetLoft3D()
@@ -9150,8 +9126,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (isLoftCutout) {
       const editingFeat = editingId ? features.find(f => f.id === editingId) : null
       const cutParams = {
-        profiles: profiles.map(p => ({ pts: p.pts, circle: p.circle, offsetMm: p.offsetMm })),
-        normal, viewNormal, origin, uAxis, ruled,
+        profiles: profiles.map(loftWorkerProfile),
+        normal, viewNormal, origin, uAxis, ruled, curved,
       }
       try {
         let targets, oldMembers = []
@@ -9188,7 +9164,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           newFeats.push({
             id: reuseId ? editingId : `loftcutout-${target.id}-${Date.now()}-${newFeats.length}`,
             type: 'extrude', operation: 'cutout', name: editingFeat?.name || nextCutoutName(), groupId,
-            solidId: target.id, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled, color: '#e05a4e',
+            solidId: target.id, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled, curved, color: '#e05a4e',
           })
           await rebuildDependentMirrors(target)
         }
@@ -9205,14 +9181,14 @@ const App3D = forwardRef(function App3D(props, ref) {
     try {
       const solidId = editingId ? features.find(f => f.id === editingId)?.solidId : Date.now()
       let meshData = await cadEngine.loft({
-        solidId, normal, origin, uAxis, ruled,
-        profiles: profiles.map(p => ({ pts: p.pts, circle: p.circle, offsetMm: p.offsetMm })),
+        solidId, normal, origin, uAxis, ruled, curved,
+        profiles: profiles.map(loftWorkerProfile),
       })
       // Editing: replay the body's own cutouts/fillets/shell on the new loft
       // (they used to be dropped until the next reload), after followBodyEdit
       // has moved whatever sat on a face that moved.
       const editingLoftFeat = editingId ? features.find(f => f.id === editingId) : null
-      const newLoftFeat = editingLoftFeat ? { ...editingLoftFeat, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled } : null
+      const newLoftFeat = editingLoftFeat ? { ...editingLoftFeat, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled, curved } : null
       let followLoft = null
       if (editingLoftFeat) {
         if (newLoftFeat.transform) newLoftFeat.transform = await keepMoveAfterEdit(featureToTempSolid(editingLoftFeat), featureToTempSolid(newLoftFeat), editingLoftFeat.transform)
@@ -9222,17 +9198,17 @@ const App3D = forwardRef(function App3D(props, ref) {
       }
       const color = (editingId && solids.find(s => s.id === solidId)?.color) || extrudeColor
       const group = replicadMeshToThree(meshData, color, solidId)
-      const solidData = { id: solidId, group, operation: 'loft', color, normal, origin, uAxis, vAxis, profiles, ruled }
+      const solidData = { id: solidId, group, operation: 'loft', color, normal, origin, uAxis, vAxis, profiles, ruled, curved }
 
       setSolids(prev => editingId ? prev.map(s => s.id === solidId ? solidData : s) : [...prev, solidData])
       if (editingId) {
-        setFeatures(prev => prev.map(f => f.id === editingId ? { ...f, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled, ...(newLoftFeat?.transform ? { transform: newLoftFeat.transform } : {}) } : (followLoft?.changed.get(f.id) || f)))
+        setFeatures(prev => prev.map(f => f.id === editingId ? { ...f, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled, curved, ...(newLoftFeat?.transform ? { transform: newLoftFeat.transform } : {}) } : (followLoft?.changed.get(f.id) || f)))
         if (followLoft?.movedBodies.length) await rebuildMovedBodies(followLoft.movedBodies, followLoft.feats.map(f => f.id === editingId ? newLoftFeat : f))
       } else {
         const loftName = nextLoftName()   // outside the updater — see nextSketchName's comment
         const loftFeat = {
           id: `loft-${solidId}`, type: 'extrude', operation: 'loft', name: loftName,
-          solidId, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled, color,
+          solidId, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled, curved, color,
         }
         setFeatures(prev => [...prev, loftFeat])
         // "Join to body": fuse the loft into the body whose face it started on. If the
@@ -9766,7 +9742,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       // Loft has none of the above (no single profilePts/depthMm/planeId) —
       // its own basis + ordered profile list instead, same fields
       // buildBaseWorkerParams' loft branch reads off a `solid` object.
-      normal: feat.normal, origin: feat.origin, uAxis: feat.uAxis, vAxis: feat.vAxis, profiles: feat.profiles, ruled: feat.ruled,
+      normal: feat.normal, origin: feat.origin, uAxis: feat.uAxis, vAxis: feat.vAxis, profiles: feat.profiles, ruled: feat.ruled, curved: feat.curved,
       // Sweep's path curve + profile circle meta — normal/origin/uAxis/
       // profilePts above are shared with extrude/revolve's own fields, this
       // is just what's genuinely new (see buildBaseWorkerParams' sweep branch).
@@ -10726,9 +10702,6 @@ const App3D = forwardRef(function App3D(props, ref) {
   // the CAD worker, so it is rebuilt ~250 ms after the last change and the old
   // preview stays up until the new one arrives. Hidden while a profile is sketched.
   const loftPreviewSeqRef = useRef(0)
-  // The distance only changes the preview in Copy / Point mode (Draw mode shows just the profiles so far),
-  // so mouse-driven distance changes in Draw mode don't re-run the worker.
-  const loftPreviewDist = (loftState?.nextMode || 'draw') !== 'draw' ? loftState?.distanceInput : ''
   useEffect(() => {
     const vp = viewport3dRef.current
     const st = loftState
@@ -10736,7 +10709,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     // the effect below clears it when a loft ends).
     if (!vp || !st) return
     if (sketchMode) { vp.hideExtrudeSolidPreview?.(); return }
-    const list = loftPreviewProfiles(st, isLoftDragArmed())
+    const list = st.profiles.filter(Boolean)
     if (list.length < 2) { vp.hideExtrudeSolidPreview?.(); return }
     const seq = ++loftPreviewSeqRef.current
     const { basis } = st
@@ -10747,8 +10720,8 @@ const App3D = forwardRef(function App3D(props, ref) {
           viewNormal: [basis.viewNormal.x, basis.viewNormal.y, basis.viewNormal.z],
           origin: [pxToMm(basis.origin.x), pxToMm(basis.origin.y), pxToMm(basis.origin.z)],
           uAxis: [basis.uAxis.x, basis.uAxis.y, basis.uAxis.z],
-          ruled: !!st.ruled,
-          profiles: list.map(p => ({ pts: p.pts, circle: p.circle, offsetMm: p.offsetMm })),
+          ruled: !!st.ruled, curved: !!st.curved,
+          profiles: list.map(loftWorkerProfile),
         })
         if (seq !== loftPreviewSeqRef.current) return
         vp.showExtrudeSolidPreview(meshDataToPreviewGeometry(meshData), loftTool === 'loftcutout' ? '#e05a4e' : ADD_PREVIEW_COLOR)
@@ -10757,7 +10730,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       }
     }, 250)
     return () => { clearTimeout(timer); loftPreviewSeqRef.current++ }
-  }, [loftState?.profiles, loftState?.ruled, loftState?.nextMode, loftState?.scaleInput, loftPreviewDist,
+  }, [loftState?.profiles, loftState?.ruled, loftState?.curved,
       loftState?.currentIdx, loftState?.currentOffsetMm, !!loftState, sketchMode, loftTool, extrudeColor])
 
   // Gone with the loft session (finished, cancelled, or a new tool picked).
@@ -10769,13 +10742,13 @@ const App3D = forwardRef(function App3D(props, ref) {
   useEffect(() => {
     const vp = viewport3dRef.current
     if (!vp || !loftState || sketchMode || loftTool !== 'loftcutout' || loftEditingFeatureId) return
-    const list = loftPreviewProfiles(loftState, isLoftDragArmed())
+    const list = loftState.profiles.filter(Boolean)
     if (list.length < 2) return
     const box = loftSweepBoxPx(list, loftState.basis)
     const hits = solids.filter(s => s.operation !== 'cutout' && s.group && box.intersectsBox(new THREE.Box3().setFromObject(s.group)))
     vp.highlightJoinMembers(hits.map(s => ({ solidId: s.id, color: 0xe5484d })))
     return () => vp.clearJoinHighlight()
-  }, [loftState?.profiles, loftState?.nextMode, loftState?.scaleInput, loftPreviewDist, loftState?.currentIdx,
+  }, [loftState?.profiles, loftState?.currentIdx,
       loftState?.currentOffsetMm, !!loftState, sketchMode, loftTool, loftEditingFeatureId, solids])
 
   // The body a face-started loft can be fused into ("Join to body"): still visible,
@@ -11395,16 +11368,17 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
   // Loft's options in the step ribbon while it is between sketches (they used
   // to be a floating panel at the bottom of the view). Value first, like
-  // Extrude: the distance to the next shape (when placing one), what the next
-  // shape is (draw / copy / point, with its size for a copy), then Prev / Next,
-  // Ruled, New body / Join, and Finish loft.
+  // Extrude: the distance to the next shape (when placing one) and Place, then
+  // Prev / Next, Curved | Straight, New body / Join, and Finish loft. (Copy and
+  // Point modes went 2026-11-19: Copy was just an extrude; a tip is drawn with
+  // the sketch's POINT tool now.)
   function loftRibbonActions() {
     const st = loftState
     if (!st || sketchMode) return null
     const color = loftTool === 'loftcutout' ? '#53D3E4' : '#FBDA2D'
     const armed = isLoftDragArmed()
-    const mode = st.nextMode || 'draw'
     const count = st.profiles.filter(Boolean).length
+    const isCurved = !!st.curved && !st.ruled
     const field = { display: 'flex', alignItems: 'center', gap: 4, height: 26, boxSizing: 'border-box',
       background: '#0a0e1a', border: `1px solid ${color}88`, borderRadius: 13, padding: '0 10px' }
     const inputStyle = w => ({ width: w, background: 'none', border: 'none', outline: 'none', color: '#dce8ff',
@@ -11424,33 +11398,17 @@ const App3D = forwardRef(function App3D(props, ref) {
             {unit('mm')}
           </div>
         ) },
-        { divider: true },
-        { label: '✏ Draw it', enabled: true, active: mode === 'draw', onClick: () => setLoftState(prev => ({ ...prev, nextMode: 'draw' })) },
-        { label: '⧉ Copy', enabled: true, active: mode === 'copy', onClick: () => setLoftState(prev => ({ ...prev, nextMode: 'copy' })) },
-        { label: '▲ Point', enabled: true, active: mode === 'point', onClick: () => setLoftState(prev => ({ ...prev, nextMode: 'point' })) },
-        ...(mode === 'copy' ? [
-          { node: (
-            <div style={field} title="Size of the copy — 100% the same, less for a taper">
-              {label('SIZE')}
-              <input value={st.scaleInput ?? '100'}
-                onChange={e => setLoftState(prev => ({ ...prev, scaleInput: e.target.value }))}
-                onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter') loftAddCopy(); else if (e.key === 'Escape') cancelFeature() }}
-                onFocus={e => e.target.select()}
-                style={inputStyle(32)}/>
-              {unit('%')}
-            </div>
-          ) },
-          { label: '100%', enabled: true, active: (st.scaleInput ?? '100') === '100', onClick: () => setLoftState(prev => ({ ...prev, scaleInput: '100' })) },
-          { label: '50%', enabled: true, active: st.scaleInput === '50', onClick: () => setLoftState(prev => ({ ...prev, scaleInput: '50' })) },
-        ] : []),
-        { label: { draw: '↵ Place, then sketch', copy: '↵ Add copy', point: '↵ Add point' }[mode], enabled: true, active: true, onClick: loftAcceptNext },
+        { label: '↵ Place, then sketch', enabled: true, active: true, onClick: loftAcceptNext },
       ] : [
         { label: 'Next ▶', enabled: !!st.profiles[st.currentIdx], onClick: loftNextProfile },
       ]),
       { divider: true },
       { label: '◀ Prev', enabled: st.currentIdx > 0, onClick: loftPreviousProfile },
-      { label: st.ruled ? '▦ Ruled: on' : '▦ Ruled: off', enabled: true, active: !!st.ruled,
-        onClick: () => setLoftState(prev => ({ ...prev, ruled: !prev.ruled })) },
+      { divider: true },
+      { label: 'Curved', enabled: true, active: isCurved, title: 'One smooth surface that flows through every shape.',
+        onClick: () => setLoftState(prev => ({ ...prev, curved: true, ruled: false })) },
+      { label: 'Straight', enabled: true, active: !isCurved, title: 'Straight sides from one shape to the next, with a crease at each middle shape. Use it if Curved bulges or twists.',
+        onClick: () => setLoftState(prev => ({ ...prev, ruled: true })) },
       ...(loftJoinableId != null ? [
         { divider: true },
         { label: 'New body', enabled: true, active: !st.joinBody, onClick: () => setLoftState(prev => ({ ...prev, joinBody: false })) },
@@ -12673,7 +12631,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             depthMm: mf.depthMm, direction: mf.direction,
             revolveAxis: mf.revolveAxis, angleDeg: mf.angleDeg, revolveReverse: mf.revolveReverse,
             sourceSolidId: mf.sourceSolidId, mirrorPlane: mf.mirrorPlane,
-            normal: mf.normal, origin: mf.origin, uAxis: mf.uAxis, vAxis: mf.vAxis, profiles: mf.profiles, ruled: mf.ruled })
+            normal: mf.normal, origin: mf.origin, uAxis: mf.uAxis, vAxis: mf.vAxis, profiles: mf.profiles, ruled: mf.ruled, curved: mf.curved })
         } catch (err) {
           console.error('Un-join restore failed for', mf.id, err)
           setCadError(`Un-join failed to restore "${mf.name}": ${err.message || String(err)}`)
@@ -13217,7 +13175,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     // branch below since both can never be armed at the same time. ──
     if (isLoftDragArmed()) {
       // To a point finishes the loft, so it needs the ↵ button / Enter, not a stray click.
-      if ((loftState.nextMode || 'draw') !== 'point') loftAcceptNext()
+      loftAcceptNext()
       return
     }
 
@@ -13390,6 +13348,13 @@ const App3D = forwardRef(function App3D(props, ref) {
     // the same H/V angle snap + alignment tracking the Line tool gets — so the
     // committed line always matches what the rubber-band preview showed.
     // Only one axis per sketch: placing a new one replaces the old.
+    // ── Loft POINT tool: one click puts the loft's tip there (a second click moves it).
+    if (tool==='loftpoint'){
+      const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,null,false,splines,intersectionPts)
+      setLoftTipPt(geo?{x:geo.x,y:geo.y}:raw)
+      return
+    }
+
     if (tool==='axis'){
       if (!startPoint){
         const geo=getGeoSnap(raw,snapLines,snapCircles,snapArcs,null,false,splines,intersectionPts)
@@ -15045,6 +15010,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     ['axis',       IconAxis,       'Revolve Axis',   '#E0E0E0'],
     ['trace',      IconTrace,      'Trace Image',    '#607D8B'],
     ['includeedge', IconIncludeEdge, 'Include Edge — click any edge on any solid to add it to the sketch (firm or construction)', '#4FC3F7'],
+    ...(loftState && loftState.currentIdx > 0 ? [['loftpoint', IconLoftPoint, 'Point — end the loft at a single point: click where the tip goes, then Finish', '#FBDA2D']] : []),
   ]
 
   const editConfig=[
@@ -16106,7 +16072,9 @@ const App3D = forwardRef(function App3D(props, ref) {
                   ? `Drag in the view or type how far along the next shape sits, then press Enter. (Shape ${loftState.currentIdx+2})`
                   : !sketchMode && loftState.profiles.filter(Boolean).length < 2
                     ? `Add at least one more shape, then Finish loft. (Shape ${loftState.currentIdx+1} of ${Math.max(loftState.profiles.length, loftState.currentIdx+1)})`
-                    : `Draw a shape, then Next to add another further along. (Shape ${loftState.currentIdx+1} of ${Math.max(loftState.profiles.length, loftState.currentIdx+1)})`)
+                    : sketchMode && loftState.currentIdx > 0
+                      ? `Draw the next shape — or use POINT to end the loft at a tip — then Finish. (Shape ${loftState.currentIdx+1})`
+                      : `Draw a shape, then Next to add another further along. (Shape ${loftState.currentIdx+1} of ${Math.max(loftState.profiles.length, loftState.currentIdx+1)})`)
               : 'Click the plane or a face for your first shape.'}
             action={!loftState ? [
               { label: hideWorkPlanesManual ? '◻ Show Planes' : '◻ Hide Planes', enabled:true,

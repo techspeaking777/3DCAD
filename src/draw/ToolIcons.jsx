@@ -117,6 +117,15 @@ export function IconAxis({ active }) {
   </>}</SketchIcon>
 }
 
+// Loft POINT tool: a faded square shape below, lines rising to the tip dot.
+export function IconLoftPoint({ active }) {
+  return <SketchIcon label="POINT" color={SK.draw} active={active}>{({ c, g }) => <>
+    <path d="M8 38 L28 44 L40 34 L20 29 Z" stroke={g} strokeWidth={SWG} strokeLinejoin="round"/>
+    <path d="M8 38 L24 8 M28 44 L24 8 M40 34 L24 8" stroke={g} strokeWidth="1.2"/>
+    <circle cx="24" cy="8" r="4.5" fill={c}/>
+  </>}</SketchIcon>
+}
+
 export function IconTrace({ active }) {
   return <SketchIcon label="TRACE" color={SK.draw} active={active}>{({ c, g }) => <>
     {/* the photo: frame, sun, solid hills */}

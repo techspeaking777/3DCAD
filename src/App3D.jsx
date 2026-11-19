@@ -6817,7 +6817,6 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [smooth3dKeepFaces, setSmooth3dKeepFaces] = useState([])   // [{solidId, point(px), normal, key}]
   const [smooth3dRadiusInput, setSmooth3dRadiusInput] = useState('2')
   const [smooth3dBodyHoverId, setSmooth3dBodyHoverId] = useState(null)
-  const [smooth3dHandlePos, setSmooth3dHandlePos] = useState(null)
 
   const smoothFeatureOf = (solidId, feats = features) => feats.find(f => f.type === 'smooth' && f.solidId === solidId) || null
   // True when a body is shown smoothed (its faces/edges aren't the real model).
@@ -6849,13 +6848,11 @@ const App3D = forwardRef(function App3D(props, ref) {
     setSmooth3dSolidId(null)
     setSmooth3dKeepFaces([])
     setSmooth3dBodyHoverId(null)
-    setSmooth3dHandlePos(null)
   }
   // Picking a body that already has a Smooth loads it for editing.
-  function pickSmoothBody(solidId, handlePos = null) {
+  function pickSmoothBody(solidId) {
     setSmooth3dSolidId(solidId)
     setSmooth3dBodyHoverId(null)
-    setSmooth3dHandlePos(handlePos)
     const f = smoothFeatureOf(solidId)
     if (f) {
       setSmooth3dRadiusInput(String(f.radius))
@@ -6875,7 +6872,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (tool !== 'smooth3d' || smooth3dSolidId != null) return
     const hit = viewport3dRef.current?.raycastSolidFace(e.clientX, e.clientY)
     if (!hit || hit.solidId == null) return
-    pickSmoothBody(hit.solidId, { x: e.clientX + 20, y: e.clientY - 20 })
+    pickSmoothBody(hit.solidId)
   }
   // A face click toggles it in/out of the faces kept flat.
   function handleSmoothFaceClick(facePlane) {
@@ -16291,12 +16288,28 @@ const App3D = forwardRef(function App3D(props, ref) {
             hint={
               smooth3dSolidId==null
                 ? 'Click the body you want to smooth.'
-                : smooth3dKeepFaces.length>0
+                : (smooth3dKeepFaces.length>0
                   ? `${smooth3dKeepFaces.length} face${smooth3dKeepFaces.length!==1?'s':''} kept flat — click more, or type the radius and press Enter.`
-                  : 'Click any face that should stay flat (e.g. the bottom), type the radius, then press Enter.'
+                  : 'Click any face that should stay flat (e.g. the bottom), type the radius, then press Enter.')
+                  + ' Parts thinner than twice the radius wear down.'
             }
             action={smooth3dSolidId!=null ? [
-              ...(smooth3dKeepFaces.length>0 ? [{label:'Clear Flat Faces', enabled:true, onClick:()=>setSmooth3dKeepFaces([])}] : []),
+              // Radius box (it used to be a floating panel).
+              { node: (
+                <div title="How round the edges get. Anything thinner than twice this gets worn down, and sharp points pull back. Smooth is the body's last step."
+                  style={{ display:'flex', alignItems:'center', gap:4, height:26, boxSizing:'border-box', background:'#0a0e1a',
+                    border:'1px solid #A470F288', borderRadius:13, padding:'0 10px' }}>
+                  <span style={{ color:'#8fa0b8', fontFamily:'monospace', fontSize:10, letterSpacing:'0.06em' }}>RADIUS</span>
+                  <input autoFocus value={smooth3dRadiusInput}
+                    onChange={e=>setSmooth3dRadiusInput(e.target.value)}
+                    onKeyDown={e=>{ e.stopPropagation(); if (e.key==='Enter') commitSmooth3D(); else if (e.key==='Escape') resetSmooth3D() }}
+                    onFocus={e=>e.target.select()}
+                    style={{ width:40, background:'none', border:'none', outline:'none', color:'#dce8ff', fontFamily:'monospace', fontSize:13, fontWeight:'bold' }}/>
+                  <span style={{ color:'#6688aa', fontFamily:'monospace', fontSize:11 }}>mm</span>
+                </div>
+              ) },
+              { divider: true },
+              ...(smooth3dKeepFaces.length>0 ? [{label:'Clear flat faces', enabled:true, onClick:()=>setSmooth3dKeepFaces([])}, { divider: true }] : []),
               {label:'✓ Smooth', enabled:true, onClick:commitSmooth3D},
             ] : []}
             onStepBack={step => { if (step===1) resetSmooth3D() }}
@@ -16735,71 +16748,6 @@ const App3D = forwardRef(function App3D(props, ref) {
               : 'Click bodies in the 3D view to select'} · Esc to cancel
           </div>
         </div>
-        </div>
-      )}
-
-      {/* ── Smooth panel (radius) ───────────────────────────────────────────── */}
-      {tool==='smooth3d' && smooth3dSolidId!=null && (
-        <div style={{
-          position: 'fixed',
-          // Default: top-left of the view, clear of the part (it's usually centred).
-          left: Math.max(8, Math.min((smooth3dHandlePos ?? { x: 180 }).x, window.innerWidth - 260)),
-          top:  Math.max(8, Math.min((smooth3dHandlePos ?? { y: 140 }).y, window.innerHeight - 190)),
-          zIndex: 1000,
-          background: 'rgba(15,20,40,0.95)',
-          border: '1.5px solid #A470F2',
-          borderRadius: 8,
-          padding: '10px 14px',
-          width: 230,
-          boxSizing: 'border-box',
-          boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
-          fontFamily: 'monospace',
-        }}>
-          <div style={{color:'#9fb4d8', fontSize:11, marginBottom:6}}>Radius</div>
-          <div style={{display:'flex', alignItems:'center', gap:8}}>
-            <div style={{
-              flex:1, background:'#0a0e1a', border:'1px solid #2a3a5a',
-              borderRadius:4, padding:'4px 8px',
-              display:'flex', alignItems:'center', justifyContent:'space-between',
-            }}>
-              <input
-                autoFocus
-                value={smooth3dRadiusInput}
-                onChange={e=>setSmooth3dRadiusInput(e.target.value)}
-                onFocus={e=>e.target.select()}
-                onKeyDown={e=>{
-                  e.stopPropagation()
-                  if (e.key==='Enter') commitSmooth3D()
-                  else if (e.key==='Escape') resetSmooth3D()
-                }}
-                style={{
-                  background:'none', border:'none', outline:'none',
-                  color:'#dce8ff', fontFamily:'monospace', fontSize:16,
-                  fontWeight:'bold', flex:1, minWidth:0,
-                }}
-              />
-              <span style={{color:'#6688aa', fontSize:12}}>mm</span>
-            </div>
-            <button
-              onClick={()=>commitSmooth3D()}
-              style={{
-                padding:'4px 10px', background: '#A470F2', color:'#0d0d1a',
-                border:'none', borderRadius:4, cursor:'pointer',
-                fontFamily:'monospace', fontSize:12, fontWeight:'bold',
-              }}
-            >↵</button>
-          </div>
-          <div style={{color:'#9fb4d8', fontSize:11, marginTop:8}}>
-            {smooth3dKeepFaces.length>0
-              ? `${smooth3dKeepFaces.length} face${smooth3dKeepFaces.length!==1?'s':''} kept flat`
-              : 'Every outside edge gets rounded'}
-          </div>
-          <div style={{color:'#8fa0b8', fontSize:10, marginTop:4}}>
-            Anything thinner than twice the radius gets worn down, and sharp points pull back.
-          </div>
-          <div style={{color:'#445566', fontSize:10, marginTop:6, textAlign:'center'}}>
-            Smooth is the body's last step · Esc to cancel
-          </div>
         </div>
       )}
 

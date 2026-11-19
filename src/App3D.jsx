@@ -1153,23 +1153,26 @@ const FILLET3D_CHAMFER_COLOR = '#c9793f'
 // Deliberately has no onKeyDown of its own — Enter is handled by each
 // caller's own handleKeyDown block, relying on the keydown bubbling up
 // naturally, so adding a local handler here would risk double-committing.
-function OffsetDistancePopover({ color, value, onChange, label='OFFSET', unit='mm' }) {
+// Offset Plane's distance, as one ribbon item: OFFSET [10] mm + ✓ Use Plane.
+// It used to pop out under the Use Plane button.
+// The box follows the mouse drag until you type in it; Enter reaches the
+// app's handleKeyDown, which confirms, as before.
+function OffsetDistanceField({ color, value, onChange, onUse, label='OFFSET', unit='mm' }) {
   return (
-    <div style={{
-      position:'absolute', top:'calc(100% + 8px)', left:'50%', transform:'translateX(-50%)',
-      zIndex:200, background:'rgba(12,12,26,0.97)', border:`2px solid ${color}`,
-      borderRadius:8, padding:'10px 16px', display:'flex', alignItems:'center', gap:10, whiteSpace:'nowrap',
-    }}>
-      <span style={{fontFamily:'monospace',fontSize:11,fontWeight:'bold',color,letterSpacing:'0.08em'}}>{label}</span>
-      <input
-        type="number"
-        autoFocus
-        value={value}
-        onChange={e=>onChange(e.target.value)}
-        style={{width:70,textAlign:'center',fontFamily:'monospace',fontSize:14,fontWeight:'bold',
-          background:'#0d0d1a',color:'#fff',border:`2px solid ${color}`,borderRadius:6,padding:'4px 6px'}}
-      />
-      <span style={{fontFamily:'monospace',fontSize:11,color:'#888'}}>{unit}</span>
+    <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+      <div title="How far the new plane sits from the one you picked (a minus number goes the other way)"
+        style={{ display:'flex', alignItems:'center', gap:4, height:26, boxSizing:'border-box', background:'#0a0e1a',
+          border:`1px solid ${color}88`, borderRadius:13, padding:'0 10px' }}>
+        <span style={{ color:'#8fa0b8', fontFamily:'monospace', fontSize:10, letterSpacing:'0.06em' }}>{label}</span>
+        <input autoFocus value={value} onChange={e=>onChange(e.target.value)} onFocus={e=>e.target.select()}
+          style={{ width:48, background:'none', border:'none', outline:'none', color:'#dce8ff', fontFamily:'monospace', fontSize:13, fontWeight:'bold' }}/>
+        <span style={{ color:'#6688aa', fontFamily:'monospace', fontSize:11 }}>{unit}</span>
+      </div>
+      <button onClick={onUse}
+        style={{ height:26, boxSizing:'border-box', padding:'0 12px', borderRadius:13, border:`1px solid ${color}`,
+          background:color, color:'#0d0d1a', fontFamily:'monospace', fontSize:11, fontWeight:'bold', cursor:'pointer', whiteSpace:'nowrap' }}>
+        ✓ Use Plane
+      </button>
     </div>
   )
 }
@@ -15848,9 +15851,8 @@ const App3D = forwardRef(function App3D(props, ref) {
                     { label: hideWorkPlanesManual ? '◻ Show Planes' : '◻ Hide Planes', enabled:true,
                       onClick: () => setHideWorkPlanesManual(p => !p) },
                     extrudeOffsetBase
-                      ? { label:'✓ Use Plane', enabled:true, onClick:commitExtrudeOffset,
-                          popover: <OffsetDistancePopover color={(extrudeTool === 'cutout' || extrudeTool === 'revolvecut') ? '#e05a4e' : '#3a7bd5'}
-                            value={extrudeOffsetDistInput} onChange={v=>{setExtrudeOffsetDistLocked(true);setExtrudeOffsetDistInput(v)}}/> }
+                      ? { node: <OffsetDistanceField color={(extrudeTool === 'cutout' || extrudeTool === 'revolvecut') ? '#e05a4e' : '#3a7bd5'}
+                            value={extrudeOffsetDistInput} onChange={v=>{setExtrudeOffsetDistLocked(true);setExtrudeOffsetDistInput(v)}} onUse={commitExtrudeOffset}/> }
                       : { label: extrudeOffsetMode ? '✕ Cancel Offset' : '+ Offset Plane', enabled:true,
                           onClick:()=>{
                             if (extrudeOffsetMode) { setExtrudeOffsetMode(false); setExtrudeOffsetBase(null) }
@@ -15935,8 +15937,7 @@ const App3D = forwardRef(function App3D(props, ref) {
             action={!mirror3dSelectionDone
               ? {label:'✓ Next', enabled:mirror3dSel.length>0, onClick:()=>setMirror3dSelectionDone(true)}
               : mirror3dOffsetBase
-                ? {label:'✓ Use Plane', enabled:true, onClick:commitMirror3DOffset,
-                    popover: <OffsetDistancePopover color="#8E65F3" value={mirror3dOffsetDistInput} onChange={v=>{setMirror3dOffsetDistLocked(true);setMirror3dOffsetDistInput(v)}}/>}
+                ? { node: <OffsetDistanceField color="#8E65F3" value={mirror3dOffsetDistInput} onChange={v=>{setMirror3dOffsetDistLocked(true);setMirror3dOffsetDistInput(v)}} onUse={commitMirror3DOffset}/> }
                 : {label: mirror3dOffsetMode ? '✕ Cancel Offset' : '+ Offset Plane', enabled:true,
                     onClick:()=>{
                       if (mirror3dOffsetMode) { setMirror3dOffsetMode(false); setMirror3dOffsetBase(null) }
@@ -16148,9 +16149,8 @@ const App3D = forwardRef(function App3D(props, ref) {
                     { label: hideWorkPlanesManual ? '◻ Show Planes' : '◻ Hide Planes', enabled:true,
                       onClick: () => setHideWorkPlanesManual(p => !p) },
                     sweepOffsetBase
-                      ? { label:'✓ Use Plane', enabled:true, onClick:commitSweepOffset,
-                          popover: <OffsetDistancePopover color={sweepTool==='sweepcut' ? '#53D3E4' : '#7ED957'}
-                            value={sweepOffsetDistInput} onChange={v=>{setSweepOffsetDistLocked(true);setSweepOffsetDistInput(v)}}/> }
+                      ? { node: <OffsetDistanceField color={sweepTool==='sweepcut' ? '#53D3E4' : '#7ED957'}
+                            value={sweepOffsetDistInput} onChange={v=>{setSweepOffsetDistLocked(true);setSweepOffsetDistInput(v)}} onUse={commitSweepOffset}/> }
                       : { label: sweepOffsetMode ? '✕ Cancel Offset' : '+ Offset Plane', enabled:true,
                           onClick:()=>{
                             if (sweepOffsetMode) { setSweepOffsetMode(false); setSweepOffsetBase(null) }
@@ -16202,9 +16202,8 @@ const App3D = forwardRef(function App3D(props, ref) {
               !springState
                 ? [
                     springOffsetBase
-                      ? { label:'✓ Use Plane', enabled:true, onClick:commitSpringOffset,
-                          popover: <OffsetDistancePopover color={springTool==='springcut' ? '#53D3E4' : '#F06292'}
-                            value={springOffsetDistInput} onChange={v=>{setSpringOffsetDistLocked(true);setSpringOffsetDistInput(v)}}/> }
+                      ? { node: <OffsetDistanceField color={springTool==='springcut' ? '#53D3E4' : '#F06292'}
+                            value={springOffsetDistInput} onChange={v=>{setSpringOffsetDistLocked(true);setSpringOffsetDistInput(v)}} onUse={commitSpringOffset}/> }
                       : { label: springOffsetMode ? '✕ Cancel Offset' : '+ Offset Plane', enabled:true,
                           onClick:()=>{
                             if (springOffsetMode) { setSpringOffsetMode(false); setSpringOffsetBase(null) }

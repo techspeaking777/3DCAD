@@ -16049,14 +16049,24 @@ const App3D = forwardRef(function App3D(props, ref) {
                   else setMoveCopy3dPivotPicking(true)
                 },
               }]),
-              ...(moveCopy3dDragHandle ? [{
-                label:'✓ Confirm', enabled:true, onClick:commitMoveCopy3D,
-                popover: moveCopy3dDragHandle.kind==='rotate'
-                  ? <OffsetDistancePopover color="#FF9800" label={moveCopy3dMode==='copy' ? 'COPY' : 'ROTATE'}
-                      unit="°" value={moveCopy3dAngleInput} onChange={v=>{setMoveCopy3dAngleLocked(true);setMoveCopy3dAngleInput(v)}}/>
-                  : <OffsetDistancePopover color="#FF9800" label={moveCopy3dMode==='copy' ? 'COPY' : 'MOVE'}
-                      unit="mm" value={moveCopy3dDistInput} onChange={v=>{setMoveCopy3dDistLocked(true);setMoveCopy3dDistInput(v)}}/>,
-              }] : []),
+              // Distance / angle box in the ribbon (it used to pop out under
+              // Confirm). It follows the mouse until you type in it. Enter
+              // reaches handleKeyDown as before and confirms.
+              ...(moveCopy3dDragHandle ? (() => {
+                const rot = moveCopy3dDragHandle.kind==='rotate'
+                return [{ node: (
+                  <div title={rot ? 'How far it turns (a minus number turns the other way)' : 'How far it moves along the arrow (a minus number goes the other way)'}
+                    style={{ display:'flex', alignItems:'center', gap:4, height:26, boxSizing:'border-box', background:'#0a0e1a',
+                      border:'1px solid #FF980088', borderRadius:13, padding:'0 10px' }}>
+                    <span style={{ color:'#8fa0b8', fontFamily:'monospace', fontSize:10, letterSpacing:'0.06em' }}>{rot ? 'ANGLE' : 'DISTANCE'}</span>
+                    <input autoFocus value={rot ? moveCopy3dAngleInput : moveCopy3dDistInput}
+                      onChange={e=>{ if (rot) { setMoveCopy3dAngleLocked(true); setMoveCopy3dAngleInput(e.target.value) } else { setMoveCopy3dDistLocked(true); setMoveCopy3dDistInput(e.target.value) } }}
+                      onFocus={e=>e.target.select()}
+                      style={{ width:48, background:'none', border:'none', outline:'none', color:'#dce8ff', fontFamily:'monospace', fontSize:13, fontWeight:'bold' }}/>
+                    <span style={{ color:'#6688aa', fontFamily:'monospace', fontSize:11 }}>{rot ? '°' : 'mm'}</span>
+                  </div>
+                ) }, { label: moveCopy3dMode==='copy' ? '✓ Make copy' : '✓ Confirm', enabled:true, onClick:commitMoveCopy3D }]
+              })() : []),
             ]}
             onStepBack={step => { if (step === 1) resetMoveCopy3D() }}
           />

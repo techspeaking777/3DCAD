@@ -16206,19 +16206,35 @@ const App3D = forwardRef(function App3D(props, ref) {
             currentStep={fillet3dAccepted ? 2 : 1}
             color={fillet3dMode==='chamfer' ? FILLET3D_CHAMFER_COLOR : '#9c6ade'}
             hint={
-              editingFeatureId
+              // A note from the last try (e.g. the biggest radius that fits) wins.
+              (fillet3dAccepted && fillet3dNote) ? fillet3dNote
+              : editingFeatureId
                 ? `Type how big the ${fillet3dMode==='chamfer' ? 'bevel' : 'rounding'} should be, then press Enter.`
                 : fillet3dAccepted
                   ? `${fillet3dSel.length} edge${fillet3dSel.length!==1?'s':''} picked — type the ${fillet3dMode==='chamfer' ? 'bevel' : 'radius'} and press Enter, or click more edges.`
                   : 'Click an edge or a face to round it. Click again to deselect.'
             }
             action={[
+              // The size box (it used to be a pop-up by the edge) — once an edge is picked.
+              ...(fillet3dAccepted ? [{ node: (
+                <div title={fillet3dMode==='chamfer' ? 'How far back the bevel cuts' : 'How big the rounding is'}
+                  style={{ display:'flex', alignItems:'center', gap:4, height:26, boxSizing:'border-box', background:'#0a0e1a',
+                    border:`1px solid ${fillet3dMode==='chamfer' ? FILLET3D_CHAMFER_COLOR : '#9c6ade'}88`, borderRadius:13, padding:'0 10px' }}>
+                  <span style={{ color:'#8fa0b8', fontFamily:'monospace', fontSize:10, letterSpacing:'0.06em' }}>{fillet3dMode==='chamfer' ? 'DISTANCE' : 'RADIUS'}</span>
+                  <input autoFocus value={fillet3dRadiusInput}
+                    onChange={e=>{ setFillet3dRadiusInput(e.target.value); setFillet3dNote(null) }}
+                    onKeyDown={e=>{ e.stopPropagation(); if (e.key==='Enter') commitFillet3D(); else if (e.key==='Escape') resetFillet3D() }}
+                    onFocus={e=>e.target.select()}
+                    style={{ width:40, background:'none', border:'none', outline:'none', color:'#dce8ff', fontFamily:'monospace', fontSize:13, fontWeight:'bold' }}/>
+                  <span style={{ color:'#6688aa', fontFamily:'monospace', fontSize:11 }}>mm</span>
+                </div>
+              ) }, { divider: true }] : []),
               // Mode toggle — you can't convert an already-committed fillet
               // into a chamfer in place, so it's off while re-editing one.
               {label:'Fillet',  enabled: !editingFeatureId, active: fillet3dMode==='fillet',  onClick:()=>setFillet3dMode('fillet')},
               {label:'Chamfer', enabled: !editingFeatureId, active: fillet3dMode==='chamfer', onClick:()=>setFillet3dMode('chamfer')},
               {label:'Smooth Chain', enabled: !editingFeatureId, active: fillet3dChain, onClick:()=>setFillet3dChain(v=>!v)},
-              ...(fillet3dAccepted ? [{label:'✓ Apply', enabled:true, onClick:commitFillet3D}] : []),
+              ...(fillet3dAccepted ? [{ divider: true }, {label:'✓ Apply', enabled:true, onClick:commitFillet3D}] : []),
             ]}
             onStepBack={step => { if (step===1) resetFillet3D() }}
           />
@@ -16699,62 +16715,6 @@ const App3D = forwardRef(function App3D(props, ref) {
               : 'Click bodies in the 3D view to select'} · Esc to cancel
           </div>
         </div>
-        </div>
-      )}
-
-      {/* ── Fillet popup — radius, up as soon as an edge is picked ───────── */}
-      {tool==='fillet3d' && fillet3dAccepted && fillet3dHandlePos && (
-        <div style={{
-          position: 'fixed',
-          left: fillet3dHandlePos.x,
-          top:  fillet3dHandlePos.y,
-          zIndex: 1000,
-          background: 'rgba(15,20,40,0.95)',
-          border: `1.5px solid ${fillet3dMode==='chamfer' ? FILLET3D_CHAMFER_COLOR : '#9c6ade'}`,
-          borderRadius: 8,
-          padding: '10px 14px',
-          minWidth: 180,
-          boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
-          fontFamily: 'monospace',
-        }}>
-          <div style={{display:'flex', alignItems:'center', gap:8}}>
-            <div style={{
-              flex:1, background:'#0a0e1a', border:'1px solid #2a3a5a',
-              borderRadius:4, padding:'4px 8px',
-              display:'flex', alignItems:'center', justifyContent:'space-between',
-            }}>
-              <input
-                autoFocus
-                value={fillet3dRadiusInput}
-                onChange={e=>{ setFillet3dRadiusInput(e.target.value); setFillet3dNote(null) }}
-                onKeyDown={e=>{
-                  e.stopPropagation()
-                  if (e.key==='Enter') commitFillet3D()
-                  else if (e.key==='Escape') resetFillet3D()
-                }}
-                style={{
-                  background:'none', border:'none', outline:'none',
-                  color:'#dce8ff', fontFamily:'monospace', fontSize:16,
-                  fontWeight:'bold', flex:1, minWidth:0,
-                }}
-              />
-              <span style={{color:'#6688aa', fontSize:12}}>mm</span>
-            </div>
-            <button
-              onClick={()=>commitFillet3D()}
-              style={{
-                padding:'4px 10px', background: fillet3dMode==='chamfer' ? FILLET3D_CHAMFER_COLOR : '#9c6ade', color:'#fff',
-                border:'none', borderRadius:4, cursor:'pointer',
-                fontFamily:'monospace', fontSize:12, fontWeight:'bold',
-              }}
-            >↵</button>
-          </div>
-          <div style={{color:'#445566', fontSize:10, marginTop:6, textAlign:'center'}}>
-            {fillet3dMode==='chamfer' ? 'Chamfer distance' : 'Fillet radius'}{fillet3dSel.length>1 ? ` · ${fillet3dSel.length} edges` : ''} · ↵ to accept · Esc to cancel
-          </div>
-          {fillet3dNote && (
-            <div style={{color:'#ffb74d', fontSize:11, marginTop:6, maxWidth:220, whiteSpace:'normal', textAlign:'center'}}>{fillet3dNote}</div>
-          )}
         </div>
       )}
 

@@ -35,7 +35,7 @@ import { smoothMeshAsync } from './tools/smoothClient.js'
 import TracerPanel from './tools/TracerPanel.jsx'
 import TextPanel from './tools/TextPanel.jsx'
 import { springFrame, springDims, springProfileTouchesAxis } from './tools/springMath.js'
-import PatternPanel from './tools/PatternPanel.jsx'
+import { usePatternOptions } from './tools/PatternPanel.jsx'
 import ViewCube from './tools/ViewCube.jsx'
 import PageSetupPanel from './tools/PageSetupPanel.jsx'
 import SaveAsPanel from './tools/SaveAsPanel.jsx'
@@ -7989,6 +7989,17 @@ const App3D = forwardRef(function App3D(props, ref) {
       setPattern3dShowPanel(false)
     }
   }
+  // The options step's fields, shown in the step ribbon (they used to be the
+  // floating PatternPanel).
+  const patternOptions = usePatternOptions({
+    open: tool === 'pattern3d' && pattern3dShowPanel,
+    onConfirm: handlePatternPanelConfirm,
+    onClose: resetPattern3D,
+    onRectChange: setPattern3dRect,
+    bounds: pattern3dBounds,
+    defaultAxes: pattern3dDefaultAxes,
+    color: '#4DB6AC',
+  })
 
   // Circular axis pick — same raycastSolidEdges+getEdgeSnapCandidates pass
   // Snap Move/Set Pivot use, on ANY body (not just the selected one), but
@@ -16067,7 +16078,8 @@ const App3D = forwardRef(function App3D(props, ref) {
                     : pattern3dAxisHover
                       ? 'Click to confirm — no circular edge here, axis defaults to world Z'
                       : 'Click a round edge to spin the copies around.')
-                : 'Choose a grid (rows and columns) or a circle, then set the spacing.'}
+                : (patternOptions.hint || 'Choose a grid (rows and columns) or a circle, then set the spacing.')}
+            action={patternOptions.actions}
             onStepBack={step => { if (step === 1) resetPattern3D() }}
           />
 
@@ -17103,17 +17115,6 @@ const App3D = forwardRef(function App3D(props, ref) {
             resetText();setTool('line')
           }}
           onClose={()=>{resetText();setTool('line')}}
-        />
-      )}
-      {pattern3dShowPanel && (
-        <PatternPanel
-          onConfirm={handlePatternPanelConfirm}
-          onClose={resetPattern3D}
-          onRectChange={setPattern3dRect}
-          isCutout={!!pattern3dCutFeatId}
-          bounds={pattern3dBounds}
-          defaultAxes={pattern3dDefaultAxes}
-          color="#4DB6AC"
         />
       )}
     </div>

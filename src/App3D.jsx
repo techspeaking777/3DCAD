@@ -1152,7 +1152,7 @@ const STEP_TIPS = {
   'sketch path': 'Draw the line or curve the shape travels along.',
   'sketch wire': 'Draw the wire shape and, if you like, an axis line for the spring to wind round.',
   'set depth': 'Choose how far the shape grows: drag the arrow or type a depth. One way goes toward the side your mouse is on (or type a minus number for the other side); Both ways centres it on the sketch.',
-  'set angle': 'Choose how far it spins round the axis (360° makes a full solid), which way it spins, and which axis it spins round.',
+  'set angle': 'Move the mouse round the axis line to spin the shape (10° steps), or type an exact angle — 360° makes a full solid. The mouse picks which way it spins; Both ways centres it on the sketch.',
   'set a depth': 'Choose how far the shape grows: drag the arrow or type a depth.',
   'set radius': 'Type how big the rounding is, in mm.',
   'set thickness': 'Type how thick the walls are, in mm.',
@@ -5834,10 +5834,20 @@ const App3D = forwardRef(function App3D(props, ref) {
         return
       }
       let revolveAxis = axisLine ? { x1:axisLine.x1, y1:axisLine.y1, x2:axisLine.x2, y2:axisLine.y2 } : null
-      // No axis line drawn: spin about one of the sketch's own origin axes instead.
-      // Pick the one the profile sits wholly on one side of (nearer one if both
-      // work); the popup lets the user switch. If the profile crosses both, the
-      // popup shows the warning and Done stays blocked until it's moved.
+      // No axis line drawn: a new revolve asks for one (user, 2026-11-19 — the
+      // Vertical / Horizontal origin-axis choice is gone) and switches to the
+      // REV AXIS tool. Re-editing an OLD revolve that spun about an origin axis
+      // (saved `preset`) keeps that axis, so it rebuilds the same.
+      if (isRevolveTool && !axisLine && !editingFeat?.revolveAxis?.preset) {
+        setSketchMode(true)
+        setActivePlane(plane)
+        pickSketchTool('axis')
+        const msg = 'Draw the axis line the shape spins round (the REV AXIS tool is on), then press Finish.'
+        setCadError(msg)
+        setTimeout(() => setCadError(prev => prev === msg ? null : prev), 7000)
+        return
+      }
+      if (axisLine) setCadError(prev => prev && prev.startsWith('Draw the axis line') ? null : prev)
       if (isRevolveTool && !axisLine) {
         const saved = editingFeat?.revolveAxis?.preset
         const gap = a => Math.min(...best.pts.map(p => Math.abs(a.preset === 'vertical' ? p.x : p.y)))
@@ -10304,6 +10314,57 @@ const App3D = forwardRef(function App3D(props, ref) {
     ctx.restore()
   }
 
+  // Revolve's angle step: the mouse spins the shape round the axis. The angle is
+  // measured in 3D, round the axis, from the shape's centre to where the mouse
+  // ray meets the plane square to the axis through that centre — so it reads
+  // the same from any view. Snapped to 10° (a typed angle is exact), kept
+  // unwrapped across ±180° so a drag can go all the way round (max 360). Its
+  // sign is the direction (+ = counter-clockwise, revolveReverse false). A
+  // typed angle (depthLocked) keeps its size and the mouse still picks the
+  // side; a minus typed in pins the side (directionLocked). Both ways: the
+  // mouse marks one end, so the total is twice that. Looking exactly side-on
+  // to the axis the angle can't be read, so it holds still.
+  const revolveDragRef = useRef(null)
+  function handleRevolveDragMove(e) {
+    const st = extrudeStateRef.current || extrudeState
+    const vp = viewport3dRef.current
+    const prof = st?.profiles?.[st.pickedIdx]
+    if (!st?.armed || !st.revolveAxis || !prof || !vp) return
+    const ax = st.revolveAxis
+    const toWorld = (x, y) => { const w = st.facePlane ? st.facePlane.sketchToWorld(x, y) : sketchToWorld(x, y, st.planeId); return new THREE.Vector3(w.x, w.y, w.z) }
+    const A = toWorld(ax.x1, ax.y1)
+    const D = toWorld(ax.x2, ax.y2).sub(A).normalize()
+    const cam = vp.getCameraAxes?.()
+    if (cam && Math.abs(new THREE.Vector3(...cam.back).dot(D)) < 0.12) return
+    const c = st.centroid || prof[0]
+    const P = toWorld(c.x, c.y)
+    const radial = v => { const r = v.clone().sub(A); return r.sub(D.clone().multiplyScalar(r.dot(D))) }
+    const r0 = radial(P)
+    if (r0.length() < 1e-6) return
+    const hitObj = vp.raycastPlaneWorld(e.clientX, e.clientY, P, D)
+    if (!hitObj) return
+    const r1 = radial(new THREE.Vector3(hitObj.x, hitObj.y, hitObj.z))
+    if (r1.length() < 1e-6) return
+    const a = THREE.MathUtils.radToDeg(Math.atan2(r0.clone().cross(r1).dot(D), r0.dot(r1)))
+    const key = st.revolveAxis.x1 + ',' + st.revolveAxis.y1 + ',' + st.pickedIdx + ',' + st.planeId
+    let ref = revolveDragRef.current
+    if (!ref || ref.key !== key) ref = revolveDragRef.current = { key, last: a, total: a }
+    else {
+      let d = a - ref.last
+      if (d > 180) d -= 360
+      if (d < -180) d += 360
+      ref.total = Math.max(-360, Math.min(360, ref.total + d))
+      ref.last = a
+    }
+    const total = ref.total
+    const both = st.revolveReverse === 'both'
+    const size = Math.min(360, Math.max(10, Math.round((both ? 2 : 1) * Math.abs(total) / 10) * 10))
+    const nextAngle = st.depthLocked ? st.depthInput : String(size)
+    const nextRev = (both || st.directionLocked) ? st.revolveReverse : total < 0
+    if (nextAngle === st.depthInput && nextRev === st.revolveReverse) return
+    updateExtrudeState(() => ({ depthInput: nextAngle, revolveReverse: nextRev }))
+  }
+
   function handleExtrudeDragMove(e) {
     if (!extrudeState?.armed) return
     extrudeMouseRef.current = { x: e.clientX, y: e.clientY }
@@ -10311,7 +10372,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     previewSolidRef.current = null
     extrudeSnapRef.current = null   // re-set below only when the cursor is on a snap point
 
-    if (extrudeState.revolveAxis) return
+    if (extrudeState.revolveAxis) { handleRevolveDragMove(e); return }
     const p = extrudeAnimParamsRef.current
     const vp = viewport3dRef.current
     if (!p || !vp) return
@@ -11176,6 +11237,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     const first = detectProfiles(ownLines, own(arcs), planeId, own(circles), own(splines))[0]
     if (!first) return null
     const drawn = ownLines.find(l => l.style === 'axis' && (l.plane || 'XY') === planeId)
+    if (!drawn && !springSketching) return null   // Revolve: Finish asks for the axis line
     const axes = drawn ? [drawn] : [originRevolveAxis('vertical'), originRevolveAxis('horizontal')]
     if (axes.some(a => !profileCrossesAxis(first, a))) return null
     return drawn
@@ -11262,37 +11324,39 @@ const App3D = forwardRef(function App3D(props, ref) {
       setSolids(prev => prev.filter(s => s.id !== '__preview__'))
       commitExtrude()
     }
-    // Revolve / Revolve Cut: angle first (with the quick 90/180/270/360), then
-    // which way it spins, then the axis it spins round, then New body / Join.
+    // Revolve / Revolve Cut (user, 2026-11-19): the mouse sets the angle (10°
+    // steps) and which way it spins (handleRevolveDragMove); typing an angle
+    // fixes its size and the mouse still picks the side; a minus number flips
+    // and pins the side. One way / Both ways, then New body / Join. The quick
+    // 90–360° buttons, ↺ / ↻ and the axis choice are gone — it always spins
+    // round the drawn axis line.
     if (st.revolveAxis) {
-      const drawnAxis = st.sketchLines?.find(l => l.style === 'axis' && (l.plane || 'XY') === st.planeId)
-      const axisKind = st.revolveAxis.preset || 'drawn'
-      const angleNow = String(parseFloat(st.depthInput))
       const rev = st.revolveReverse || false
-      const pickAxis = a => updateExtrudeState(() => ({ revolveAxis: a }))
+      const setAngleText = raw => {
+        const neg = /^\s*-/.test(raw) && parseFloat(raw) < 0
+        if (!neg) { updateExtrudeState(() => ({ depthInput: raw, depthLocked: true })); return }
+        const size = raw.replace(/^\s*-/, '')
+        updateExtrudeState(prev => prev.revolveReverse === 'both'
+          ? { depthInput: size, depthLocked: true }
+          : { depthInput: size, depthLocked: true, revolveReverse: !prev.revolveReverse, directionLocked: true })
+      }
       return [
         { node: (
-          <div style={field()} title="How far it spins, in degrees — 360 makes a full solid">
+          <div style={field()} title="How far it spins, in degrees — 360 makes a full solid. Move the mouse round the axis, or type it (a minus number spins the other way).">
             {label('ANGLE')}
             <input autoFocus value={st.depthInput}
-              onChange={e => updateExtrudeState(() => ({ depthInput: e.target.value }))}
+              onChange={e => setAngleText(e.target.value)}
               onKeyDown={e => { e.stopPropagation(); handleExtrudeDepthKey(e) }}
               onFocus={e => e.target.select()}
               style={inputStyle(40)}/>
             {unit('°')}
           </div>
         ) },
-        ...[90, 180, 270, 360].map(a => ({ label: a + '°', enabled: true, active: angleNow === String(a),
-          onClick: () => updateExtrudeState(() => ({ depthInput: String(a) })) })),
         { divider: true },
-        { label: '↺ Counter-clockwise', enabled: true, active: rev === false, onClick: () => updateExtrudeState(() => ({ revolveReverse: false })) },
-        { label: '↻ Clockwise', enabled: true, active: rev === true, onClick: () => updateExtrudeState(() => ({ revolveReverse: true })) },
-        { label: '⇆ Both ways', enabled: true, active: rev === 'both', onClick: () => updateExtrudeState(() => ({ revolveReverse: 'both' })) },
-        { divider: true },
-        { label: 'Vertical axis', enabled: true, active: axisKind === 'vertical', onClick: () => pickAxis(originRevolveAxis('vertical')) },
-        { label: 'Horizontal axis', enabled: true, active: axisKind === 'horizontal', onClick: () => pickAxis(originRevolveAxis('horizontal')) },
-        ...(drawnAxis ? [{ label: 'Your line', enabled: true, active: axisKind === 'drawn',
-          onClick: () => pickAxis({ x1: drawnAxis.x1, y1: drawnAxis.y1, x2: drawnAxis.x2, y2: drawnAxis.y2 }) }] : []),
+        { label: 'One way', enabled: true, active: rev !== 'both', title: 'Spins one way from the sketch — the mouse picks which way.',
+          onClick: () => updateExtrudeState(prev => ({ revolveReverse: prev.revolveReverse === 'both' ? false : prev.revolveReverse, directionLocked: false })) },
+        { label: 'Both ways', enabled: true, active: rev === 'both', title: 'Spins half the angle each way, centred on the sketch.',
+          onClick: () => updateExtrudeState(() => ({ revolveReverse: 'both' })) },
         ...(extrudeTool === 'revolve' && joinableBodyId != null && !editingFeatureId ? [
           { divider: true },
           { label: 'New body', enabled: true, active: !st.joinBody, onClick: () => updateExtrudeState(() => ({ joinBody: false })) },
@@ -11882,7 +11946,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     // A revolve axis the shape crosses makes self-intersecting geometry — stay in
     // the popup so another axis can be picked (the popup shows the same warning).
     if (revolveAxis && pts && profileCrossesAxis(pts, revolveAxis)) {
-      setCadError('The shape crosses this axis — pick the other axis, or edit the sketch so it sits on one side.')
+      setCadError('The shape crosses the axis line — edit the sketch so it sits on one side.')
       setTimeout(() => setCadError(null), 6000)
       return
     }
@@ -15791,15 +15855,15 @@ const App3D = forwardRef(function App3D(props, ref) {
                 if (isRev) {
                   const prof = extrudeState.profiles?.[extrudeState.pickedIdx]
                   if (prof && extrudeState.revolveAxis && profileCrossesAxis(prof, extrudeState.revolveAxis))
-                    return 'The shape crosses this axis — pick the other axis, or edit the sketch.'
-                  return 'Type an angle (360° makes a full solid), choose which way it spins and the axis, then press Enter.'
+                    return 'The shape crosses the axis line — edit the sketch so it sits on one side.'
+                  return 'Move the mouse round the axis or type an angle (360° makes a full solid), then click or press Enter.'
                 }
                 if (extrudeState.toFace) return `Point at a face and click to ${isCut ? 'cut down' : 'extrude up'} to it. Esc goes back.`
                 return isCut ? 'Type a depth, then press Enter. Red bodies will be cut. Hover a corner, midpoint or centre to snap to it.'
                              : 'Drag or type how far to extrude, then press Enter. Hover a corner, midpoint or centre to snap to it.'
               }
               if (sketchMode) {
-                if (isRev) return revolveSketchWarning || 'Draw half of the shape on one side of the X or Y axis (or draw your own axis line), then press Finish.'
+                if (isRev) return revolveSketchWarning || 'Draw half of the shape, and an axis line (REV AXIS) for it to spin round, then press Finish.'
                 return isCut ? 'Draw the shape to remove, then press Finish.' : 'Draw a closed shape, then press Finish.'
               }
               if (extrudeOffsetBase) return 'Move the mouse or type a distance, Enter to confirm'

@@ -6193,7 +6193,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [measureHover, setMeasureHover] = useState(null)       // {kind:'edge',solidId,edgeId,point} | {kind:'point',solidId,point} | null
   const [measureP1, setMeasureP1] = useState(null)             // {solidId, point} — first point of a pending distance pick
   const [measureResult, setMeasureResult] = useState(null)     // {kind:'straight'|'circular'|'curve'|'distance', ...}
-  const [measureHandlePos, setMeasureHandlePos] = useState(null)
+  const [, setMeasureHandlePos] = useState(null)   // old pop-up position (the reading is in the ribbon now)
 
   function activateMeasureTool() {
     resetSelection()
@@ -16363,19 +16363,33 @@ const App3D = forwardRef(function App3D(props, ref) {
               { label:'Line', enabled:true, active: measureMode==='line', onClick:()=>{ setMeasureMode('line'); resetMeasure() } },
               { label:'Circle/Arc', enabled:true, active: measureMode==='circlearc', onClick:()=>{ setMeasureMode('circlearc'); resetMeasure() } },
               { label:'Point to Point', enabled:true, active: measureMode==='point', onClick:()=>{ setMeasureMode('point'); resetMeasure() } },
+              // The reading (it used to be a pop-up by the edge).
+              ...(measureResult ? [{ divider: true }, { node: (() => {
+                const r = measureResult
+                const big = t => <span style={{ color:'#dce8ff', fontFamily:'monospace', fontSize:13, fontWeight:'bold' }}>{t}</span>
+                const small = t => <span style={{ color:'#8fa0b8', fontFamily:'monospace', fontSize:11 }}>{t}</span>
+                return (
+                  <div style={{ display:'flex', alignItems:'center', gap:8, height:26, boxSizing:'border-box', background:'#0a0e1a',
+                    border:'1px solid #4FC3F7aa', borderRadius:13, padding:'0 12px', whiteSpace:'nowrap' }}>
+                    {r.kind === 'straight' && big(`Length ${r.length.toFixed(2)} mm`)}
+                    {r.kind === 'curve' && <>{big(`Length ${r.length.toFixed(2)} mm`)}{small('(curve)')}</>}
+                    {r.kind === 'circular' && <>{big(`⌀ ${r.diameter.toFixed(2)} mm`)}{small(`R ${r.radius.toFixed(2)} mm`)}</>}
+                    {r.kind === 'distance' && <>{big(`Distance ${r.distance.toFixed(2)} mm`)}
+                      {small(`ΔX ${r.dx.toFixed(2)} · ΔY ${r.dy.toFixed(2)} · ΔZ ${r.dz.toFixed(2)}`)}</>}
+                  </div>
+                )
+              })() }] : []),
             ]}
             hint={
               measureMode === 'point'
                 ? (measureP1
-                    ? 'Click a second point for distance'
+                    ? 'Click a second point for the distance.'
                     : measureResult?.kind === 'distance'
-                      ? `Distance: ${measureResult.distance.toFixed(2)} mm — click new points to remeasure`
-                      : 'Click a point (snaps to nearby corners/centers) to start a distance')
+                      ? 'Click new points to measure again. Esc clears.'
+                      : 'Click a point (it snaps to nearby corners and centres) to start a distance.')
                 : (measureResult
-                    ? (measureResult.kind==='straight' ? `Length: ${measureResult.length.toFixed(2)} mm`
-                      : measureResult.kind==='circular' ? `⌀ ${measureResult.diameter.toFixed(2)} mm`
-                      : `Length: ${measureResult.length.toFixed(2)} mm (curve)`) + ' — click new geometry to remeasure'
-                    : measureMode === 'line' ? 'Click a straight edge to measure its length' : 'Click a circular or curved edge to measure its diameter')
+                    ? 'Click another edge to measure again. Esc clears.'
+                    : measureMode === 'line' ? 'Click a straight edge to measure its length.' : 'Click a circular or curved edge to measure its diameter.')
             }
             onStepBack={step => { if (step===1) resetMeasure() }}
           />
@@ -16812,79 +16826,6 @@ const App3D = forwardRef(function App3D(props, ref) {
           </div>
           <div style={{color:'#445566', fontSize:10, marginTop:6, textAlign:'center'}}>
             {soften3dBusy ? 'Working out how big each edge can go… big parts can take a while' : 'Each edge takes the biggest rounding that fits · Esc to start over'}
-          </div>
-        </div>
-      )}
-
-      {/* ── Measure: "click second point" hint (pending distance pick) ───── */}
-      {tool==='measure' && measureP1 && !measureResult && measureHandlePos && (
-        <div style={{
-          position: 'fixed',
-          left: measureHandlePos.x,
-          top:  measureHandlePos.y,
-          zIndex: 1000,
-          background: 'rgba(15,20,40,0.95)',
-          border: '1.5px solid #4FC3F7',
-          borderRadius: 8,
-          padding: '6px 12px',
-          boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
-          fontFamily: 'monospace',
-          fontSize: 11,
-          color: '#dce8ff',
-          whiteSpace: 'nowrap',
-        }}>
-          Click second point · Esc to cancel
-        </div>
-      )}
-
-      {/* ── Measure result popup ──────────────────────────────────────────── */}
-      {tool==='measure' && measureResult && measureHandlePos && (
-        <div style={{
-          position: 'fixed',
-          left: measureHandlePos.x,
-          top:  measureHandlePos.y,
-          zIndex: 1000,
-          background: 'rgba(15,20,40,0.95)',
-          border: '1.5px solid #4FC3F7',
-          borderRadius: 8,
-          padding: '10px 14px',
-          minWidth: 170,
-          boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
-          fontFamily: 'monospace',
-        }}>
-          {measureResult.kind === 'straight' && (
-            <div style={{color:'#dce8ff', fontSize:16, fontWeight:'bold'}}>
-              Length: {measureResult.length.toFixed(2)} mm
-            </div>
-          )}
-          {measureResult.kind === 'circular' && (
-            <>
-              <div style={{color:'#dce8ff', fontSize:16, fontWeight:'bold'}}>
-                ⌀ {measureResult.diameter.toFixed(2)} mm
-              </div>
-              <div style={{color:'#6688aa', fontSize:11, marginTop:2}}>
-                R {measureResult.radius.toFixed(2)} mm
-              </div>
-            </>
-          )}
-          {measureResult.kind === 'curve' && (
-            <div style={{color:'#dce8ff', fontSize:16, fontWeight:'bold'}}>
-              Length: {measureResult.length.toFixed(2)} mm{' '}
-              <span style={{fontSize:10, color:'#6688aa', fontWeight:'normal'}}>(curve)</span>
-            </div>
-          )}
-          {measureResult.kind === 'distance' && (
-            <>
-              <div style={{color:'#dce8ff', fontSize:16, fontWeight:'bold'}}>
-                Distance: {measureResult.distance.toFixed(2)} mm
-              </div>
-              <div style={{color:'#6688aa', fontSize:10, marginTop:2}}>
-                ΔX {measureResult.dx.toFixed(2)} · ΔY {measureResult.dy.toFixed(2)} · ΔZ {measureResult.dz.toFixed(2)}
-              </div>
-            </>
-          )}
-          <div style={{color:'#445566', fontSize:10, marginTop:6, textAlign:'center'}}>
-            Esc to clear · click new geometry to remeasure
           </div>
         </div>
       )}

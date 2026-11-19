@@ -2079,7 +2079,6 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [springOffsetBase,setSpringOffsetBase]=useState(null)
   const [springOffsetDistInput,setSpringOffsetDistInput]=useState('20')
   const [springOffsetDistLocked,setSpringOffsetDistLocked]=useState(false)  // see extrudeOffsetDistLocked's comment
-  const springPanelDrag = useDraggablePanel()
   const includeEdgePanelDrag = useDraggablePanel()
 
   const hiddenEditSolidRef=useRef(null)   // solid parked here while its sketch is being edited
@@ -5663,7 +5662,7 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     if (springState && !springState.armed) {
       // ── Spring flow, like Revolve: ONE sketch holding the wire cross-section
-      //    and (optionally) an Axis line. Finish opens the coil popup
+      //    and (optionally) an Axis line. Finish opens the coil step (options in the ribbon)
       //    (pitch / turns / handedness, live 3D preview); Done there commits.
       if (allProfiles.length === 0) {
         setSketchMode(true)
@@ -5716,7 +5715,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       // ── Sweep flow: 2 fixed steps, no repeating N-round loop like Loft —
       //    finishing the PATH auto-advances straight into sketching the
       //    PROFILE (no extra click), and finishing the PROFILE opens the
-      //    confirm popup with a live preview (Done commits). Checked
+      //    check step with a live preview (Make commits, in the ribbon). Checked
       //    the same way loftState is below — tool alone isn't reliable here
       //    (enterSketch always resets it to the active drawing tool).
       if (!sweepState.path) {
@@ -5750,7 +5749,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         showNoProfile()
         return
       }
-      // Profile done: open the confirm popup with the live 3D preview (see
+      // Profile done: open the check step with the live 3D preview (see
       // sweepState.armed). Done there commits; "✎ Sketch" comes back here with the
       // drawing as it was (ghost path lines included).
       const best = allProfiles[0]
@@ -8585,7 +8584,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     enterSketch(basis)
   }
 
-  // Back from the coil popup to the sketch, with the drawing as it was.
+  // Back from the coil step (options in the ribbon) to the sketch, with the drawing as it was.
   async function springEditSketch() {
     const st = springState
     if (!st?.armed) return
@@ -8703,8 +8702,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     syncOffsetPlanePreview(tool === 'spring3d' && !!springOffsetBase, springOffsetFacePlane())
   }, [tool, springOffsetBase, springOffsetDistInput])
 
-  // ── Spring coil popup (after the sketch is finished) ──────────────────────
-  // The coil as the popup describes it right now — null until the sketch is
+  // ── Spring coil step (options in the ribbon) (after the sketch is finished) ──────────────────────
+  // The coil as the ribbon describes it right now — null until the sketch is
   // done, or while the pitch / turns can't make a coil. The sketch plane goes
   // to the worker in mm (the same basis fields Loft and Sweep send).
   const springSpec = (() => {
@@ -8723,7 +8722,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   })()
 
-  // Why the coil can't be built yet (shown in the popup), or null when it's fine.
+  // Why the coil can't be built yet (shown in the ribbon hint), or null when it's fine.
   const springProblem = (() => {
     const st = springState
     if (!st?.armed) return null
@@ -9351,7 +9350,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
   }
 
-  // Spring commit — the coil popup's Done. Everything the coil needs is in
+  // Spring commit — the coil step (options in the ribbon)'s Done. Everything the coil needs is in
   // springSpec (the sketch plane, wire profile, axis and the typed numbers);
   // the same fields are stored on the solid / feature so a rebuild (project
   // load, un-join, editing something before it) sends the worker the same thing.
@@ -11461,6 +11460,69 @@ const App3D = forwardRef(function App3D(props, ref) {
       return 'This cut does not reach any visible body — go back to the sketch and move the path or shape onto one.'
     return null
   }
+  // Spring's coil options in the step ribbon (they used to be a confirm
+  // pop-up). Values first, like the other tools: pitch (or overall length)
+  // and turns, then what you type (Pitch / Length), the axis it coils round,
+  // which way it grows, handedness, and Edit sketch / Cancel / Make spring.
+  function springRibbonActions() {
+    const st = springState
+    if (!st?.armed) return null
+    const color = springTool === 'springcut' ? '#53D3E4' : '#F06292'
+    const patch = p => setSpringState(prev => ({ ...prev, ...p }))
+    const field = { display: 'flex', alignItems: 'center', gap: 4, height: 26, boxSizing: 'border-box',
+      background: '#0a0e1a', border: `1px solid ${color}88`, borderRadius: 13, padding: '0 10px' }
+    const inputStyle = w => ({ width: w, background: 'none', border: 'none', outline: 'none', color: '#dce8ff',
+      fontFamily: 'monospace', fontSize: 13, fontWeight: 'bold' })
+    const label = t => <span style={{ color: '#8fa0b8', fontFamily: 'monospace', fontSize: 10, letterSpacing: '0.06em' }}>{t}</span>
+    const unit = t => <span style={{ color: '#6688aa', fontFamily: 'monospace', fontSize: 11 }}>{t}</span>
+    const keys = e => { e.stopPropagation(); if (e.key === 'Enter') commitSpring(); else if (e.key === 'Escape') cancelFeature() }
+    const byLength = st.specBy === 'length'
+    const dims = springDims(st)
+    const drawnAxis = st.sketchLines?.find(l => l.style === 'axis' && (l.plane || 'XY') === 'face')
+    const axisKind = st.springAxis.preset || 'drawn'
+    const pickAxis = a => patch({ springAxis: a })
+    return [
+      { node: (
+        <div style={field} title={byLength ? 'Overall length of the spring' : 'Gap from one coil to the next'}>
+          {label(byLength ? 'LENGTH' : 'PITCH')}
+          <input autoFocus value={byLength ? st.lengthInput : st.pitchInput}
+            onChange={e => patch(byLength ? { lengthInput: e.target.value } : { pitchInput: e.target.value })}
+            onKeyDown={keys} onFocus={e => e.target.select()} style={inputStyle(38)}/>
+          {unit('mm')}
+        </div>
+      ) },
+      { node: (
+        <div style={field} title="How many times it goes round">
+          {label('TURNS')}
+          <input value={st.coilsInput} onChange={e => patch({ coilsInput: e.target.value })}
+            onKeyDown={keys} onFocus={e => e.target.select()} style={inputStyle(30)}/>
+        </div>
+      ) },
+      ...(dims.ok ? [{ node: (
+        <span style={{ color: '#8fa0b8', fontFamily: 'monospace', fontSize: 11 }}>
+          {byLength ? `pitch ${dims.pitchMm.toFixed(2)} mm` : `length ${dims.heightMm.toFixed(1)} mm`}
+        </span>
+      ) }] : []),
+      { label: 'Pitch', enabled: true, active: !byLength, onClick: () => patch({ specBy: 'pitch' }) },
+      { label: 'Length', enabled: true, active: byLength, onClick: () => patch({ specBy: 'length' }) },
+      { divider: true },
+      { label: 'Vertical axis', enabled: true, active: axisKind === 'vertical', onClick: () => pickAxis(originRevolveAxis('vertical')) },
+      { label: 'Horizontal axis', enabled: true, active: axisKind === 'horizontal', onClick: () => pickAxis(originRevolveAxis('horizontal')) },
+      ...(drawnAxis ? [{ label: 'Your line', enabled: true, active: axisKind === 'drawn',
+        onClick: () => pickAxis({ x1: drawnAxis.x1, y1: drawnAxis.y1, x2: drawnAxis.x2, y2: drawnAxis.y2 }) }] : []),
+      { divider: true },
+      { label: 'Along axis', enabled: true, active: !st.springReverse, onClick: () => patch({ springReverse: false }) },
+      { label: 'Other way', enabled: true, active: !!st.springReverse, onClick: () => patch({ springReverse: true }) },
+      { divider: true },
+      { label: 'Right-hand', enabled: true, active: !st.lefthand, onClick: () => patch({ lefthand: false }) },
+      { label: 'Left-hand', enabled: true, active: !!st.lefthand, onClick: () => patch({ lefthand: true }) },
+      { divider: true },
+      { label: '✎ Edit sketch', enabled: true, onClick: springEditSketch },
+      { label: '✕ Cancel', enabled: true, danger: true, onClick: cancelFeature },
+      { label: springTool === 'springcut' ? '✓ Make cut' : '✓ Make spring', enabled: !springProblem, success: true, onClick: commitSpring },
+    ]
+  }
+
   function handleExtrudeDepthKey(e) {
     if (!extrudeStateRef.current) return
     if (e.key === 'Enter') {
@@ -14161,7 +14223,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==='h'){e.preventDefault();setHealthOpen(v=>!v);return}
     if ((e.key==='f'||e.key==='F')&&!e.ctrlKey){if(!(sketchMode&&fitSketch()))zoomToFit();return}
     if ((e.key==='x'||e.key==='X')&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&!/^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName||'')&&!e.target?.isContentEditable){setXray(v=>!v);return}
-    // Sweep/Spring confirm popup: Esc always cancels the whole feature. Checked
+    // Sweep/Spring check step: Esc always cancels the whole feature. Checked
     // FIRST — while the popup is up the active sketch tool is still Line, and
     // a Line left mid-chain used to swallow every Esc, leaving the popup with
     // only "✎ Sketch" (and a failed build disables Done), i.e. no way out.
@@ -14421,7 +14483,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (joinSel.length>0) { resetJoin3D(); return }
       resetJoin3D(); setTool('select'); return
     }
-    // Spring coil popup open (the sketch is finished): Esc abandons the spring.
+    // Spring coil step (options in the ribbon) open (the sketch is finished): Esc abandons the spring.
     // Sweep Check step: Enter makes it, Esc abandons it.
     if (e.key==='Enter'&&!sketchMode&&sweepState?.armed){
       e.preventDefault()
@@ -16098,7 +16160,7 @@ const App3D = forwardRef(function App3D(props, ref) {
 
           {/* ── SmartStep bar: overlays bottom of viewport during Spring ──
               Like Revolve: pick a plane, sketch the wire shape (+ an optional
-              Axis line), then the coil popup (see springState.armed). */}
+              Axis line), then the coil options in the ribbon (springRibbonActions). */}
           <SmartStepBar
             op={(tool==='spring3d' || springState) ? (springTool==='springcut' ? 'SPRING CUT' : 'SPRING') : null}
             extraActions={sketchFinishActions()}
@@ -16113,7 +16175,10 @@ const App3D = forwardRef(function App3D(props, ref) {
                     : 'Click the plane your spring will be drawn on.')
               : !springState.armed
                 ? (revolveSketchWarning || 'Draw the wire\'s cross-section (a circle is usual) beside the X or Y axis, or draw your own axis line, then press Finish.')
-                : 'Type the pitch and number of turns, then press Done. The coil grows from the wire along the axis.'}
+                : ((springProblem || springBuildError)
+                    || (springTool === 'springcut'
+                        ? 'Type the pitch (or length) and turns, then press Make cut or Enter. The red bodies will be cut.'
+                        : 'Type the pitch (or length) and turns, then press Make spring or Enter. The coil grows from the wire along the axis.'))}
             action={
               !springState
                 ? [
@@ -16127,7 +16192,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                             else setSpringOffsetMode(true)
                           }},
                   ]
-                : null
+                : springRibbonActions()
             }
             onStepBack={step => {
               if (step === 1) resetSpring3D()
@@ -17270,118 +17335,6 @@ const App3D = forwardRef(function App3D(props, ref) {
           onClose={()=>{resetText();setTool('line')}}
         />
       )}
-      {/* ── Spring coil popup: shown once the wire sketch is finished. Axis,
-          which way the coil grows, pitch / turns, handedness — with the live
-          translucent coil (red for a cut) behind it. Same floating draggable
-          panel look as the Loft popup. ── */}
-      {springState?.armed && (() => {
-        const st = springState
-        const isCut = springTool === 'springcut'
-        const accent = isCut ? '#53D3E4' : '#F06292'
-        const patch = p => setSpringState(prev => ({ ...prev, ...p }))
-        const chip = (active, small) => ({
-          flex:1, padding: small ? '3px 0' : '4px 2px', fontSize:11, cursor:'pointer', fontFamily:'monospace', fontWeight:'bold',
-          background: active ? accent : '#050505', color: active ? '#000' : accent,
-          border:`1px solid ${accent}`, borderRadius:2, textShadow: active ? 'none' : `0 0 4px ${accent}`,
-        })
-        const label = { color:'#889', fontSize:10, marginBottom:3, letterSpacing:'0.05em' }
-        const field = (value, onChange, unit, width) => (
-          <div style={{
-            flex: width ? 'none' : 1, width, background:'#000', border:`1px solid ${accent}55`, borderRadius:2, padding:'3px 8px',
-            display:'flex', alignItems:'center', justifyContent:'space-between',
-          }}>
-            <input
-              value={value}
-              onChange={e => onChange(e.target.value)}
-              onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter') commitSpring(); else if (e.key === 'Escape') cancelFeature() }}
-              style={{ background:'none', border:'none', outline:'none', color:accent, fontFamily:'monospace', fontSize:14, fontWeight:'bold', flex:1, minWidth:0, width:'100%' }}
-            />
-            <span style={{ color:'#556', fontSize:12 }}>{unit}</span>
-          </div>
-        )
-        const dims = springDims(st)
-        const drawnAxis = st.sketchLines?.find(l => l.style === 'axis' && (l.plane || 'XY') === 'face')
-        const axisKind = st.springAxis.preset || 'drawn'
-        const pickAxis = a => patch({ springAxis: a })
-        const problem = springProblem || springBuildError
-        return (
-          <div style={{ position:'fixed', bottom:24, left:'50%', transform:'translateX(-50%)', zIndex:1000 }}>
-            <div ref={springPanelDrag.panelRef} style={{
-              background:'#000', border:`1.5px solid ${accent}`, borderRadius:2, padding:'10px 14px', minWidth:250,
-              boxShadow:`0 0 14px ${accent}77, 0 0 3px ${accent} inset`, fontFamily:'monospace',
-              ...springPanelDrag.panelStyle,
-            }}>
-              <DragHandle {...springPanelDrag.handleProps}>{isCut ? 'Spring Cut' : 'Spring'}</DragHandle>
-
-              <div style={label}>COIL AROUND</div>
-              <div style={{ display:'flex', gap:4, marginBottom:8 }}>
-                <button style={chip(axisKind === 'vertical')} title="The up-and-down origin axis of the sketch"
-                  onClick={() => pickAxis(originRevolveAxis('vertical'))}>Vertical axis</button>
-                <button style={chip(axisKind === 'horizontal')} title="The left-to-right origin axis of the sketch"
-                  onClick={() => pickAxis(originRevolveAxis('horizontal'))}>Horizontal axis</button>
-                {drawnAxis && (
-                  <button style={chip(axisKind === 'drawn')} title="The axis line you drew in the sketch"
-                    onClick={() => pickAxis({ x1:drawnAxis.x1, y1:drawnAxis.y1, x2:drawnAxis.x2, y2:drawnAxis.y2 })}>Your line</button>
-                )}
-              </div>
-
-              <div style={label}>GROWS</div>
-              <div style={{ display:'flex', gap:4, marginBottom:8 }}>
-                <button style={chip(!st.springReverse)} title="The coil grows the way the axis points"
-                  onClick={() => patch({ springReverse:false })}>Along axis</button>
-                <button style={chip(!!st.springReverse)} title="The coil grows the other way"
-                  onClick={() => patch({ springReverse:true })}>Other way</button>
-              </div>
-
-              <div style={label}>SPECIFY</div>
-              <div style={{ display:'flex', gap:4, marginBottom:6 }}>
-                <button style={chip(st.specBy !== 'length')} title="Type the gap from one coil to the next"
-                  onClick={() => patch({ specBy:'pitch' })}>Pitch</button>
-                <button style={chip(st.specBy === 'length')} title="Type the overall length of the spring"
-                  onClick={() => patch({ specBy:'length' })}>Length</button>
-              </div>
-              <div style={{ display:'flex', gap:6, marginBottom:4 }}>
-                {st.specBy === 'length'
-                  ? field(st.lengthInput, v => patch({ lengthInput:v }), 'mm')
-                  : field(st.pitchInput, v => patch({ pitchInput:v }), 'mm')}
-                {field(st.coilsInput, v => patch({ coilsInput:v }), 'turns')}
-              </div>
-              <div style={{ color:'#889', fontSize:10, marginBottom:8 }}>
-                {dims.ok
-                  ? (st.specBy === 'length' ? `Pitch ${dims.pitchMm.toFixed(2)} mm` : `Length ${dims.heightMm.toFixed(1)} mm`)
-                  : ' '}
-              </div>
-
-              <div style={label}>HANDEDNESS</div>
-              <div style={{ display:'flex', gap:4, marginBottom:8 }}>
-                <button style={chip(!st.lefthand)} onClick={() => patch({ lefthand:false })}>Right-hand</button>
-                <button style={chip(!!st.lefthand)} onClick={() => patch({ lefthand:true })}>Left-hand</button>
-              </div>
-
-              {problem && (
-                <div style={{ color:'#ff6b6b', fontSize:10, marginBottom:8, lineHeight:1.3, maxWidth:260 }}>{problem}</div>
-              )}
-
-              <div style={{ display:'flex', gap:6 }}>
-                <button onClick={cancelFeature} title="Throw this spring away (Esc)"
-                  style={{ padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold', background:'#1e1e38', color:'#c07070',
-                           border:'1px solid #5a2a2a', borderRadius:4, cursor:'pointer' }}>✕ Cancel</button>
-                <button onClick={springEditSketch} title="Go back to the sketch"
-                  style={{ padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold', background:'#1e1e38', color:'#6688aa',
-                           border:'1px solid #2a3a5a', borderRadius:4, cursor:'pointer' }}>✎ Sketch</button>
-                <button onClick={commitSpring} disabled={!!springProblem} title="Make the spring"
-                  style={{ flex:1, padding:'4px 10px', fontSize:12, fontFamily:'monospace', fontWeight:'bold',
-                           background: springProblem ? '#1e1e38' : accent, color: springProblem ? '#334455' : '#000',
-                           border:'none', borderRadius:2, cursor: springProblem ? 'default' : 'pointer',
-                           boxShadow: springProblem ? 'none' : `0 0 6px ${accent}` }}>Done ↵</button>
-              </div>
-              <div style={{ color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em' }}>
-                {isCut ? 'Red bodies will be cut · ' : ''}Esc to cancel
-              </div>
-            </div>
-          </div>
-        )
-      })()}
       {pattern3dShowPanel && (
         <PatternPanel
           onConfirm={handlePatternPanelConfirm}

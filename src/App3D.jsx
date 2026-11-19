@@ -45,8 +45,6 @@ import SplashScreen from './SplashScreen.jsx'
 import LineSnapPanel from './tools/LineSnapPanel.jsx'
 import CircleSnapPanel from './tools/CircleSnapPanel.jsx'
 import SplineSnapPanel from './tools/SplineSnapPanel.jsx'
-import FilletRadiusPanel from './tools/FilletRadiusPanel.jsx'
-import OffsetDistPanel from './tools/OffsetDistPanel.jsx'
 import SelectDimPanel from './tools/SelectDimPanel.jsx'
 import { useDraggablePanel, DragHandle } from './tools/useDraggablePanel.jsx'
 import {
@@ -2338,7 +2336,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   const toolBtnRefs = useRef({})
   const [flyoutAnchor,setFlyoutAnchor] = useState(null)
   useEffect(() => {
-    if (sketchMode && (tool==='line'||tool==='circle'||tool==='spline'||(tool==='fillet'||tool==='corner')||tool==='offset'||tool==='includeedge')) {
+    if (sketchMode && (tool==='line'||tool==='circle'||tool==='spline'||tool==='includeedge')) {
       const el = toolBtnRefs.current[tool]
       if (el) {
         // Scroll the button into view first — the sidebar can hold more tools
@@ -3033,6 +3031,78 @@ const App3D = forwardRef(function App3D(props, ref) {
         action: [{ label: '✓ Centre on origin', enabled: centerSel.length > 0, title: 'Moves the picked lines so their middle sits on the origin (Tab)', onClick: commitCenter }],
         steps: [{ id: 1, label: 'Select' }],
         currentStep: 1,
+      }
+    }
+
+    // ── Fillet / Chamfer: Pick two lines (or double-click a shape) → Size ──
+    if (tool === 'fillet') {
+      const color = '#26A69A'
+      const chamfer = filletMode === 'chamfer'
+      const chain = filletSel[0]?.kind === 'chain'
+      const step = (filletSel.length === 2 || chain) ? 2 : 1
+      const pv = filletPreview
+      const canApply = parseFloat(filletRadiusInput) > 0 && !pv?.tooLarge && !pv?.needLines
+      const modes = [
+        { label: 'Round', enabled: true, active: !chamfer, title: 'Round the corner', onClick: () => setFilletMode('fillet') },
+        { label: 'Chamfer', enabled: true, active: chamfer, title: 'Cut the corner off straight', onClick: () => setFilletMode('chamfer') },
+      ]
+      const actions = step === 1 ? modes : [
+        ...modes, { divider: true },
+        { node: (
+          <div style={field(color)} title={chamfer ? 'How far back along each line the cut starts' : 'How big the rounding is'}>
+            {label(chamfer ? 'DISTANCE' : 'RADIUS')}
+            <input autoFocus value={filletRadiusInput}
+              onChange={e => { if (/^[0-9.]*$/.test(e.target.value)) setFilletRadiusInput(e.target.value) }}
+              onKeyDown={e => keepKeys(e, () => { if (canApply) applyFillet() })} onFocus={e => e.target.select()}
+              placeholder="0" style={inputStyle(false, 40)}/>
+            {unit('mm')}
+          </div>
+        ) },
+        { label: '✓ Apply', enabled: canApply, title: 'Round / cut the corner (Enter)', onClick: () => applyFillet() },
+      ]
+      const hint = step === 1
+        ? (filletSel.length === 0 ? `Click two lines that meet (or double-click a shape for every corner) to ${chamfer ? 'chamfer' : 'round'}.`
+          : 'Click the second line.')
+        : pv?.needLines ? 'Chamfer needs two straight lines — pick lines, or switch to Round.'
+        : pv?.tooLarge ? `Too big for ${(pv.count || 0) > 1 ? 'these corners' : 'this corner'} — type a smaller number.`
+        : `Type the ${chamfer ? 'distance' : 'radius'}${(pv?.count || 0) > 1 ? ` (${pv.count} corners)` : ''}, then Enter, Apply or click.`
+      return {
+        op: chamfer ? 'CHAMFER' : 'FILLET', color, hint, action: actions,
+        steps: [{ id: 1, label: 'Pick two lines' }, { id: 2, label: 'Size' }],
+        currentStep: step,
+        onStepBack: id => { if (id === 1) resetFillet() },
+      }
+    }
+
+    // ── Offset: Pick a line / circle / curve → Distance (and side) ──
+    if (tool === 'offset') {
+      const color = '#4CAF50'
+      const step = offsetEntity ? 2 : 1
+      const ent = offsetEntity && (offsetEntity.kind === 'line' ? lines[offsetEntity.idx] : offsetEntity.kind === 'circle' ? circles[offsetEntity.idx]
+        : offsetEntity.kind === 'arc' ? arcs[offsetEntity.idx] : splines[offsetEntity.idx])
+      const live = step === 2 && mousePos && ent ? pxToMm(distToEntity(mousePos, ent, offsetEntity.kind)) : null
+      const setDist = () => { if (!offsetDistInput && live != null) setOffsetDistInput(live.toFixed(1)) }
+      return {
+        op: 'OFFSET', color,
+        steps: [{ id: 1, label: 'Pick' }, { id: 2, label: 'Distance' }],
+        currentStep: step,
+        action: step === 1 ? null : [
+          { node: (
+            <div style={field(color)} title="How far away the copy sits — follows the mouse until you type">
+              {label('DISTANCE')}
+              <input autoFocus value={offsetDistInput}
+                onChange={e => { if (/^[0-9.]*$/.test(e.target.value)) setOffsetDistInput(e.target.value) }}
+                onKeyDown={e => { if (e.key === 'Tab') { e.preventDefault(); e.stopPropagation(); setDist(); return } keepKeys(e, setDist) }}
+                placeholder={live != null ? live.toFixed(1) : '0'} style={inputStyle(false, 46)}/>
+              {unit('mm')}
+            </div>
+          ) },
+          { label: '✓ Set distance', enabled: !!offsetPreview, title: 'Fix the distance (Enter) — then click the side to place it', onClick: setDist },
+        ],
+        hint: step === 1 ? 'Click the line, circle or curve to make a parallel copy of.'
+          : offsetDistInput ? `${offsetDistInput} mm — move the mouse to the side you want, then click to place it.`
+          : 'Move the mouse to set the distance and side (or type a distance), then click to place it.',
+        onStepBack: id => { if (id === 1) resetOffset() },
       }
     }
 
@@ -17265,33 +17335,6 @@ const App3D = forwardRef(function App3D(props, ref) {
               splineClosed={splineClosed}
               onToggleC={()=>setSplineClosed(p=>!p)}
               splinePoints={splinePoints}
-            />
-          )}
-          {tool==='fillet'&&(filletSel.length===2||filletSel[0]?.kind==='chain')&&(
-            <FilletRadiusPanel
-              toolColor={toolConfig.find(([t])=>t==='fillet')[3]}
-              value={filletRadiusInput}
-              onChange={setFilletRadiusInput}
-              onApply={applyFillet}
-              tooLarge={!!filletPreview?.tooLarge}
-              mode={filletMode}
-              onMode={setFilletMode}
-              corners={filletPreview?.count||0}
-              needLines={!!filletPreview?.needLines}
-              parallel={!!filletPreview?.parallel}
-            />
-          )}
-          {tool==='offset'&&offsetEntity&&(
-            <OffsetDistPanel
-              toolColor={toolConfig.find(([t])=>t==='offset')[3]}
-              value={offsetDistInput}
-              onChange={setOffsetDistInput}
-              canApply={!!offsetPreview}
-              liveValueMm={mousePos?pxToMm(distToEntity(mousePos,
-                offsetEntity.kind==='line'?lines[offsetEntity.idx]:
-                offsetEntity.kind==='circle'?circles[offsetEntity.idx]:
-                offsetEntity.kind==='arc'?arcs[offsetEntity.idx]:splines[offsetEntity.idx],
-                offsetEntity.kind)):null}
             />
           )}
         </div>

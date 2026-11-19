@@ -5307,6 +5307,11 @@ const App3D = forwardRef(function App3D(props, ref) {
     featureCountRef.current.revolvecut = (featureCountRef.current.revolvecut ?? 0) + 1
     return `Revolve Cut ${featureCountRef.current.revolvecut}`
   }
+  // New loft cuts are "Loft Cut N" (they used to be named like a plain cutout).
+  function nextLoftCutName() {
+    featureCountRef.current.loftcut = (featureCountRef.current.loftcut ?? 0) + 1
+    return `Loft Cut ${featureCountRef.current.loftcut}`
+  }
   function nextCutoutName() {
     featureCountRef.current.cutout += 1
     return `Cutout ${featureCountRef.current.cutout}`
@@ -9191,7 +9196,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           setSolids(prev => prev.map(s => s.id === target.id ? target : s))
           newFeats.push({
             id: reuseId ? editingId : `loftcutout-${target.id}-${Date.now()}-${newFeats.length}`,
-            type: 'extrude', operation: 'cutout', name: editingFeat?.name || nextCutoutName(), groupId,
+            type: 'extrude', operation: 'cutout', name: editingFeat?.name || nextLoftCutName(), groupId,
             solidId: target.id, normal, origin, uAxis, vAxis, viewNormal, profiles, ruled, curved, color: '#e05a4e',
           })
           await rebuildDependentMirrors(target)

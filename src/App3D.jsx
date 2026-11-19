@@ -6079,7 +6079,7 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [shell3dSel, setShell3dSel] = useState([])              // [{solidId, point, key}] accumulated face picks
   const [shell3dAccepted, setShell3dAccepted] = useState(false)
   const [shell3dThicknessInput, setShell3dThicknessInput] = useState('2')
-  const [shell3dHandlePos, setShell3dHandlePos] = useState(null)
+  const [, setShell3dHandlePos] = useState(null)   // old pop-up position (options are in the ribbon now)
   // Not reset by resetShell3D() (mid-session Esc-to-back-up) — only a fresh
   // tool activation reverts to Inward, mirroring fillet3dMode's own
   // survive-a-back-up behavior.
@@ -16247,16 +16247,36 @@ const App3D = forwardRef(function App3D(props, ref) {
             color="#4DB6AC"
             hint={
               shell3dAccepted
-                ? 'Type the wall thickness, then press Enter.'
+                ? `Type the wall thickness${shell3dSel.length>1 ? ` (${shell3dSel.length} faces open)` : ''}, then press Apply or Enter.`
                 : shell3dSel.length>0
-                  ? `${shell3dSel.length} face${shell3dSel.length!==1?'s':''} selected — Enter to lock`
+                  ? `${shell3dSel.length} face${shell3dSel.length!==1?'s':''} picked — click more, or press Lock faces or Enter.`
                   : 'Click the faces to open up. The rest becomes a hollow wall.'
             }
             action={
               !shell3dAccepted && shell3dSel.length>0
-                ? [{label:'✓ Lock Faces', enabled:true, onClick:()=>setShell3dAccepted(true)}]
+                ? [{label:'✓ Lock faces', enabled:true, onClick:()=>setShell3dAccepted(true)}]
                 : shell3dAccepted
-                  ? [{label:'✓ Apply', enabled:true, onClick:commitShell3D}]
+                  // Thickness options (they used to be a pop-up by the face).
+                  ? [
+                      { node: (
+                        <div title="How thick the walls are"
+                          style={{ display:'flex', alignItems:'center', gap:4, height:26, boxSizing:'border-box', background:'#0a0e1a',
+                            border:'1px solid #4DB6AC88', borderRadius:13, padding:'0 10px' }}>
+                          <span style={{ color:'#8fa0b8', fontFamily:'monospace', fontSize:10, letterSpacing:'0.06em' }}>THICKNESS</span>
+                          <input autoFocus value={shell3dThicknessInput}
+                            onChange={e=>setShell3dThicknessInput(e.target.value)}
+                            onKeyDown={e=>{ e.stopPropagation(); if (e.key==='Enter') commitShell3D(); else if (e.key==='Escape') resetShell3D() }}
+                            onFocus={e=>e.target.select()}
+                            style={{ width:40, background:'none', border:'none', outline:'none', color:'#dce8ff', fontFamily:'monospace', fontSize:13, fontWeight:'bold' }}/>
+                          <span style={{ color:'#6688aa', fontFamily:'monospace', fontSize:11 }}>mm</span>
+                        </div>
+                      ) },
+                      { divider: true },
+                      { label:'Inward',  enabled:true, active: shell3dDirection!=='outward', onClick:()=>setShell3dDirection('inward') },
+                      { label:'Outward', enabled:true, active: shell3dDirection==='outward', onClick:()=>setShell3dDirection('outward') },
+                      { divider: true },
+                      { label:'✓ Apply', enabled:true, onClick:commitShell3D },
+                    ]
                   : []
             }
             onStepBack={step => { if (step===1) resetShell3D() }}
@@ -16715,105 +16735,6 @@ const App3D = forwardRef(function App3D(props, ref) {
               : 'Click bodies in the 3D view to select'} · Esc to cancel
           </div>
         </div>
-        </div>
-      )}
-
-      {/* ── Shell: "still picking faces" hint (shown before Enter/Tab accepts) ── */}
-      {tool==='shell3d' && !shell3dAccepted && shell3dSel.length>0 && shell3dHandlePos && (
-        <div style={{
-          position: 'fixed',
-          left: shell3dHandlePos.x,
-          top:  shell3dHandlePos.y,
-          zIndex: 1000,
-          background: 'rgba(15,20,40,0.95)',
-          border: '1.5px solid #4DB6AC',
-          borderRadius: 8,
-          padding: '6px 12px',
-          boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
-          fontFamily: 'monospace',
-          fontSize: 11,
-          color: '#dce8ff',
-          display: 'flex', alignItems: 'center', gap: 10, whiteSpace: 'nowrap',
-        }}>
-          <span>{shell3dSel.length} face{shell3dSel.length!==1?'s':''} selected</span>
-          <button
-            onClick={()=>setShell3dAccepted(true)}
-            style={{
-              padding:'3px 10px', background: '#4DB6AC', color:'#0d0d1a',
-              border:'none', borderRadius:4, cursor:'pointer',
-              fontFamily:'monospace', fontSize:11, fontWeight:'bold',
-            }}
-          >✓ Lock Faces</button>
-          <span style={{color:'#6688aa'}}>Esc to clear</span>
-        </div>
-      )}
-
-      {/* ── Shell popup (thickness + direction — faces already picked) ────── */}
-      {shell3dAccepted && shell3dHandlePos && (
-        <div style={{
-          position: 'fixed',
-          left: shell3dHandlePos.x,
-          top:  shell3dHandlePos.y,
-          zIndex: 1000,
-          background: 'rgba(15,20,40,0.95)',
-          border: '1.5px solid #4DB6AC',
-          borderRadius: 8,
-          padding: '10px 14px',
-          minWidth: 190,
-          boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
-          fontFamily: 'monospace',
-        }}>
-          <div style={{display:'flex', alignItems:'center', gap:8}}>
-            <div style={{
-              flex:1, background:'#0a0e1a', border:'1px solid #2a3a5a',
-              borderRadius:4, padding:'4px 8px',
-              display:'flex', alignItems:'center', justifyContent:'space-between',
-            }}>
-              <input
-                autoFocus
-                value={shell3dThicknessInput}
-                onChange={e=>setShell3dThicknessInput(e.target.value)}
-                onKeyDown={e=>{
-                  e.stopPropagation()
-                  if (e.key==='Enter') commitShell3D()
-                  else if (e.key==='Escape') resetShell3D()
-                }}
-                style={{
-                  background:'none', border:'none', outline:'none',
-                  color:'#dce8ff', fontFamily:'monospace', fontSize:16,
-                  fontWeight:'bold', flex:1, minWidth:0,
-                }}
-              />
-              <span style={{color:'#6688aa', fontSize:12}}>mm</span>
-            </div>
-            <button
-              onClick={()=>commitShell3D()}
-              style={{
-                padding:'4px 10px', background: '#4DB6AC', color:'#0d0d1a',
-                border:'none', borderRadius:4, cursor:'pointer',
-                fontFamily:'monospace', fontSize:12, fontWeight:'bold',
-              }}
-            >↵</button>
-          </div>
-          <div style={{display:'flex', gap:6, marginTop:8}}>
-            <button onClick={()=>setShell3dDirection('inward')} style={{
-              flex:1, background: shell3dDirection!=='outward' ? '#4DB6AC' : '#0a0e1a',
-              color: shell3dDirection!=='outward' ? '#0d0d1a' : '#aaa',
-              border:'1px solid #2a3a5a', borderRadius:4, padding:'4px 6px',
-              cursor:'pointer', fontFamily:'monospace', fontSize:10,
-              fontWeight: shell3dDirection!=='outward' ? 'bold' : 'normal',
-            }}>Inward</button>
-            <button onClick={()=>setShell3dDirection('outward')} style={{
-              flex:1, background: shell3dDirection==='outward' ? '#4DB6AC' : '#0a0e1a',
-              color: shell3dDirection==='outward' ? '#0d0d1a' : '#aaa',
-              border:'1px solid #2a3a5a', borderRadius:4, padding:'4px 6px',
-              cursor:'pointer', fontFamily:'monospace', fontSize:10,
-              fontWeight: shell3dDirection==='outward' ? 'bold' : 'normal',
-            }}>Outward</button>
-          </div>
-          <div style={{color:'#445566', fontSize:10, marginTop:6, textAlign:'center'}}>
-            Wall thickness{shell3dSel.length>1 ? ` · ${shell3dSel.length} faces` : ''} · ↵ to accept · Esc to cancel
-          </div>
         </div>
       )}
 

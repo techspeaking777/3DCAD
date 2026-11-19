@@ -1187,11 +1187,12 @@ function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEP
     const el = barRef.current
     const host = el?.parentElement
     if (!el || !host) return
-    const set = () => host.style.setProperty('--ribbon-h', el.offsetHeight + 'px')
+    // The sketch tools' flyouts open below the ribbon; tell them when it changes size.
+    const set = () => { host.style.setProperty('--ribbon-h', el.offsetHeight + 'px'); window.dispatchEvent(new Event('step-ribbon-resize')) }
     set()
     const ro = new ResizeObserver(set)
     ro.observe(el)
-    return () => { ro.disconnect(); host.style.removeProperty('--ribbon-h') }
+    return () => { ro.disconnect(); host.style.removeProperty('--ribbon-h'); window.dispatchEvent(new Event('step-ribbon-resize')) }
   }, [op])
   if (!op) return null
   const actions = [...(action ? (Array.isArray(action) ? action : [action]) : []), ...(extraActions || [])]
@@ -1205,7 +1206,7 @@ function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEP
   }
 
   return (
-    <div ref={barRef} style={{
+    <div ref={barRef} data-step-ribbon="1" style={{
       position: 'absolute', top: 0, left: 0, right: 0, zIndex: 200,
       boxSizing: 'border-box', pointerEvents: 'all',
       background: 'rgba(12,12,26,0.96)',
@@ -2344,11 +2345,23 @@ const App3D = forwardRef(function App3D(props, ref) {
         el.scrollIntoView({block:'nearest'})
         // Cancelled on cleanup: leaving the sketch (e.g. the ribbon's Cancel)
         // within that frame used to let it re-open the popover afterwards.
-        const raf = requestAnimationFrame(() => {
-          const r = el.getBoundingClientRect()
-          setFlyoutAnchor({top:r.top, right:r.right})
-        })
-        return () => cancelAnimationFrame(raf)
+        // The flyout opens level with its button but never higher than just
+        // below the step ribbon (it used to cover the ribbon's step and
+        // options); it follows the ribbon when that grows or shrinks.
+        let raf = 0
+        const place = () => {
+          cancelAnimationFrame(raf)
+          raf = requestAnimationFrame(() => {
+            const r = el.getBoundingClientRect()
+            const rb = document.querySelector('[data-step-ribbon]')?.getBoundingClientRect()
+            const below = rb && rb.height > 0 && rb.right > r.right ? rb.bottom + 8 : -Infinity
+            setFlyoutAnchor({top:Math.max(r.top, below), right:r.right})
+          })
+        }
+        place()
+        window.addEventListener('step-ribbon-resize', place)
+        window.addEventListener('resize', place)
+        return () => { cancelAnimationFrame(raf); window.removeEventListener('step-ribbon-resize', place); window.removeEventListener('resize', place) }
       }
     }
     setFlyoutAnchor(null)

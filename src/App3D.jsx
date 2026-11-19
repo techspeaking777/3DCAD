@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo, useCallback, forwardRef, useImperativeHandle } from 'react'
+import { Fragment, useState, useRef, useEffect, useMemo, useCallback, forwardRef, useImperativeHandle } from 'react'
 import * as THREE from 'three'
 import Viewport3D from './Viewport3D.jsx'
 import { planeColor, planeAxisLabels, sketchToWorld, worldToSketch } from './SketchPlane.js'
@@ -1150,7 +1150,7 @@ const FILLET3D_CHAMFER_COLOR = '#c9793f'
 function OffsetDistancePopover({ color, value, onChange, label='OFFSET', unit='mm' }) {
   return (
     <div style={{
-      position:'absolute', bottom:'calc(100% + 8px)', left:'50%', transform:'translateX(-50%)',
+      position:'absolute', top:'calc(100% + 8px)', left:'50%', transform:'translateX(-50%)',
       zIndex:200, background:'rgba(12,12,26,0.97)', border:`2px solid ${color}`,
       borderRadius:8, padding:'10px 16px', display:'flex', alignItems:'center', gap:10, whiteSpace:'nowrap',
     }}>
@@ -1168,234 +1168,157 @@ function OffsetDistancePopover({ color, value, onChange, label='OFFSET', unit='m
   )
 }
 
-function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEPS, hint = null, action = null }) {
+// Longer descriptions shown when hovering a step in the ribbon (SmartStepBar),
+// looked up by the step's label (lower-case). A step can carry its own `tip`
+// instead. Keep them short and plain — one or two sentences.
+const STEP_TIPS = {
+  'pick plane': 'Choose where your sketch sits: a work plane (XY, XZ, YZ) or any flat face of a body. Offset Plane makes a new plane parallel to one you pick.',
+  'pick start plane': 'Choose the plane or flat face the first shape is drawn on.',
+  'draw profile': 'Draw the closed outline with the sketch tools, then Finish. Cancel throws the sketch away.',
+  'sketch profile': 'Draw the closed shape that will be swept along the path, then Finish.',
+  'sketch profiles': 'Draw each shape the loft blends between.',
+  'sketch path': 'Draw the line or curve the shape travels along.',
+  'sketch wire': 'Draw the wire shape and, if you like, an axis line for the spring to wind round.',
+  'set depth': 'Choose how far the shape grows: drag the arrow or type a depth. One way goes toward the side your mouse is on (or type a minus number for the other side); Both ways centres it on the sketch.',
+  'set a depth': 'Choose how far the shape grows: drag the arrow or type a depth.',
+  'set radius': 'Type how big the rounding is, in mm.',
+  'set thickness': 'Type how thick the walls are, in mm.',
+  'set coil': 'Choose the pitch (gap between coils), the number of turns and the direction.',
+  'pick body': 'Click the body to work on. With only one body it is picked for you.',
+  'select body': 'Click the body to work on.',
+  'select bodies': 'Click each body to include. Click again to leave one out.',
+  'select faces': 'Click the faces to use. Click a face again to drop it.',
+  'select edges': 'Click the edges to use. Click an edge again to drop it.',
+  'pick edges': 'Click the edges to use. Click an edge again to drop it.',
+  'pick holes': 'Click the holes to use.',
+  'keep faces flat · radius': 'Click any face that should stay flat (it keeps a crisp edge), then type the radius. Everything else gets rounded.',
+}
+
+// The step ribbon across the TOP of the 3D view (2026-11-19, replaces the bar
+// that sat along the bottom). Each step is an arrow: finished steps shrink to a
+// green tick (click one to go back to it), the current step is drawn in the
+// tool's colour with its options right after it, and later steps are grey
+// with no options. One plain hint line underneath; hovering a step shows its
+// longer description (STEP_TIPS). The ViewCube moves down by the ribbon's
+// height (`--ribbon-h` on the viewport container) so it stays visible.
+// Same props as before, so no tool had to change: `action` is one
+// {label, enabled, onClick, active, popover} or a list of them (plus
+// {divider:true}, or {node} for a field such as Extrude's depth box; `danger`
+// draws it red, `success` green); they are the current step's options. `extraActions` are added
+// after them — the shared sketch ✕ Cancel / ✓ Finish sketch pair.
+function SmartStepBar({ op, currentStep, color, onStepBack, steps = EXTRUDE_STEPS, hint = null, action = null, extraActions = null }) {
+  const barRef = useRef(null)
+  const [hoverStep, setHoverStep] = useState(null)
+  // Publish the ribbon's height to its container (for the ViewCube); cleared on unmount.
+  useEffect(() => {
+    const el = barRef.current
+    const host = el?.parentElement
+    if (!el || !host) return
+    const set = () => host.style.setProperty('--ribbon-h', el.offsetHeight + 'px')
+    set()
+    const ro = new ResizeObserver(set)
+    ro.observe(el)
+    return () => { ro.disconnect(); host.style.removeProperty('--ribbon-h') }
+  }, [op])
   if (!op) return null
-  // `action` accepts either a single {label,enabled,onClick} (every existing
-  // call site) or an array of them, for tools that need more than one
-  // independent button in the bar at once (e.g. Extrude's "Hide/Show Planes"
-  // alongside its own "+ Offset Plane" toggle — two genuinely unrelated
-  // concerns, unlike Mirror's single action slot which only ever needs to
-  // morph between one button's states).
-  const actions = action ? (Array.isArray(action) ? action : [action]) : []
+  const actions = [...(action ? (Array.isArray(action) ? action : [action]) : []), ...(extraActions || [])]
+  const chev = 'polygon(0 0, calc(100% - 9px) 0, 100% 50%, calc(100% - 9px) 100%, 0 100%, 7px 50%)'
+  const chevFirst = 'polygon(0 0, calc(100% - 9px) 0, 100% 50%, calc(100% - 9px) 100%, 0 100%)'
+  const tipFor = (step, state) => {
+    const base = step.tip || STEP_TIPS[String(step.label).toLowerCase()] || null
+    if (state === 'done') return `Done${base ? ' — ' + base : ''} Click to go back to this step.`
+    if (state === 'next') return base ? `Coming up: ${base}` : null
+    return base
+  }
 
   return (
-    <div style={{
-      position: 'absolute',
-      bottom: 0,
-      left: 0,
-      right: 0,
-      // minHeight + wrap (not a fixed 52px single row): in a narrow window
-      // (laptop split-screen, ~800px) the step pills plus a hint and several
-      // action buttons can't fit on one line, and used to clip off the right
-      // edge. Now the right-hand cluster (hint, buttons, Esc) drops to a
-      // second row instead, and the bar grows upward from the bottom.
-      minHeight: 52,
-      boxSizing: 'border-box',
-      background: 'rgba(12,12,26,0.97)',
-      backdropFilter: 'blur(6px)',
-      borderTop: `2px solid ${color}55`,
-      display: 'flex',
-      flexWrap: 'wrap',
-      alignItems: 'center',
-      rowGap: 6,
-      padding: '6px 20px',
-      zIndex: 200,
-      pointerEvents: 'all',
-      gap: 0,
+    <div ref={barRef} style={{
+      position: 'absolute', top: 0, left: 0, right: 0, zIndex: 200,
+      boxSizing: 'border-box', pointerEvents: 'all',
+      background: 'rgba(12,12,26,0.96)',
+      borderBottom: `2px solid ${color}55`,
+      padding: '7px 12px 6px',
     }}>
-      {/* Operation label badge */}
-      <div style={{
-        fontFamily: 'monospace',
-        fontSize: 9,
-        fontWeight: 'bold',
-        letterSpacing: '0.18em',
-        color,
-        textTransform: 'uppercase',
-        background: color + '18',
-        border: `1px solid ${color}44`,
-        borderRadius: 4,
-        padding: '3px 9px',
-        marginRight: 20,
-        flexShrink: 0,
-      }}>
-        {op}
-      </div>
+      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, rowGap: 6 }}>
+        {/* Tool name */}
+        <div style={{
+          fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', letterSpacing: '0.16em',
+          color, textTransform: 'uppercase', background: color + '18', border: `1px solid ${color}55`,
+          borderRadius: 4, padding: '4px 9px', marginRight: 4, flexShrink: 0,
+        }}>{op}</div>
 
-      {/* Step pills */}
-      {steps.map((step, i) => {
-        const isDone   = step.id < currentStep
-        const isActive = step.id === currentStep
-        const canBack  = isDone
-
-        return (
-          <div key={step.id} style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
-            {/* Connector line */}
-            {i > 0 && (
-              <div style={{
-                width: 28,
-                height: 2,
-                margin: '0 2px',
-                borderRadius: 1,
-                background: (isDone || isActive) ? color + '55' : '#1e1e36',
-                transition: 'background 0.25s',
-              }}/>
-            )}
-
-            {/* Pill */}
-            <div
-              onClick={canBack ? () => onStepBack(step.id) : undefined}
-              title={canBack ? `Go back to: ${step.label}` : undefined}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 7,
-                padding: '5px 14px',
-                borderRadius: 24,
-                cursor: canBack ? 'pointer' : 'default',
-                background: isActive ? color + '20' : 'transparent',
-                border: `1.5px solid ${
-                  isActive ? color :
-                  isDone   ? color + '50' :
-                  '#1e1e36'
-                }`,
-                opacity: isActive ? 1 : isDone ? 0.72 : 0.3,
-                transition: 'all 0.2s',
-              }}
-            >
-              {/* Circle number / check */}
-              <div style={{
-                width: 20,
-                height: 20,
-                borderRadius: '50%',
-                flexShrink: 0,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: isDone ? 11 : 10,
-                fontWeight: 'bold',
-                fontFamily: 'monospace',
-                background: isActive ? color      : isDone ? color + '28' : 'transparent',
-                border: `1.5px solid ${isActive ? color : isDone ? color + '66' : '#2a2a4a'}`,
-                color: isActive ? '#fff' : isDone ? color : '#445',
-                transition: 'all 0.2s',
-              }}>
-                {isDone ? '✓' : step.id}
+        {steps.map((step, i) => {
+          const state = step.id < currentStep ? 'done' : step.id === currentStep ? 'current' : 'next'
+          const tip = tipFor(step, state)
+          const shapeStyle = {
+            position: 'relative', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
+            height: 28, boxSizing: 'border-box', clipPath: i === 0 ? chevFirst : chev,
+            padding: i === 0 ? '0 17px 0 10px' : '0 17px 0 14px',
+            fontFamily: 'monospace', fontSize: 11, letterSpacing: '0.05em', whiteSpace: 'nowrap',
+            cursor: state === 'done' ? 'pointer' : 'default',
+            ...(state === 'done'    ? { background: '#1f3d2a', color: '#7ee08f' }
+              : state === 'current' ? { background: color, color: '#0d0d1a', fontWeight: 'bold' }
+              :                       { background: '#22223a', color: '#6b7690' }),
+          }
+          // The step and its options are separate items of the wrapping row, so
+          // in a narrow window the options flow onto the next line.
+          return (
+            <Fragment key={step.id}>
+            <div style={{ position: 'relative', display: 'flex', alignItems: 'center', flexShrink: 0 }}
+              onMouseEnter={() => setHoverStep(step.id)} onMouseLeave={() => setHoverStep(h => h === step.id ? null : h)}>
+              <div style={shapeStyle} onClick={state === 'done' ? () => onStepBack?.(step.id) : undefined}>
+                {state === 'done' ? <span style={{ fontSize: 13, fontWeight: 'bold' }}>✓</span>
+                  : <>{step.id}&nbsp;{String(step.label).toUpperCase()}</>}
               </div>
-
-              {/* Label */}
-              <span style={{
-                fontFamily: 'monospace',
-                fontSize: 11,
-                letterSpacing: '0.05em',
-                whiteSpace: 'nowrap',
-                color: isActive ? '#dce8ff' : isDone ? '#8899bb' : '#334',
-                transition: 'color 0.2s',
-              }}>
-                {step.label}
-              </span>
+              {hoverStep === step.id && tip && (
+                <div style={{
+                  position: 'absolute', top: 'calc(100% + 8px)', left: 0, zIndex: 300, width: 240,
+                  background: '#0f1428', border: `1px solid ${state === 'current' ? color : '#3a4a6a'}`,
+                  borderRadius: 8, padding: '8px 10px', color: '#c7d3e6',
+                  fontFamily: 'sans-serif', fontSize: 12, lineHeight: 1.45, whiteSpace: 'normal',
+                  boxShadow: '0 4px 16px rgba(0,0,0,0.45)', pointerEvents: 'none',
+                }}>
+                  {state === 'done' && <div style={{ color: '#7ee08f', fontFamily: 'monospace', fontSize: 11, marginBottom: 3 }}>{step.label}</div>}
+                  {tip}
+                </div>
+              )}
             </div>
-          </div>
-        )
-      })}
+              {/* The current step's options sit right after it */}
+              {state === 'current' && actions.map((a, k) => {
+                if (a.divider) return k === 0 ? null : <div key={'a' + k} style={{ width: 1, height: 20, background: '#2a2a4a', flexShrink: 0 }}/>
+                if (a.node) return <div key={'a' + k} style={{ flexShrink: 0, display: 'flex', alignItems: 'center' }}>{a.node}</div>
+                const commit = /^✓/.test(String(a.label))
+                const on = a.active === true
+                const base = {
+                  height: 26, padding: '0 12px', borderRadius: 13, fontFamily: 'monospace', fontSize: 11,
+                  fontWeight: 'bold', whiteSpace: 'nowrap', cursor: a.enabled ? 'pointer' : 'default',
+                }
+                const look = !a.enabled ? { background: '#22223a', color: '#5a6170', border: '1px solid #2a2a4a' }
+                  : a.danger ? { background: 'transparent', color: '#ff6b5e', border: '1px solid #e05a4e' }
+                  : a.success ? { background: '#1a3a2a', color: '#69F0AE', border: '2px solid #69F0AE' }
+                  : commit ? { background: color, color: '#0d0d1a', border: `1px solid ${color}` }
+                  : on ? { background: color + '33', color, border: `1px solid ${color}` }
+                  : { background: 'transparent', color: color, border: `1px solid ${color}88` }
+                return (
+                  <div key={'a' + k} style={{ position: 'relative', flexShrink: 0 }}>
+                    <button onClick={a.onClick} disabled={!a.enabled} style={{ ...base, ...look }}>{a.label}</button>
+                    {a.popover}
+                  </div>
+                )
+              })}
+            </Fragment>
+          )
+        })}
 
-      {/* Commit indicator — appears on step 3 */}
-      {currentStep === 3 && (
-        <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
-          <div style={{
-            width: 28, height: 2, margin: '0 2px',
-            borderRadius: 1, background: color + '55',
-          }}/>
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 6,
-            padding: '5px 14px', borderRadius: 24,
-            background: color + '18',
-            border: `1.5px solid ${color}88`,
-          }}>
-            <span style={{
-              fontFamily: 'monospace', fontSize: 11,
-              color: color, letterSpacing: '0.05em',
-            }}>
-              ↵ Commit
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* Right-hand cluster: hint, action buttons, Esc hint. marginLeft:auto
-          pushes it to the right on a wide bar; on a narrow one the whole
-          cluster wraps onto its own row (still right-aligned). */}
-      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', flexWrap: 'wrap',
-        justifyContent: 'flex-end', rowGap: 6, minWidth: 0 }}>
-
-      {/* Optional trailing hint — e.g. live selection count + accept keys.
-          Absent for the existing Extrude/Cutout and Mirror3D usages. */}
-      {hint && (
-        <span style={{
-          fontFamily: 'monospace', fontSize: 10,
-          color, flexShrink: 1, minWidth: 0, letterSpacing: '0.05em', marginRight: 16,
-        }}>
-          {hint}
+        <span style={{ marginLeft: 'auto', fontFamily: 'monospace', fontSize: 10, color: '#4a5a70', letterSpacing: '0.05em', flexShrink: 0 }}>
+          Esc · cancel
         </span>
-      )}
-
-      {/* Optional visible confirm button — the clickable equivalent of
-          whatever Enter/Tab/right-click already does, so open-ended
-          selection-count steps (Join3D, Export STL) don't require knowing
-          a hidden keyboard gesture. The keyboard shortcuts keep working.
-          Each action can also carry a `popover` node (e.g. Mirror/Extrude's
-          live offset-distance input) — wrapping the button in its own
-          position:relative box and anchoring the popover with pure CSS
-          (bottom:100%, centered) means it visually reads as belonging to
-          that exact button with no ref/getBoundingClientRect bookkeeping,
-          and it stays correctly placed even if the bar's layout shifts. */}
-      {actions.map((a, i) => {
-        // A plain visual separator between button clusters — e.g. Move/
-        // Copy's tool grouping bar splits its primary mode toggle from its
-        // secondary positioning aids (Snap Move, Set Pivot) this way, so a
-        // growing action row still reads as two short groups instead of one
-        // long flat list. Not a real action: no onClick/label, just a
-        // divider in the actions array so callers can place it exactly
-        // between the items they want split without SmartStepBar needing to
-        // know anything about which tool is using it.
-        if (a.divider) return <div key={i} style={{width:1,height:24,background:'#2a2a4a',marginRight:16,flexShrink:0}}/>
-        // `active` is a separate concept from `enabled`: it's for a set of
-        // mutually-exclusive toggle buttons (e.g. Move/Copy) where BOTH
-        // stay clickable but only one should look "on" at a time — using
-        // `enabled` alone for that (as the single old Move/Copy toggle
-        // button did, flipping its own label between "Move"/"Copy") reads
-        // as ambiguous: is the label naming the current mode, or the mode
-        // clicking it switches TO? Two separate buttons with one clearly
-        // highlighted removes that ambiguity. Omitting `active` keeps the
-        // original always-filled look for every other existing call site.
-        const isGhost = a.active === false
-        return (
-        <div key={i} style={{ position: 'relative', marginRight: 16 }}>
-          <button
-            onClick={a.onClick}
-            disabled={!a.enabled}
-            style={{
-              padding:'5px 14px', borderRadius: 20,
-              border: isGhost ? `1.5px solid ${color}88` : 'none',
-              background: isGhost ? 'transparent' : (a.enabled ? color : '#2a2a4a'),
-              color: isGhost ? color : (a.enabled ? '#0d0d1a' : '#666'),
-              fontFamily:'monospace', fontWeight:'bold', fontSize: 11,
-              cursor: a.enabled ? 'pointer' : 'default',
-            }}>
-            {a.label}
-          </button>
-          {a.popover}
-        </div>
-        )
-      })}
-
-      {/* Esc hint */}
-      <span style={{
-        fontFamily: 'monospace', fontSize: 10,
-        color: '#334455', flexShrink: 0, letterSpacing: '0.05em',
-      }}>
-        Esc · cancel
-      </span>
       </div>
+      {hint && (
+        <div style={{ fontFamily: 'monospace', fontSize: 11, color, opacity: 0.9, marginTop: 5, letterSpacing: '0.03em' }}>
+          {hint}
+        </div>
+      )}
     </div>
   )
 }
@@ -2150,7 +2073,6 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [springOffsetDistInput,setSpringOffsetDistInput]=useState('20')
   const [springOffsetDistLocked,setSpringOffsetDistLocked]=useState(false)  // see extrudeOffsetDistLocked's comment
   const extrudePanelDrag = useDraggablePanel()
-  const cutoutPanelDrag = useDraggablePanel()
   const loftPanelDrag = useDraggablePanel()
   const springPanelDrag = useDraggablePanel()
   const sweepPanelDrag = useDraggablePanel()
@@ -2451,11 +2373,13 @@ const App3D = forwardRef(function App3D(props, ref) {
         // (or without scrolling at all, if the button was activated while
         // still off-screen) anchors the flyout to a stale/off-canvas rect.
         el.scrollIntoView({block:'nearest'})
-        requestAnimationFrame(() => {
+        // Cancelled on cleanup: leaving the sketch (e.g. the ribbon's Cancel)
+        // within that frame used to let it re-open the popover afterwards.
+        const raf = requestAnimationFrame(() => {
           const r = el.getBoundingClientRect()
           setFlyoutAnchor({top:r.top, right:r.right})
         })
-        return
+        return () => cancelAnimationFrame(raf)
       }
     }
     setFlyoutAnchor(null)
@@ -6032,6 +5956,7 @@ const App3D = forwardRef(function App3D(props, ref) {
     // armed to delete the source sketch out from under some unrelated later
     // feature (see the convertingSketchIdRef effect near the top).
     convertingSketchIdRef.current = null
+    setFlyoutAnchor(null)   // close the sketch tool's popover (Line / Circle / …) with the sketch
     setSketchMode(false); setActivePlane(null); setActiveSketchId(null)
     activePlaneRef.current = null
     setLines([]); setCircles([]); setArcs([]); setSplines([]); setDims([])
@@ -11345,6 +11270,114 @@ const App3D = forwardRef(function App3D(props, ref) {
     )
   }
 
+  // Extrude / Cutout depth step (step 3) as ribbon options, in the order a
+  // student meets them (user's order, 2026-11-19): depth → One way / Both ways
+  // → To face → draft → (new body / join) → Apply. No Flip: the mouse's side of the plane picks the side, or a
+  // negative depth (see setDepthText). These used to live in a floating panel by the sketch (still used
+  // for Revolve). Same state writes as that panel: every change goes through
+  // updateExtrudeState so Enter straight after a click sees it.
+  function extrudeDepthActions() {
+    const st = extrudeState
+    if (!st?.armed || st.revolveAxis) return null
+    const isCut = extrudeTool === 'cutout'
+    const color = isCut ? '#e05a4e' : '#3a7bd5'
+    const oneWay = st.direction !== 'both'
+    const faceCut = isCut && st.planeId === 'face' && !st.facePlane?.free
+    const through = st.extentMode === 'through'
+    const field = (width) => ({
+      display: 'flex', alignItems: 'center', gap: 4, height: 26, boxSizing: 'border-box',
+      background: '#0a0e1a', border: `1px solid ${color}88`, borderRadius: 13, padding: '0 10px',
+    })
+    const inputStyle = (w) => ({
+      width: w, background: 'none', border: 'none', outline: 'none', color: '#dce8ff',
+      fontFamily: 'monospace', fontSize: 13, fontWeight: 'bold',
+    })
+    const label = t => <span style={{ color: '#8fa0b8', fontFamily: 'monospace', fontSize: 10, letterSpacing: '0.06em' }}>{t}</span>
+    const unit = t => <span style={{ color: '#6688aa', fontFamily: 'monospace', fontSize: 11 }}>{t}</span>
+    // A minus sign sends it the other way (Fusion / Solid Edge habit; there is
+    // no Flip button — otherwise the mouse's side of the plane decides). The
+    // box keeps the size; the side is flipped and pinned so the mouse no
+    // longer overrides it. Both ways, or a cut on a face (always into the
+    // body), just drop the sign.
+    const setDepthText = raw => {
+      const neg = /^\s*-/.test(raw) && parseFloat(raw) < 0
+      if (!neg) { updateExtrudeState(() => ({ depthInput: raw, depthLocked: true })); return }
+      const size = raw.replace(/^\s*-/, '')
+      updateExtrudeState(prev => (prev.direction === 'both' || faceCut)
+        ? { depthInput: size, depthLocked: true }
+        : { depthInput: size, depthLocked: true, direction: prev.direction === 'back' ? 'front' : 'back', directionLocked: true })
+    }
+    const apply = () => {
+      const vp = viewport3dRef.current
+      const oc = vp?.getOverlayCanvas()
+      if (oc) { const ctx = oc.getContext('2d'); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, oc.width, oc.height) }
+      setSolids(prev => prev.filter(s => s.id !== '__preview__'))
+      commitExtrude()
+    }
+    return [
+      ...(through ? [
+        { label: 'Through All (old)', enabled: true, active: true, onClick: () => updateExtrudeState(() => ({ extentMode: 'through' })) },
+        { label: 'Set a depth', enabled: true, active: false, onClick: () => updateExtrudeState(() => ({ extentMode: 'value' })) },
+        { divider: true },
+      ] : []),
+      { node: (
+        <div style={{ ...field(), opacity: through ? 0.4 : 1 }} title="Depth — type a number (a minus sign sends it the other way), or move the mouse over the model">
+          {label('DEPTH')}
+          <input autoFocus={!through}
+            value={through ? '∞' : st.depthInput} readOnly={through}
+            onChange={e => { if (!through) setDepthText(e.target.value) }}
+            onKeyDown={e => { e.stopPropagation(); if (!through) handleExtrudeDepthKey(e); else if (e.key === 'Enter') apply() }}
+            onFocus={e => e.target.select()}
+            style={inputStyle(48)}/>
+          {unit('mm')}
+        </div>
+      ) },
+      { divider: true },
+      { label: 'One way', enabled: true, active: oneWay,
+        onClick: () => updateExtrudeState(prev => ({ direction: prev.direction === 'both' ? 'front' : prev.direction, directionLocked: false })) },
+      { label: 'Both ways', enabled: true, active: !oneWay, onClick: () => updateExtrudeState(() => ({ direction: 'both' })) },
+      ...(!through ? [{ label: '⇥ To face', enabled: true, active: !!st.toFace, onClick: toggleToFace }] : []),
+      ...(!isCut ? [{ divider: true }] : []),
+      ...(!isCut ? [{ node: (
+        <div style={field()} title="Draft angle — tapers the side walls. 0 = straight walls">
+          {label('DRAFT')}
+          <input value={st.draftAngleInput} placeholder="0"
+            onChange={e => updateExtrudeState(() => ({ draftAngleInput: e.target.value }))}
+            onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter') apply() }}
+            onFocus={e => e.target.select()}
+            style={inputStyle(26)}/>
+          {unit('°')}
+          {['in', 'out'].map(k => (
+            <button key={k} onClick={() => updateExtrudeState(() => ({ draftDirection: k }))}
+              title={k === 'in' ? 'Draft In — walls narrow away from the sketch' : 'Draft Out — walls flare away from the sketch'}
+              style={{ height: 18, padding: '0 6px', borderRadius: 9, cursor: 'pointer', fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold',
+                background: st.draftDirection === k ? color : 'transparent', color: st.draftDirection === k ? '#0d0d1a' : color,
+                border: `1px solid ${color}88` }}>{k === 'in' ? 'In' : 'Out'}</button>
+          ))}
+        </div>
+      ) }] : []),
+      ...(!isCut && joinableBodyId != null && !editingFeatureId ? [
+        { divider: true },
+        { label: 'New body', enabled: true, active: !st.joinBody, onClick: () => updateExtrudeState(() => ({ joinBody: false })) },
+        { label: 'Join to body', enabled: true, active: !!st.joinBody, onClick: () => updateExtrudeState(() => ({ joinBody: true })) },
+      ] : []),
+      { divider: true },
+      { label: '✓ Apply', enabled: true, onClick: apply },
+    ]
+  }
+
+  // ✕ Cancel / ✓ Finish sketch in the ribbon while a feature tool is sketching
+  // (Extrude, Cutout, Revolve, Loft, Sweep, Spring). They used to be big
+  // buttons at the right of the sketch toolbar; a plain sketch (no tool, no
+  // ribbon) still finishes from the toolbar.
+  function sketchFinishActions() {
+    if (!sketchMode || !(extrudeTool || loftState || sweepState || springState)) return null
+    return [
+      { divider: true },
+      { label: '✕ Cancel', enabled: true, danger: true, onClick: cancelFeature },
+      { label: '✓ Finish sketch', enabled: true, success: true, onClick: handleFinishSketch },
+    ]
+  }
   function handleExtrudeDepthKey(e) {
     if (!extrudeStateRef.current) return
     if (e.key === 'Enter') {
@@ -15505,28 +15538,9 @@ const App3D = forwardRef(function App3D(props, ref) {
               <span style={{fontSize:9,fontFamily:'monospace',color: xray ? '#7DF9FF' : '#6688aa',
                 letterSpacing:'0.06em'}}>X-RAY</span>
             </button>
-            {/* CANCEL FEATURE — only for Cut/Extrude/Loft/Sweep/Spring, which
-                have a whole in-progress feature to abandon (a plain
-                standalone sketch doesn't). Placed left of Finish so the two
-                can't be confused. */}
-            {sketchMode && (extrudeTool || loftState || sweepState || springState) && (
-              <button
-                title="Cancel — abandons this Cut/Extrude/Loft/Sweep/Spring entirely"
-                onClick={cancelFeature}
-                style={{...btnBase,background:'#3a1a1a',outline:'2px solid #e05a4e',
-                  outlineOffset:'-2px',flexDirection:'column',gap:2,
-                  width:'auto',padding:'0 18px'}}>
-                <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-                  <line x1="4" y1="4" x2="16" y2="16" stroke="#e05a4e" strokeWidth="2.5" strokeLinecap="round"/>
-                  <line x1="16" y1="4" x2="4" y2="16" stroke="#e05a4e" strokeWidth="2.5" strokeLinecap="round"/>
-                </svg>
-                <span style={{fontSize:8,fontFamily:'monospace',color:'#e05a4e',
-                  letterSpacing:'0.05em',whiteSpace:'nowrap'}}>CANCEL</span>
-              </button>
-            )}
-
-            {/* FINISH SKETCH */}
-            {sketchMode && (
+            {/* FINISH SKETCH — a plain sketch only; inside a feature tool, Cancel and
+                Finish sketch are in the step ribbon (sketchFinishActions). */}
+            {sketchMode && !(extrudeTool || loftState || sweepState || springState) && (
               <button
                 title="Finish Sketch"
                 onClick={handleFinishSketch}
@@ -15551,7 +15565,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           {/* ViewCube — click a face to jump to that view. Hidden while
               sketching, where the camera is locked to the sketch plane. */}
           {!sketchMode && (
-            <div style={{position:'absolute',top:8,right:8,zIndex:5,
+            <div style={{position:'absolute',top:'calc(var(--ribbon-h, 0px) + 8px)',right:8,zIndex:5,
               display:'flex',flexDirection:'column',alignItems:'center',gap:6}}>
               <ViewCube getAxes={getViewCubeAxes}
                 onSnap={(dir,up)=>viewport3dRef.current?.snapToView(dir,up)}
@@ -15641,6 +15655,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           {/* ── SmartStep bar: overlays bottom of viewport during Extrude/Cutout/Revolve ── */}
           <SmartStepBar
             op={extrudeTool === 'revolvecut' ? 'revolve cut' : extrudeTool}
+            extraActions={sketchFinishActions()}
             currentStep={
               extrudeState  ? 3 :
               sketchMode    ? 2 : 1
@@ -15683,7 +15698,7 @@ const App3D = forwardRef(function App3D(props, ref) {
                             else setExtrudeOffsetMode(true)
                           }},
                   ]
-                : null
+                : extrudeDepthActions()
             }
             onStepBack={step => {
               if (step === 2) {
@@ -15911,6 +15926,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           {/* ── SmartStep bar: overlays bottom of viewport during Loft ── */}
           <SmartStepBar
             op={(tool==='loft3d' || loftState) ? (loftTool==='loftcutout' ? 'LOFT CUTOUT' : 'LOFT') : null}
+            extraActions={sketchFinishActions()}
             steps={[{ id:1, label:'Pick Start Plane' }, { id:2, label:'Sketch Profiles' }]}
             currentStep={loftState ? 2 : 1}
             color={loftTool==='loftcutout' ? '#53D3E4' : '#FBDA2D'}
@@ -15929,6 +15945,7 @@ const App3D = forwardRef(function App3D(props, ref) {
           {/* ── SmartStep bar: overlays bottom of viewport during Sweep ── */}
           <SmartStepBar
             op={(tool==='sweep3d' || sweepState) ? (sweepTool==='sweepcut' ? 'SWEEP CUT' : 'SWEEP') : null}
+            extraActions={sketchFinishActions()}
             steps={(sweepProjectOn || sweepState?.awaitProject || sweepState?.projected)
               ? [{ id:1, label:'Sketch Path' }, { id:2, label:'Project' }, { id:3, label:'Sketch Profile' }, { id:4, label:'Check' }]
               : [{ id:1, label:'Sketch Path' }, { id:2, label:'Sketch Profile' }, { id:3, label:'Check' }]}
@@ -15981,6 +15998,7 @@ const App3D = forwardRef(function App3D(props, ref) {
               Axis line), then the coil popup (see springState.armed). */}
           <SmartStepBar
             op={(tool==='spring3d' || springState) ? (springTool==='springcut' ? 'SPRING CUT' : 'SPRING') : null}
+            extraActions={sketchFinishActions()}
             steps={[{ id:1, label:'Pick Plane' }, { id:2, label:'Sketch Wire' }, { id:3, label:'Set Coil' }]}
             currentStep={springState?.armed ? 3 : springState ? 2 : 1}
             color={springTool==='springcut' ? '#53D3E4' : '#F06292'}
@@ -16413,8 +16431,8 @@ const App3D = forwardRef(function App3D(props, ref) {
                 }}>
                   {p.action}
                 </span>
-                {/* Inline depth input — shown when profile is picked */}
-                {extrudeState && (
+                {/* Inline angle input — Revolve only (Extrude/Cutout's depth is in the ribbon) */}
+                {extrudeState?.revolveAxis && (
                   <input
                     autoFocus
                     value={extrudeState.depthInput}
@@ -16429,14 +16447,8 @@ const App3D = forwardRef(function App3D(props, ref) {
                     }}
                   />
                 )}
-                {extrudeState && (
-                  <span style={{color:'#6688aa',fontFamily:'monospace',fontSize:12,flexShrink:0}}>mm</span>
-                )}
-                {/* Direction toggle — One way / Both ways / Flip */}
-                {extrudeState && !extrudeState.revolveAxis && (
-                  <div style={{flexShrink:0}}>
-                    {directionToggle((extrudeTool==='cutout'||extrudeTool==='revolvecut') ? '#e05a4e' : '#3a7bd5', { compact:true })}
-                  </div>
+                {extrudeState?.revolveAxis && (
+                  <span style={{color:'#6688aa',fontFamily:'monospace',fontSize:12,flexShrink:0}}>°</span>
                 )}
                 {/* Key badges */}
                 {p.hints && p.hints.length>0 && <>
@@ -16488,7 +16500,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       </div>
 
       {/* ── Extrude popup (solid creation only) ─────────────────────────── */}
-      {extrudeState?.armed && extrudeHandlePos && (extrudeTool !== 'cutout' || extrudeState.revolveAxis) && (
+      {extrudeState?.armed && extrudeHandlePos && extrudeState.revolveAxis && (
         <div style={{
           position: 'fixed',
           left: extrudeHandlePos.x,
@@ -16770,135 +16782,6 @@ const App3D = forwardRef(function App3D(props, ref) {
               </div>
             </>
           )}
-        </div>
-        </div>
-      )}
-
-      {/* ── Cutout popup (extent mode + direction + optional depth) ──────── */}
-      {extrudeState?.armed && extrudeHandlePos && extrudeTool === 'cutout' && !extrudeState.revolveAxis && (
-        <div style={{
-          position: 'fixed',
-          left: extrudeHandlePos.x,
-          top: extrudeHandlePos.top,
-          transform: 'translateX(-50%)',
-          zIndex: 1000,
-        }}>
-        <div ref={cutoutPanelDrag.panelRef} style={{
-          background: '#000',
-          border: '1.5px solid #FF3B5C',
-          borderRadius: 2,
-          padding: '10px 14px',
-          boxShadow: '0 0 14px #FF3B5C77, 0 0 3px #FF3B5C inset',
-          fontFamily: 'monospace',
-          ...cutoutPanelDrag.panelStyle,
-        }}>
-          <DragHandle {...cutoutPanelDrag.handleProps}>Cutout</DragHandle>
-          <div style={{display:'grid', gridTemplateColumns:extrudeState.extentMode==='through'?'auto 1fr':'1fr', gap:8}}>
-
-            {/* Left column: extent mode buttons — only for an old Through All
-                cutout being edited, so it can be switched to a real depth.
-                New cutouts are always a finite depth. */}
-            {extrudeState.extentMode==='through' && <div style={{display:'flex', flexDirection:'column', gap:4}}>
-              {[
-                {k:'through', icon:'→|',  label:'Through All (old)'},
-                {k:'value',   icon:'→‖', label:'Set a depth'},
-              ].map(({k,icon,label}) => {
-                const active = extrudeState.extentMode === k
-                return (
-                  <button key={k} title={label}
-                    onClick={()=>setExtrudeState(prev=>{
-                      // Same ref-lag hazard as the direction toggle above —
-                      // extrudeStateRef only catches up via a useEffect, and
-                      // commitExtrude() prefers the ref, so a fast confirm right
-                      // after this click could read the extentMode from before it.
-                      const next = {...prev, extentMode:k}
-                      extrudeStateRef.current = next
-                      return next
-                    })}
-                    style={{
-                      padding:'6px 12px', cursor:'pointer', fontSize:15,
-                      background: active ? '#FF3B5C' : '#050505',
-                      color: active ? '#000' : '#FF3B5C',
-                      border:'1px solid #FF3B5C',
-                      borderRadius:2, fontFamily:'monospace',
-                      textShadow: active ? 'none' : '0 0 4px #FF3B5C',
-                    }}
-                  >{icon}</button>
-                )
-              })}
-            </div>}
-
-            {/* Right column: direction + depth */}
-            <div style={{display:'flex', flexDirection:'column', gap:6}}>
-
-              {/* Extent mode — One Way (direction/sign follows which side of
-                  the plane the mouse is hovering) vs Symmetric (grows equally
-                  both ways, side ignored) — same concept as the extrude popup. */}
-              {directionToggle('#FF3B5C')}
-
-              {/* Depth input (disabled for through-all) */}
-              <div style={{display:'flex', gap:6, alignItems:'center'}}>
-                <div style={{
-                  flex:1, background:'#000',
-                  border:`1px solid ${extrudeState.extentMode==='through'?'#3a1520':'#FF3B5C55'}`,
-                  borderRadius:2, padding:'4px 8px',
-                  display:'flex', alignItems:'center', justifyContent:'space-between',
-                  opacity: extrudeState.extentMode==='through' ? 0.35 : 1,
-                }}>
-                  <input
-                    autoFocus={extrudeState.extentMode==='value'}
-                    value={extrudeState.extentMode==='through' ? '∞' : extrudeState.depthInput}
-                    readOnly={extrudeState.extentMode==='through'}
-                    onChange={e=> extrudeState.extentMode!=='through' && setExtrudeState(prev=>({...prev,depthInput:e.target.value,depthLocked:true}))}
-                    onKeyDown={e=>{ e.stopPropagation(); if(extrudeState.extentMode!=='through') handleExtrudeDepthKey(e) }}
-                    style={{
-                      background:'none', border:'none', outline:'none',
-                      color: extrudeState.extentMode==='through' ? '#553' : '#FF3B5C',
-                      textShadow: extrudeState.extentMode==='through' ? 'none' : '0 0 5px #FF3B5C',
-                      fontFamily:'monospace', fontSize:16, fontWeight:'bold', flex:1, minWidth:0,
-                    }}
-                  />
-                  <span style={{color:'#556', fontSize:12}}>mm</span>
-                </div>
-                <button
-                  onClick={()=>{
-                    const vp = viewport3dRef.current
-                    const oc = vp?.getOverlayCanvas()
-                    if (oc) { const ctx=oc.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,oc.width,oc.height) }
-                    setSolids(prev=>prev.filter(s=>s.id!=='__preview__'))
-                    commitExtrude()
-                  }}
-                  style={{
-                    padding:'4px 10px', background:'#FF3B5C', color:'#000',
-                    border:'none', borderRadius:2, cursor:'pointer',
-                    fontFamily:'monospace', fontSize:12, fontWeight:'bold',
-                    boxShadow:'0 0 6px #FF3B5C',
-                  }}
-                >↵</button>
-              </div>
-
-              {/* To Face — cut exactly down to a face: the depth follows the surface
-                  under the cursor and a click on it accepts (see handleExtrudeClick). */}
-              {extrudeState.extentMode!=='through' && (
-                <button
-                  onClick={toggleToFace}
-                  title="Cut exactly down to another face: point at it and click"
-                  style={{
-                    width:'100%', padding:'4px 0', fontSize:11, cursor:'pointer', fontFamily:'monospace', fontWeight:'bold',
-                    background: extrudeState.toFace ? '#FF3B5C' : '#050505', color: extrudeState.toFace ? '#000' : '#FF3B5C',
-                    border:'1px solid #FF3B5C', borderRadius:2,
-                    textShadow: extrudeState.toFace ? 'none' : '0 0 4px #FF3B5C',
-                  }}>⇥ To face</button>
-              )}
-            </div>
-          </div>
-          <div style={{color:'#556', fontSize:10, marginTop:6, textAlign:'center', letterSpacing:'0.04em'}}>
-            {extrudeState.extentMode==='through'
-              ? 'Cuts through entire solid · Esc to cancel'
-              : extrudeState.toFace
-                ? 'Click a face to cut down to it · Esc to go back'
-                : `Move mouse to set depth${gridSnap ? ` (snap ${gridSizeMm}mm)` : ''} · type or ↵ to accept · hidden bodies aren't cut · Esc to cancel`}
-          </div>
         </div>
         </div>
       )}
@@ -17609,7 +17492,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       )}
 
       {flyoutAnchor && (
-        <div style={{position:'fixed', top:flyoutAnchor.top, left:flyoutAnchor.right, zIndex:60}}>
+        <div style={{position:'fixed', top:flyoutAnchor.top, left:flyoutAnchor.right, zIndex:250}}>
           {tool==='line' && lineMode!=='line' && (
             <RectPanel
               toolColor={toolConfig.find(([t])=>t==='line')[3]}

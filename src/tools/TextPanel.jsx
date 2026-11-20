@@ -1,58 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 
-// ── Bezier helpers ────────────────────────────────────────────────────────────
-function cubicPt(p0,p1,p2,p3,t) {
-  const mt=1-t
-  return {
-    x:mt*mt*mt*p0.x+3*mt*mt*t*p1.x+3*mt*t*t*p2.x+t*t*t*p3.x,
-    y:mt*mt*mt*p0.y+3*mt*mt*t*p1.y+3*mt*t*t*p2.y+t*t*t*p3.y,
-  }
-}
-function quadPt(p0,p1,p2,t) {
-  const mt=1-t
-  return {x:mt*mt*p0.x+2*mt*t*p1.x+t*t*p2.x,y:mt*mt*p0.y+2*mt*t*p1.y+t*t*p2.y}
-}
+// The font loading and glyph → contour code lives in textGlyphs.js (shared
+// with the 3D sketch's Text tool, which works from the ribbon instead).
+import { pathToContours, PRESET_FONTS as BASE_FONTS, parseFontBuffer } from './textGlyphs.js'
 
-// Convert opentype.js path commands → array of polyline contours
-// Each contour: { points:[{x,y},...], closed:bool, segs } — segs is one letter
-// per span after the start point ('L' line = 1 point, 'Q'/'C' curve = `samples`
-// points at t = i/samples). It lets the 3D build recover the font's EXACT
-// curves from the points (extrudeMath glyphCurveSegments) instead of facets.
-// samples: how many points per bezier curve segment
-function pathToContours(commands, samples=12) {
-  const contours=[]
-  let pts=[], cx=0, cy=0, segs=''
-  for (const cmd of commands) {
-    if (cmd.type==='M') {
-      if (pts.length>=2) contours.push({points:pts,closed:false,segs})
-      pts=[{x:cmd.x,y:cmd.y}];cx=cmd.x;cy=cmd.y;segs=''
-    } else if (cmd.type==='L') {
-      pts.push({x:cmd.x,y:cmd.y});cx=cmd.x;cy=cmd.y;segs+='L'
-    } else if (cmd.type==='C') {
-      const p0={x:cx,y:cy},p1={x:cmd.x1,y:cmd.y1},p2={x:cmd.x2,y:cmd.y2},p3={x:cmd.x,y:cmd.y}
-      for (let i=1;i<=samples;i++) pts.push(cubicPt(p0,p1,p2,p3,i/samples))
-      cx=cmd.x;cy=cmd.y;segs+='C'
-    } else if (cmd.type==='Q') {
-      const p0={x:cx,y:cy},p1={x:cmd.x1,y:cmd.y1},p2={x:cmd.x,y:cmd.y}
-      for (let i=1;i<=samples;i++) pts.push(quadPt(p0,p1,p2,i/samples))
-      cx=cmd.x;cy=cmd.y;segs+='Q'
-    } else if (cmd.type==='Z') {
-      if (pts.length>=2) contours.push({points:pts,closed:true,segs})
-      pts=[];segs=''
-    }
-  }
-  if (pts.length>=2) contours.push({points:pts,closed:false,segs})
-  return contours
-}
-
-// ── Panel component ───────────────────────────────────────────────────────────
-const PRESET_FONTS = [
-  { label:'Roboto (sans)', url:'https://cdn.jsdelivr.net/npm/@fontsource/roboto/files/roboto-latin-400-normal.woff' },
-  { label:'Roboto Bold',   url:'https://cdn.jsdelivr.net/npm/@fontsource/roboto/files/roboto-latin-700-normal.woff' },
-  { label:'Roboto Mono',   url:'https://cdn.jsdelivr.net/npm/@fontsource/roboto-mono/files/roboto-mono-latin-400-normal.woff' },
-  { label:'Oswald',        url:'https://cdn.jsdelivr.net/npm/@fontsource/oswald/files/oswald-latin-400-normal.woff' },
-  { label:'Upload TTF/OTF/WOFF…', url:null },
-]
+const PRESET_FONTS = [...BASE_FONTS, { label:'Upload TTF/OTF/WOFF…', url:null }]
 
 export default function TextPanel({ insertPt, onImport, onClose, mmToPx }) {
   const [text,setText]       = useState('RETRO CAD')
@@ -70,17 +22,7 @@ export default function TextPanel({ insertPt, onImport, onClose, mmToPx }) {
   const loadBuffer = useCallback(async (buffer, label) => {
     setLoading(true);setError(null)
     try {
-      // Load from CDN if not already present
-      if (!window.opentype) {
-        await new Promise((resolve, reject) => {
-          const s = document.createElement('script')
-          s.src = 'https://cdn.jsdelivr.net/npm/opentype.js@1.3.4/dist/opentype.min.js'
-          s.onload = resolve
-          s.onerror = () => reject(new Error('Could not load opentype.js from CDN'))
-          document.head.appendChild(s)
-        })
-      }
-      const f = window.opentype.parse(buffer)
+      const f = await parseFontBuffer(buffer)
       setFont(f);setFontLabel(label)
     } catch(e) {
       setError('Could not load font: '+e.message)

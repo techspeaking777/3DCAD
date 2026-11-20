@@ -33,7 +33,7 @@ import { featureNeeds, isBodyOwner, baseFeatureOf } from './tools/featureDeps.js
 import { replicadMeshToThree } from './cadMesh.js'
 import { smoothMeshAsync } from './tools/smoothClient.js'
 import TracerPanel from './tools/TracerPanel.jsx'
-import TextPanel from './tools/TextPanel.jsx'
+import { PRESET_FONTS, loadFontFromUrl, loadFontFromFile, textToSplines } from './tools/textGlyphs.js'
 import { springFrame, springDims, springProfileTouchesAxis } from './tools/springMath.js'
 import { usePatternOptions } from './tools/PatternPanel.jsx'
 import ViewCube from './tools/ViewCube.jsx'
@@ -2422,7 +2422,15 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [traceInsertPt,setTraceInsertPt]=useState(null)
 
   // Text tool state
-  const [textOpen,setTextOpen]=useState(false)
+  // Text tool (2026-11-20): its options live in the sketch-tool ribbon and a
+  // faint copy of the words follows the mouse; a click places them.
+  const [textWords,setTextWords]=useState('RETRO CAD')
+  const [textSizeMm,setTextSizeMm]=useState('20')
+  const [textAngleDeg,setTextAngleDeg]=useState('0')
+  const [textFont,setTextFont]=useState(null)          // opentype.js font
+  const [textFontLabel,setTextFontLabel]=useState('')
+  const [textFontMsg,setTextFontMsg]=useState(null)    // 'Loading font…' / an error
+  const textFileRef=useRef(null)
   const [pageSetupOpen,setPageSetupOpen]=useState(false)
   const [pageConfig,setPageConfig]=useState({size:'A4',orientation:'landscape',margin:10,showPage:false})
   const [saveAsOpen,setSaveAsOpen]=useState(false)  // false | 'sketch' | 'project' — which save flow the SaveAsPanel fallback modal is for
@@ -2440,7 +2448,6 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [hideWorkPlanesManual,setHideWorkPlanesManual]=useState(false)
   const [gridSnap,setGridSnap]=useState(true)
   const [gridSizeMm,setGridSizeMm]=useState(10)
-  const [textInsertPt,setTextInsertPt]=useState(null)
 
   const [intersectionPts,setIntersectionPts]=useState([])
 
@@ -3305,10 +3312,51 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
 
     // ── Text / Trace: place it, then their own panel ──
-    if (tool === 'text') return {
-      op: 'TEXT', color: '#FF9800',
-      steps: [{ id: 1, label: 'Place it' }, { id: 2, label: 'Type it' }], currentStep: textOpen ? 2 : 1,
-      hint: textOpen ? 'Type the words and pick the size in the text box, then add it.' : 'Click where the text starts (its bottom-left).',
+    if (tool === 'text') {
+      const color = '#FF9800'
+      const box = (name, value, set, w, unitTxt, title, re) => ({ node: (
+        <div style={field(color)} title={title}>
+          {label(name)}
+          <input value={value} onChange={e => { if (!re || re.test(e.target.value)) set(e.target.value) }}
+            onKeyDown={e => keepKeys(e, () => e.target.blur())} onFocus={e => e.target.select()}
+            style={inputStyle(false, w)}/>
+          {unitTxt && unit(unitTxt)}
+        </div>
+      ) })
+      return {
+        op: 'TEXT', color,
+        steps: [{ id: 1, label: 'Type & place' }], currentStep: 1,
+        action: [
+          box('WORDS', textWords, setTextWords, 120, null, 'The words to add'),
+          box('SIZE', textSizeMm, setTextSizeMm, 32, 'mm', 'How tall the capital letters are', /^[0-9.]*$/),
+          box('ANGLE', textAngleDeg, setTextAngleDeg, 32, '°', 'Turns the words (0 = level)', /^-?[0-9.]*$/),
+          { node: (
+            <div style={field(color)} title="The font">
+              {label('FONT')}
+              <select value={textFontLabel} onChange={e => {
+                  if (e.target.value === '__upload') { textFileRef.current?.click(); return }
+                  const pr = PRESET_FONTS.find(f => f.label === e.target.value); if (pr) pickTextFont(pr)
+                }}
+                style={{ background: '#0a0e1a', color: '#dce8ff', border: 'none', outline: 'none', fontFamily: 'monospace', fontSize: 12, cursor: 'pointer' }}>
+                {!PRESET_FONTS.some(f => f.label === textFontLabel) && textFontLabel && <option value={textFontLabel}>{textFontLabel}</option>}
+                {PRESET_FONTS.map(f => <option key={f.label} value={f.label}>{f.label}</option>)}
+                <option value="__upload">Upload a font…</option>
+              </select>
+              <input ref={textFileRef} type="file" accept=".ttf,.otf,.woff" style={{ display: 'none' }}
+                onChange={e => {
+                  const file = e.target.files?.[0]; if (!file) return
+                  setTextFontMsg('Loading font…')
+                  loadFontFromFile(file)
+                    .then(f => { setTextFont(f); setTextFontLabel(file.name.replace(/\.[^.]+$/, '')); setTextFontMsg(null) })
+                    .catch(err => setTextFontMsg('Could not load the font: ' + err.message))
+                  e.target.value = ''
+                }}/>
+            </div>
+          ) },
+        ],
+        hint: textFontMsg || (!textWords.trim() ? 'Type some words in the WORDS box.'
+          : 'Move the mouse to see the words, then click where they start (their bottom-left). Click again to add more.'),
+      }
     }
     if (tool === 'trace') return {
       op: 'TRACE IMAGE', color: '#607D8B',
@@ -3363,6 +3411,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
     return null
   }
+  useEffect(() => {
+    if (sketchMode && tool === 'text' && !textFont && !textFontMsg) pickTextFont(PRESET_FONTS[0])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sketchMode, tool, textFont])
   function applyDimAngleLock(){
     if (dimInput&&parseFloat(dimInput)>0) setDimLocked(true)
     if (angleInput&&parseFloat(angleInput)>=0) setAngleLocked(true)
@@ -3999,8 +4051,18 @@ const App3D = forwardRef(function App3D(props, ref) {
   function resetJoin(){
     setJoinFirstPt(null);setJoinHover(null)
   }
-  function resetText(){
-    setTextOpen(false);setTextInsertPt(null)
+  function resetText(){}   // (the old Text panel's state is gone; kept for the shared reset lists)
+  function pickTextFont(preset){
+    setTextFontMsg('Loading font…')
+    loadFontFromUrl(preset.url)
+      .then(f => { setTextFont(f); setTextFontLabel(preset.label); setTextFontMsg(null) })
+      .catch(e => setTextFontMsg('Could not load the font: ' + e.message))
+  }
+  // The words as sketch splines at pt, with the ribbon's size / angle.
+  function textSplinesAt(pt){
+    const size = parseFloat(textSizeMm), ang = parseFloat(textAngleDeg) || 0
+    if (!textFont || !textWords.trim() || !(size > 0)) return null
+    return textToSplines(textFont, textWords, mmToPx(size), ang, pt)
   }
 
   // Returns true when we're in a selection phase that supports drag-window select
@@ -4750,6 +4812,18 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
     // Loft POINT tool: the placed tip (solid) and, with the tool on, where a click
     // would put it (faint, snapped like the click).
+    // Text tool: a faint copy of the words where a click would put them.
+    if (sketchMode && tool === 'text' && mousePos) {
+      const sp = textSplinesAt(mousePos)
+      if (sp) {
+        ctx.save()
+        ctx.strokeStyle = 'rgba(255,152,0,0.75)'; ctx.fillStyle = 'rgba(255,152,0,0.12)'; ctx.lineWidth = 1.2 / sc
+        ctx.beginPath()
+        for (const c of sp) { c.points.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)); if (c.closed) ctx.closePath() }
+        ctx.fill('evenodd'); ctx.stroke()
+        ctx.restore()
+      }
+    }
     if (sketchMode && (loftTipPt || (tool === 'loftpoint' && mousePos))) {
       const dot = (pt, a) => {
         ctx.save(); ctx.translate(pt.x, pt.y); ctx.scale(1/sc, 1/sc); ctx.globalAlpha = a
@@ -5578,7 +5652,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (segs) for (const s of segs) drawPreviewLine(ctx,s.x1,s.y1,s.x2,s.y2,includeEdgeConstruction?'#90A4AE':'#FFEB3B',1,sc)
     }
 
-  },[lines,circles,arcs,splines,sketchCrossPt,sketchOpenPts,loftTipPt,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,fMode,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,viewDims,dimEdit,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction,lineMode,circleMode,shapePts,rectW,rectH,arcR])
+  },[lines,circles,arcs,splines,sketchCrossPt,sketchOpenPts,loftTipPt,textWords,textSizeMm,textAngleDeg,textFont,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,fMode,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,viewDims,dimEdit,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction,lineMode,circleMode,shapePts,rectW,rectH,arcR])
 
 
   // ── Phase 2 Step 3: plane tagging ────────────────────────────────────────
@@ -13943,7 +14017,15 @@ const App3D = forwardRef(function App3D(props, ref) {
       setTraceInsertPt(raw);setTraceOpen(true);return
     }
     if (tool==='text'){
-      setTextInsertPt(raw);setTextOpen(true);return
+      // Places the words with their baseline starting here (the tool stays on,
+      // so more can be placed). textId groups one placement's letters, so
+      // Extrude treats the word as one shape and nests each letter's holes.
+      const sp=textSplinesAt(raw)
+      if (!sp) return
+      const textId=`text-${Date.now()}`
+      commit(snapshot())
+      setSplines(p=>[...p, ...sp.map(s=>({...s, textId, ...planeTag()}))])
+      return
     }
 
     // ── Axis tool: 2-click line marking the revolve axis. Deliberately simple
@@ -17476,26 +17558,6 @@ const App3D = forwardRef(function App3D(props, ref) {
           pxToMm={pxToMm} mmToPx={mmToPx}
           pageConfig={pageConfig} setPageConfig={setPageConfig}
           onClose={()=>setPageSetupOpen(false)}
-        />
-      )}
-      {textOpen&&(
-        <TextPanel
-          insertPt={textInsertPt}
-          mmToPx={mmToPx}
-          onImport={newSplines=>{
-            // planeTag() was previously missing here — text imported while
-            // sketching on a named plane other than XY, or on a face, had no
-            // plane/facePlane info at all (silently defaulted to XY elsewhere).
-            // textId ties all contours from one Import click together so the
-            // extrude tool can treat a whole word as one selectable group and
-            // correctly nest hole contours (the counter in O/A/8/etc.) under
-            // their own letter, not some other letter's.
-            const textId = `text-${Date.now()}`
-            commit(snapshot())
-            setSplines(p=>[...p, ...newSplines.map(sp=>({...sp, textId, ...planeTag()}))])
-            resetText();setTool('line')
-          }}
-          onClose={()=>{resetText();setTool('line')}}
         />
       )}
     </div>

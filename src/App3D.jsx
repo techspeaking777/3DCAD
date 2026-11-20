@@ -32,7 +32,7 @@ import ReplayPanel from './tools/ReplayPanel.jsx'
 import { featureNeeds, isBodyOwner, baseFeatureOf } from './tools/featureDeps.js'
 import { replicadMeshToThree } from './cadMesh.js'
 import { smoothMeshAsync } from './tools/smoothClient.js'
-import TracerPanel from './tools/TracerPanel.jsx'
+import { traceContours, loadImageToCanvas, contoursToLines } from './tools/traceImage.js'
 import { PRESET_FONTS, loadFontFromUrl, loadFontFromFile, textToSplines } from './tools/textGlyphs.js'
 import { springFrame, springDims, springProfileTouchesAxis } from './tools/springMath.js'
 import { usePatternOptions } from './tools/PatternPanel.jsx'
@@ -2418,8 +2418,16 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [drawStyle,setDrawStyle]=useState(null) // null|'construction'
   const [perpSourceLineIdx,setPerpSourceLineIdx]=useState(null)
   // Trace tool state
-  const [traceOpen,setTraceOpen]=useState(false)
-  const [traceInsertPt,setTraceInsertPt]=useState(null)
+  // Trace tool (2026-11-20): picture + settings in the sketch-tool ribbon; the
+  // traced outline (picture faint behind it) follows the mouse; a click places it.
+  const [traceImg,setTraceImg]=useState(null)          // {img, canvas, w, h, name}
+  const [traceThreshold,setTraceThreshold]=useState(128)
+  const [traceSimplify,setTraceSimplify]=useState(1.5)
+  const [traceInvert,setTraceInvert]=useState(false)
+  const [traceWidthMm,setTraceWidthMm]=useState('100')
+  const [traceOutlines,setTraceOutlines]=useState([])  // contours in the picture's own pixels
+  const [traceMsg,setTraceMsg]=useState(null)
+  const traceFileRef=useRef(null)
 
   // Text tool state
   // Text tool (2026-11-20): its options live in the sketch-tool ribbon and a
@@ -3358,10 +3366,45 @@ const App3D = forwardRef(function App3D(props, ref) {
           : 'Move the mouse to see the words, then click where they start (their bottom-left). Click again to add more.'),
       }
     }
-    if (tool === 'trace') return {
-      op: 'TRACE IMAGE', color: '#607D8B',
-      steps: [{ id: 1, label: 'Place it' }, { id: 2, label: 'Pick image' }], currentStep: traceOpen ? 2 : 1,
-      hint: traceOpen ? 'Choose a picture and its size in the panel — then draw over it.' : 'Click where the picture goes, then choose one to trace over.',
+    if (tool === 'trace') {
+      const color = '#22c55e'
+      const slider = (name, value, set, min, max, step, title, fmt) => ({ node: (
+        <div style={field(color)} title={title}>
+          {label(name)}
+          <input type="range" min={min} max={max} step={step} value={value}
+            onChange={e => set(step < 1 ? parseFloat(e.target.value) : parseInt(e.target.value))}
+            style={{ width: 80, accentColor: color, cursor: 'pointer' }}/>
+          <span style={{ color: '#dce8ff', fontFamily: 'monospace', fontSize: 11, minWidth: 26 }}>{fmt(value)}</span>
+        </div>
+      ) })
+      const picked = !!traceImg
+      return {
+        op: 'TRACE IMAGE', color,
+        steps: [{ id: 1, label: 'Pick a picture' }, { id: 2, label: 'Place it' }], currentStep: picked ? 2 : 1,
+        action: [
+          { label: picked ? '🖼 Change picture' : '🖼 Pick a picture', enabled: true, active: !picked,
+            title: traceImg ? traceImg.name : 'A PNG / JPG with a dark shape on a light background', onClick: () => traceFileRef.current?.click() },
+          ...(picked ? [
+            { node: (
+              <div style={field(color)} title="How wide the traced outline is">
+                {label('WIDTH')}
+                <input value={traceWidthMm} onChange={e => { if (/^[0-9.]*$/.test(e.target.value)) setTraceWidthMm(e.target.value) }}
+                  onKeyDown={e => keepKeys(e, () => e.target.blur())} onFocus={e => e.target.select()} style={inputStyle(false, 40)}/>
+                {unit('mm')}
+              </div>
+            ) },
+            slider('DARKNESS', traceThreshold, setTraceThreshold, 0, 255, 1, 'Which pixels count as the shape — lower = only very dark ones', v => String(v)),
+            slider('SIMPLIFY', traceSimplify, setTraceSimplify, 0, 8, 0.1, 'Higher = fewer, longer lines', v => v.toFixed(1)),
+            { label: 'Invert', enabled: true, active: traceInvert, title: 'Trace a light shape on a dark background', onClick: () => setTraceInvert(v => !v) },
+          ] : []),
+          { node: <input ref={traceFileRef} type="file" accept="image/*" style={{ display: 'none' }}
+              onChange={e => { pickTraceImage(e.target.files?.[0]); e.target.value = '' }}/> },
+        ],
+        hint: traceMsg || (!picked ? 'Pick a picture to trace — a dark shape on a light background works best.'
+          : !traceOutlines.length ? 'Nothing found to trace — move DARKNESS, or try Invert.'
+          : `${traceOutlines.length} outline${traceOutlines.length === 1 ? '' : 's'} — move the mouse to see it, then click where its centre goes. Click again to add another.`),
+        onStepBack: id => { if (id === 1) setTraceImg(null) },
+      }
     }
 
     // ── Loft Point (end the loft at a tip) ──
@@ -3411,6 +3454,11 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
     return null
   }
+  useEffect(() => {
+    if (!traceImg) { setTraceOutlines([]); return }
+    const t = setTimeout(() => setTraceOutlines(traceContours(traceImg.canvas, traceThreshold, traceInvert, traceSimplify)), 120)
+    return () => clearTimeout(t)
+  }, [traceImg, traceThreshold, traceInvert, traceSimplify])
   useEffect(() => {
     if (sketchMode && tool === 'text' && !textFont && !textFontMsg) pickTextFont(PRESET_FONTS[0])
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -4042,8 +4090,17 @@ const App3D = forwardRef(function App3D(props, ref) {
       ...res.newArcs.map(a=>({...a,...(style?{style}:{}),...tag}))])
     resetFillet()
   }
-  function resetTrace(){
-    setTraceOpen(false);setTraceInsertPt(null)
+  function resetTrace(){}   // (the picture stays loaded between uses)
+  // The traced outline as sketch lines centred on pt (null when nothing to place).
+  function traceLinesAt(pt){
+    const wmm = parseFloat(traceWidthMm)
+    if (!traceImg || !traceOutlines.length || !(wmm > 0)) return null
+    return contoursToLines(traceOutlines, traceImg.w, traceImg.h, mmToPx(wmm), pt)
+  }
+  function pickTraceImage(file){
+    if (!file) return
+    setTraceMsg('Loading the picture…')
+    loadImageToCanvas(file).then(r => { setTraceImg(r); setTraceMsg(null) }).catch(e => setTraceMsg(e.message))
   }
   function resetDim(){
     setDimToolStep(0);setDimToolPts([]);setDimToolPreview(null)
@@ -4812,6 +4869,23 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
     // Loft POINT tool: the placed tip (solid) and, with the tool on, where a click
     // would put it (faint, snapped like the click).
+    // Trace tool: the picture (faint) and its traced outline where a click would put them.
+    if (sketchMode && tool === 'trace' && mousePos && traceImg) {
+      const wpx = mmToPx(parseFloat(traceWidthMm) || 0)
+      if (wpx > 0) {
+        const hpx = wpx * traceImg.h / traceImg.w
+        ctx.save()
+        ctx.globalAlpha = 0.22
+        ctx.drawImage(traceImg.img, mousePos.x - wpx / 2, mousePos.y - hpx / 2, wpx, hpx)
+        ctx.restore()
+        const ls = traceLinesAt(mousePos)
+        if (ls) {
+          ctx.save(); ctx.strokeStyle = 'rgba(34,197,94,0.9)'; ctx.lineWidth = 1.2 / sc; ctx.beginPath()
+          for (const l of ls) { ctx.moveTo(l.x1, l.y1); ctx.lineTo(l.x2, l.y2) }
+          ctx.stroke(); ctx.restore()
+        }
+      }
+    }
     // Text tool: a faint copy of the words where a click would put them.
     if (sketchMode && tool === 'text' && mousePos) {
       const sp = textSplinesAt(mousePos)
@@ -5652,7 +5726,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       if (segs) for (const s of segs) drawPreviewLine(ctx,s.x1,s.y1,s.x2,s.y2,includeEdgeConstruction?'#90A4AE':'#FFEB3B',1,sc)
     }
 
-  },[lines,circles,arcs,splines,sketchCrossPt,sketchOpenPts,loftTipPt,textWords,textSizeMm,textAngleDeg,textFont,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,fMode,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,viewDims,dimEdit,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction,lineMode,circleMode,shapePts,rectW,rectH,arcR])
+  },[lines,circles,arcs,splines,sketchCrossPt,sketchOpenPts,loftTipPt,textWords,textSizeMm,textAngleDeg,textFont,traceImg,traceOutlines,traceWidthMm,cornerHover,selection,selectHover,selectLiveGeom,splineNodeSel,splineNodeHover,selectDimField,selectDimPending,selectDimAnchor,splinePoints,splineClosed,startPoint,circleCenter,circleTanA,circleTanB,mousePos,dimInput,dimLocked,angleInput,angleLocked,focusField,trackedPts,tool,trimPreview,deletePreview,extendPreview,offsetEntity,offsetPreview,offsetDistInput,offsetHover,mirrorSel,mirrorAccepted,mirrorPreview,mirrorP1,mirrorHover,centerSel,centerHover,moveCopySel,moveCopyAccepted,moveCopyMode,moveCopyCountInput,moveCopyHover,rotateCopySel,rotateCopyAccepted,rotateCopyMode,rotateCopyCountInput,rotateCopyHover,rotateCopyPreview,resizeSel,resizeAccepted,resizeScaleInput,resizeHover,filletSel,filletAccepted,filletRadiusInput,filletHover,filletPreview,fMode,dragSelectRect,viewTransform,tKeyDown,pKeyDown,perpSourceLineIdx,intersectionPts,joinHover,joinFirstPt,dims,viewDims,dimEdit,dimToolStep,dimToolPts,dimToolPreview,selectDimInput,activePlane,sketchMode,extrudeTool,cachedProfiles,extrudeState,gridVisible,gridSizeMm,includeEdgeHover,includeEdgeConstruction,lineMode,circleMode,shapePts,rectW,rectH,arcR])
 
 
   // ── Phase 2 Step 3: plane tagging ────────────────────────────────────────
@@ -14014,7 +14088,13 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
 
     if (tool==='trace'){
-      setTraceInsertPt(raw);setTraceOpen(true);return
+      // Places the traced outline centred here (the tool stays on).
+      const ls=traceLinesAt(raw)
+      if (!ls) { if (!traceImg) traceFileRef.current?.click(); return }
+      const tag=planeTag()
+      commit(snapshot())
+      setLines(p=>[...p,...ls.map(l=>({...l,...tag}))])
+      return
     }
     if (tool==='text'){
       // Places the words with their baseline starting here (the tool stays on,
@@ -17502,26 +17582,6 @@ const App3D = forwardRef(function App3D(props, ref) {
       {pKeyDown&&tool==='line'&&<div style={{position:'fixed',top:10,right:60,background:'#00BCD499',color:'white',padding:'3px 10px',borderRadius:4,fontFamily:'monospace',fontSize:11,fontWeight:'bold',pointerEvents:'none'}}>PERP</div>}
 
 
-      {traceOpen&&traceInsertPt&&(
-        <TracerPanel
-          insertPt={traceInsertPt}
-          onImport={({lines:iLines,circles:iCircles,arcs:iArcs})=>{
-            // Same planeTag() fix as TextPanel's onImport below — without it,
-            // traced geometry has no plane/facePlane info and silently
-            // defaults to XY everywhere it's consumed, so tracing while
-            // sketching on XZ/YZ/a face would draw fine (the overlay ignores
-            // plane) but get excluded from detectProfiles at Finish Sketch —
-            // a "no profile found" with no obvious cause.
-            const tag = planeTag()
-            commit(snapshot())
-            setLines(p=>[...p,...iLines.map(l=>({...l,...tag}))])
-            setCircles(p=>[...p,...iCircles.map(c=>({...c,...tag}))])
-            setArcs(p=>[...p,...iArcs.map(a=>({...a,...tag}))])
-            resetTrace();setTool('select')
-          }}
-          onClose={()=>{resetTrace();setTool('select')}}
-        />
-      )}
 
 
       {saveAsOpen&&(

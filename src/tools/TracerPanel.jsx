@@ -1,70 +1,9 @@
 import { useState, useRef, useEffect } from 'react'
 import { SCALE } from '../constants.js'
 
-// ── Douglas-Peucker (iterative — no stack overflow)
-function douglasPeucker(pts, eps) {
-  if (pts.length <= 2) return pts.slice()
-  const n = pts.length, keep = new Uint8Array(n)
-  keep[0] = keep[n - 1] = 1
-  const stack = [[0, n - 1]]
-  while (stack.length) {
-    const [s, e] = stack.pop()
-    if (e - s <= 1) continue
-    const [fx, fy] = pts[s], [lx, ly] = pts[e]
-    const dx = lx - fx, dy = ly - fy, len = Math.hypot(dx, dy)
-    let maxD = 0, maxI = s + 1
-    for (let i = s + 1; i < e; i++) {
-      const d = len < 1e-9
-        ? Math.hypot(pts[i][0] - fx, pts[i][1] - fy)
-        : Math.abs(dy * pts[i][0] - dx * pts[i][1] + lx * fy - ly * fx) / len
-      if (d > maxD) { maxD = d; maxI = i }
-    }
-    if (maxD > eps) { keep[maxI] = 1; stack.push([s, maxI], [maxI, e]) }
-  }
-  return pts.filter((_, i) => keep[i])
-}
-
-// ── Pixel-boundary contour tracer
-function traceContours(canvas, threshold, invert, epsilon) {
-  const w = canvas.width, h = canvas.height
-  if (!w || !h) return []
-  const data = canvas.getContext('2d').getImageData(0, 0, w, h).data
-  const bin = new Uint8Array(w * h)
-  for (let i = 0; i < w * h; i++) {
-    const br = 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2]
-    bin[i] = invert ? (br > threshold ? 1 : 0) : (br < threshold ? 1 : 0)
-  }
-  const segs = []
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    if (!bin[y * w + x]) continue
-    if (y === 0     || !bin[(y - 1) * w + x]) segs.push([[x, y],     [x + 1, y]])
-    if (x === w - 1 || !bin[y * w + x + 1])   segs.push([[x + 1, y], [x + 1, y + 1]])
-    if (y === h - 1 || !bin[(y + 1) * w + x]) segs.push([[x + 1, y + 1], [x, y + 1]])
-    if (x === 0     || !bin[y * w + x - 1])   segs.push([[x, y + 1], [x, y]])
-  }
-  const idx = new Map()
-  segs.forEach(([p], i) => {
-    const k = p[0] * 1024 + p[1]
-    const a = idx.get(k); if (a) a.push(i); else idx.set(k, [i])
-  })
-  const used = new Uint8Array(segs.length), chains = []
-  for (let s = 0; s < segs.length; s++) {
-    if (used[s]) continue
-    const chain = [segs[s][0]]; used[s] = 1; let cur = segs[s][1]
-    for (;;) {
-      chain.push(cur)
-      const nexts = idx.get(cur[0] * 1024 + cur[1])
-      if (!nexts) break
-      const ni = nexts.find(i => !used[i])
-      if (ni === undefined) break
-      used[ni] = 1; cur = segs[ni][1]
-    }
-    const last = chain[chain.length - 1], first = chain[0]
-    if (last[0] === first[0] && last[1] === first[1]) chain.pop()
-    if (chain.length >= 4) chains.push(douglasPeucker(chain, epsilon))
-  }
-  return chains
-}
+// The tracing code lives in traceImage.js (shared with the 3D sketch's Trace
+// tool, which works from the ribbon instead).
+import { traceContours } from './traceImage.js'
 
 const MAX_DISP = 520
 

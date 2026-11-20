@@ -6,7 +6,7 @@
 import { useState } from 'react'
 import { useDraggablePanel, DragHandle } from './useDraggablePanel.jsx'
 
-const MODES = [
+export const DIM_MODES = [
   { id: 'hv',      label: 'H / V',   title: 'Horizontal or vertical distance' },
   { id: 'aligned', label: 'ALIGNED', title: 'True distance between two points (slanted edges)' },
   { id: 'circle',  label: '⌀ / R',   title: 'Diameter or radius of a circle or arc' },
@@ -18,7 +18,7 @@ const MODES = [
 ]
 
 // Little line drawings for the mode buttons.
-function ModeIcon({ id, color }) {
+export function DimModeIcon({ id, color }) {
   const s = { stroke: color, strokeWidth: 1.6, fill: 'none', strokeLinecap: 'round' }
   return (
     <svg width="30" height="20" viewBox="0 0 30 20">
@@ -93,7 +93,7 @@ export default function DimPanel({
       <DragHandle {...handleProps}>Dimension</DragHandle>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 3 }}>
-        {MODES.map(m => {
+        {DIM_MODES.map(m => {
           const on = mode === m.id
           return (
             <button key={m.id} title={m.title} onClick={() => onMode(m.id)} style={{
@@ -103,7 +103,7 @@ export default function DimPanel({
               background: on ? toolColor + '33' : '#1e1e38', color: on ? toolColor : '#888',
               border: `2px solid ${on ? toolColor : '#3a3a5a'}`,
             }}>
-              <ModeIcon id={m.id} color={on ? toolColor : '#888'} />
+              <DimModeIcon id={m.id} color={on ? toolColor : '#888'} />
               {m.label}
             </button>
           )

@@ -16,7 +16,8 @@ import { isEditableSpline, hitSplineNode, moveSplineNode, insertSplineNode, dele
 import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewLine, perpLabelOffset, drawFollowCornerMarks } from './draw/drawHelpers.js'
 import { useHistory } from './tools/history.js'
 import { rectCorners, rectLines, rectSize, threePointArc, arcMidPoint } from './tools/shapeMath.js'
-import { ShapeModeRow, RectPanel, ArcPanel, LINE_MODES, CIRCLE_MODES } from './tools/ShapeModePanels.jsx'
+import { ShapeModeIcon } from './tools/ShapeModePanels.jsx'
+import { SmartStepBar } from './ui/StepRibbon.jsx'
 import { loadJSON, exportDXF, parseDXF, centreDxfResult, saveProjectAs, canPickSaveLocation } from './tools/saveLoad.js'
 import TracerPanel from './tools/TracerPanel.jsx'
 import TextPanel from './tools/TextPanel.jsx'
@@ -24,16 +25,7 @@ import PageSetupPanel from './tools/PageSetupPanel.jsx'
 import OrthoViewsPanel from './tools/OrthoViewsPanel.jsx'
 import { pageAreaMm } from './tools/orthoViewsMath.js'
 import { DEFAULT_DIM_STYLE, dimPrimitives, distToDim, angleDimFromLines, orthoDimFromPoints, overallDimsForViews } from './tools/dimGeometry.js'
-import DimPanel from './tools/DimPanel.jsx'
-import LineSnapPanel from './tools/LineSnapPanel.jsx'
-import CircleSnapPanel from './tools/CircleSnapPanel.jsx'
-import SplineSnapPanel from './tools/SplineSnapPanel.jsx'
-import FilletRadiusPanel from './tools/FilletRadiusPanel.jsx'
-import OffsetDistPanel from './tools/OffsetDistPanel.jsx'
-import CopyModePanel from './tools/CopyModePanel.jsx'
-import ResizeScalePanel from './tools/ResizeScalePanel.jsx'
-import MirrorPanel from './tools/MirrorPanel.jsx'
-import SelectDimPanel from './tools/SelectDimPanel.jsx'
+import { DIM_MODES, DimModeIcon } from './tools/DimPanel.jsx'
 import SaveAsPanel from './tools/SaveAsPanel.jsx'
 import {
   IconLine, IconRect, IconRectCentre, IconArc3, IconCircle, IconTrim, IconDelete, IconExtend, IconCorner, IconOffset,
@@ -3749,26 +3741,572 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
     }
   }
 
+  // The Drawing tab's tool ribbon (2026-11-20) — the same rows as the 3D
+  // sketch's second ribbon (App3D sketchToolRibbon, ported), plus this tab's
+  // own Dimension kinds. Every tool's pop-up panel is gone; their options
+  // live here. (Drawn with the shared SmartStepBar from ui/StepRibbon.jsx.)
+  const modifyToolColor = { movecopy: '#FF9800', rotatecopy: '#00BCD4', resize: '#E91E63', mirror: '#9C27B0' }
+  const editToolColor = { trim: '#FF5722', delete: '#F44336', extend: '#00ACC1', corner: '#FF7043', join: '#76FF03' }
+  const moveDistRef = useRef(null)
+  const lineLenRef = useRef(null)
+  const lineAngRef = useRef(null)
+  const moveAngleRef = useRef(null)
+  const [dimAutoMsg, setDimAutoMsg] = useState('')
+  const [dimNumbersOpen, setDimNumbersOpen] = useState(false)
+  function drawingToolRibbon() {
+    const colorOf = t => modifyToolColor[t]
+    const field = color => ({ display: 'flex', alignItems: 'center', gap: 4, height: 24, boxSizing: 'border-box',
+      background: '#0a0e1a', border: `1px solid ${color}88`, borderRadius: 12, padding: '0 10px' })
+    const label = (t, on) => <span style={{ color: on ? '#FF9800' : '#8fa0b8', fontFamily: 'monospace', fontSize: 10, letterSpacing: '0.06em' }}>{t}</span>
+    const unit = t => <span style={{ color: '#6688aa', fontFamily: 'monospace', fontSize: 11 }}>{t}</span>
+    const inputStyle = (on, w = 46) => ({ width: w, background: 'none', border: 'none', outline: 'none', color: on ? '#FF9800' : '#dce8ff',
+      fontFamily: 'monospace', fontSize: 13, fontWeight: 'bold' })
+    const smallBtn = (color, txt, onClick, enabled = true) => (
+      <button onClick={onClick} disabled={!enabled} style={{ width: 20, height: 20, borderRadius: 10, border: `1px solid ${color}66`,
+        background: 'none', color: enabled ? color : '#555', fontFamily: 'monospace', fontWeight: 'bold', fontSize: 13, lineHeight: '16px',
+        padding: 0, cursor: enabled ? 'pointer' : 'default' }}>{txt}</button>
+    )
+    // Keys typed in a box stay in the box — except Tab / Esc, which the app's
+    // key handler still needs (Tab locks the value, as it always has).
+    const keepKeys = (e, onEnter) => {
+      if (e.key !== 'Tab' && e.key !== 'Escape' && !e.ctrlKey && !e.metaKey) e.stopPropagation()
+      if (e.key === 'Enter') onEnter?.()
+    }
+    // Move | Copy (or Rotate | Copy) plus the number of copies.
+    const modeItems = (color, primary, primaryKey, isCopy, setMode, n, setCountText) => {
+      const setCount = v => setCountText(String(Math.max(1, Math.min(100, v))))
+      return [
+        { label: primary, enabled: true, active: !isCopy, title: `${primary} the picked lines (${primaryKey})`, onClick: () => setMode(primary.toLowerCase()) },
+        { label: 'Copy', enabled: true, active: isCopy, title: 'Leave the originals and add copies (C)', onClick: () => setMode('copy') },
+        ...(isCopy ? [{ node: (
+          <div style={field(color)} title="How many copies — each one a step further on">
+            {label('COPIES')}
+            {smallBtn(color, '−', () => setCount(n - 1), n > 1)}
+            <span style={{ color: '#dce8ff', fontFamily: 'monospace', fontWeight: 'bold', fontSize: 13, minWidth: 18, textAlign: 'center' }}>{n}</span>
+            {smallBtn(color, '+', () => setCount(n + 1), n < 100)}
+          </div>
+        ) }] : []),
+      ]
+    }
+    const doneSelecting = (count, accept) => ({ label: '✓ Done selecting', enabled: count > 0, title: 'Finished picking (Tab)', onClick: accept })
+    const selectHint = (count, what) => count === 0 ? `Click or drag over the lines you want to ${what}.`
+      : `${count} picked — click more, or press Done selecting (Tab).`
+
+    // ── Move / Copy: Select → Base point → Place ──
+    if (tool === 'movecopy') {
+      const color = colorOf('movecopy')
+      const isCopy = moveCopyMode === 'copy'
+      const n = Math.max(1, parseInt(moveCopyCountInput) || 1)
+      const step = !moveCopyAccepted ? 1 : !startPoint ? 2 : 3
+      // Tab hops between the two boxes; the app's key handler still sees it and locks the value.
+      const hop = e => {
+        if (e.key === 'Tab') { const other = e.target === moveDistRef.current ? moveAngleRef.current : moveDistRef.current; setTimeout(() => other?.focus(), 0); return }
+        keepKeys(e, applyDimAngleLock)
+      }
+      const modes = modeItems(color, 'Move', 'M', isCopy, setMoveCopyMode, n, setMoveCopyCountInput)
+      const canLock = (dimInput && parseFloat(dimInput) > 0) || (angleInput && parseFloat(angleInput) >= 0)
+      const actions = step === 1 ? [...modes, { divider: true }, doneSelecting(moveCopySel.length, () => setMoveCopyAccepted(true))]
+        : step === 2 ? modes
+        : [
+            { node: (
+              <div style={field(color)} title="How far it moves (type it, then Enter to lock it)">
+                {label((dimLocked ? '🔒 ' : '') + 'DISTANCE', dimLocked)}
+                <input ref={moveDistRef} autoFocus value={dimInput}
+                  onChange={e => { if (/^[0-9.]*$/.test(e.target.value)) { setDimLocked(false); setDimInput(e.target.value) } }}
+                  onKeyDown={hop} onFocus={() => setFocusField('dim')}
+                  placeholder={moveCopyLiveDistMm != null ? moveCopyLiveDistMm.toFixed(1) : '0'} style={inputStyle(dimLocked)}/>
+                {unit('mm')}
+              </div>
+            ) },
+            { node: (
+              <div style={field(color)} title="Which way it moves, in degrees (0 = right, 90 = up)">
+                {label((angleLocked ? '🔒 ' : '') + 'DIRECTION', angleLocked)}
+                <input ref={moveAngleRef} value={angleInput}
+                  onChange={e => { if (/^-?[0-9.]*$/.test(e.target.value)) { setAngleLocked(false); setAngleInput(e.target.value) } }}
+                  onKeyDown={hop} onFocus={() => setFocusField('angle')}
+                  placeholder={moveCopyLiveAngleDeg != null ? moveCopyLiveAngleDeg.toFixed(1) : '0'} style={inputStyle(angleLocked)}/>
+                {unit('°')}
+              </div>
+            ) },
+            { label: '✓ Lock it in', enabled: !!canLock, title: 'Fix the typed distance / direction (Enter)', onClick: applyDimAngleLock },
+          ]
+      const hint = step === 1 ? selectHint(moveCopySel.length, 'move or copy')
+        : step === 2 ? 'Click the point it moves FROM — a corner or centre snaps.'
+        : `Click where it goes${isCopy ? (n > 1 ? ` (${n} copies, evenly spaced)` : ' (a copy)') : ''} — or type a distance and direction, Enter, then click.`
+      return {
+        op: isCopy ? 'COPY' : 'MOVE', color, hint, action: actions,
+        steps: [{ id: 1, label: 'Select' }, { id: 2, label: 'Base point' }, { id: 3, label: 'Place' }],
+        currentStep: step,
+        onStepBack: id => {
+          if (id === 1) { setMoveCopyAccepted(false); setStartPoint(null) }
+          if (id === 2) setStartPoint(null)
+        },
+      }
+    }
+
+    // ── Rotate / Copy: Select → Centre → Angle ──
+    if (tool === 'rotatecopy') {
+      const color = colorOf('rotatecopy')
+      const isCopy = rotateCopyMode === 'copy'
+      const n = Math.max(1, parseInt(rotateCopyCountInput) || 1)
+      const step = !rotateCopyAccepted ? 1 : !startPoint ? 2 : 3
+      const lock = () => { if (angleInput) setAngleLocked(true) }
+      const modes = modeItems(color, 'Rotate', 'R', isCopy, setRotateCopyMode, n, setRotateCopyCountInput)
+      const actions = step === 1 ? [...modes, { divider: true }, doneSelecting(rotateCopySel.length, () => setRotateCopyAccepted(true))]
+        : step === 2 ? modes
+        : [
+            { node: (
+              <div style={field(color)} title="How far it turns, in degrees (anticlockwise; a minus number turns clockwise)">
+                {label((angleLocked ? '🔒 ' : '') + 'ANGLE', angleLocked)}
+                <input autoFocus value={angleInput}
+                  onChange={e => { if (/^-?[0-9.]*$/.test(e.target.value)) { setAngleLocked(false); setAngleInput(e.target.value) } }}
+                  onKeyDown={e => keepKeys(e, lock)}
+                  placeholder={rotateCopyLiveAngleDeg != null ? rotateCopyLiveAngleDeg.toFixed(1) : '0'} style={inputStyle(angleLocked)}/>
+                {unit('°')}
+              </div>
+            ) },
+            { label: '✓ Lock it in', enabled: !!angleInput, title: 'Fix the typed angle (Enter)', onClick: lock },
+          ]
+      const hint = step === 1 ? selectHint(rotateCopySel.length, 'rotate or copy round a point')
+        : step === 2 ? 'Click the centre it turns round — a corner or centre snaps.'
+        : `Move the mouse round to turn it${isCopy ? (n > 1 ? ` (${n} copies, evenly spaced)` : ' (a copy)') : ''} and click — or type an angle, Enter, then click.`
+      return {
+        op: isCopy ? 'ROTATE COPY' : 'ROTATE', color, hint, action: actions,
+        steps: [{ id: 1, label: 'Select' }, { id: 2, label: 'Centre' }, { id: 3, label: 'Angle' }],
+        currentStep: step,
+        onStepBack: id => {
+          if (id === 1) { setRotateCopyAccepted(false); setStartPoint(null) }
+          if (id === 2) setStartPoint(null)
+        },
+      }
+    }
+
+    // ── Scale: Select → Scale (type it, then click the point that stays put) ──
+    if (tool === 'resize') {
+      const color = colorOf('resize')
+      const step = !resizeAccepted ? 1 : 2
+      const sc = parseFloat(resizeScaleInput)
+      const actions = step === 1 ? [doneSelecting(resizeSel.length, () => setResizeAccepted(true))]
+        : [
+            { node: (
+              <div style={field(color)} title="How much bigger — 2 doubles it, 0.5 halves it">
+                {label('SCALE')}
+                <input autoFocus value={resizeScaleInput}
+                  onChange={e => { if (/^[0-9.]*$/.test(e.target.value)) setResizeScaleInput(e.target.value) }}
+                  onKeyDown={e => keepKeys(e, () => e.target.blur())} onFocus={e => e.target.select()}
+                  placeholder="1" style={inputStyle(false, 40)}/>
+                {unit('×')}
+              </div>
+            ) },
+            { label: '½', enabled: true, active: resizeScaleInput === '0.5', title: 'Half size', onClick: () => setResizeScaleInput('0.5') },
+            { label: '2×', enabled: true, active: resizeScaleInput === '2', title: 'Double size', onClick: () => setResizeScaleInput('2') },
+          ]
+      const hint = step === 1 ? selectHint(resizeSel.length, 'scale')
+        : !(sc > 0) ? 'Type how much bigger (2 = double, 0.5 = half).'
+        : `${sc < 1 ? 'Shrinks' : sc > 1 ? 'Grows' : 'Keeps'} it ×${sc} — click the point that stays still (a corner or centre snaps).`
+      return {
+        op: 'SCALE', color, hint, action: actions,
+        steps: [{ id: 1, label: 'Select' }, { id: 2, label: 'Scale' }],
+        currentStep: step,
+        onStepBack: id => { if (id === 1) setResizeAccepted(false) },
+      }
+    }
+
+    // ── Mirror: Select → Mirror line (two clicks) ──
+    if (tool === 'mirror') {
+      const color = colorOf('mirror')
+      const step = !mirrorAccepted ? 1 : 2
+      const hint = step === 1 ? selectHint(mirrorSel.length, 'mirror')
+        : !mirrorP1 ? 'Click the first point of the mirror line (an axis or line end snaps).'
+        : 'Click the second point — the picked lines flip across this line.'
+      return {
+        op: 'MIRROR', color, hint,
+        action: step === 1 ? [doneSelecting(mirrorSel.length, () => setMirrorAccepted(true))] : null,
+        steps: [{ id: 1, label: 'Select' }, { id: 2, label: 'Mirror line' }],
+        currentStep: step,
+        onStepBack: id => { if (id === 1) { setMirrorAccepted(false); setMirrorP1(null) } },
+      }
+    }
+
+    // ── Fillet / Chamfer: Pick two lines (or double-click a shape) → Size ──
+    if (tool === 'fillet') {
+      const color = '#26A69A'
+      const chamfer = filletMode === 'chamfer'
+      const chain = filletSel[0]?.kind === 'chain'
+      const step = (filletSel.length === 2 || chain) ? 2 : 1
+      const pv = filletPreview
+      const canApply = parseFloat(filletRadiusInput) > 0 && !pv?.tooLarge && !pv?.needLines
+      const modes = [
+        { label: 'Round', enabled: true, active: !chamfer, title: 'Round the corner', onClick: () => setFilletMode('fillet') },
+        { label: 'Chamfer', enabled: true, active: chamfer, title: 'Cut the corner off straight', onClick: () => setFilletMode('chamfer') },
+      ]
+      const actions = step === 1 ? modes : [
+        ...modes, { divider: true },
+        { node: (
+          <div style={field(color)} title={chamfer ? 'How far back along each line the cut starts' : 'How big the rounding is'}>
+            {label(chamfer ? 'DISTANCE' : 'RADIUS')}
+            <input autoFocus value={filletRadiusInput}
+              onChange={e => { if (/^[0-9.]*$/.test(e.target.value)) setFilletRadiusInput(e.target.value) }}
+              onKeyDown={e => keepKeys(e, () => { if (canApply) applyFillet() })} onFocus={e => e.target.select()}
+              placeholder="0" style={inputStyle(false, 40)}/>
+            {unit('mm')}
+          </div>
+        ) },
+        { label: '✓ Apply', enabled: canApply, title: 'Round / cut the corner (Enter)', onClick: () => applyFillet() },
+      ]
+      const hint = step === 1
+        ? (filletSel.length === 0 ? `Click two lines that meet (or double-click a shape for every corner) to ${chamfer ? 'chamfer' : 'round'}.`
+          : 'Click the second line.')
+        : pv?.needLines ? 'Chamfer needs two straight lines — pick lines, or switch to Round.'
+        : pv?.tooLarge ? `Too big for ${(pv.count || 0) > 1 ? 'these corners' : 'this corner'} — type a smaller number.`
+        : `Type the ${chamfer ? 'distance' : 'radius'}${(pv?.count || 0) > 1 ? ` (${pv.count} corners)` : ''}, then Enter, Apply or click.`
+      return {
+        op: chamfer ? 'CHAMFER' : 'FILLET', color, hint, action: actions,
+        steps: [{ id: 1, label: 'Pick two lines' }, { id: 2, label: 'Size' }],
+        currentStep: step,
+        onStepBack: id => { if (id === 1) resetFillet() },
+      }
+    }
+
+    // ── Offset: Pick a line / circle / curve → Distance (and side) ──
+    if (tool === 'offset') {
+      const color = '#4CAF50'
+      const step = offsetEntity ? 2 : 1
+      const ent = offsetEntity && (offsetEntity.kind === 'line' ? lines[offsetEntity.idx] : offsetEntity.kind === 'circle' ? circles[offsetEntity.idx]
+        : offsetEntity.kind === 'arc' ? arcs[offsetEntity.idx] : splines[offsetEntity.idx])
+      const live = step === 2 && mousePos && ent ? pxToMm(distToEntity(mousePos, ent, offsetEntity.kind)) : null
+      const setDist = () => { if (!offsetDistInput && live != null) setOffsetDistInput(live.toFixed(1)) }
+      return {
+        op: 'OFFSET', color,
+        steps: [{ id: 1, label: 'Pick' }, { id: 2, label: 'Distance' }],
+        currentStep: step,
+        action: step === 1 ? null : [
+          { node: (
+            <div style={field(color)} title="How far away the copy sits — follows the mouse until you type">
+              {label('DISTANCE')}
+              <input autoFocus value={offsetDistInput}
+                onChange={e => { if (/^[0-9.]*$/.test(e.target.value)) setOffsetDistInput(e.target.value) }}
+                onKeyDown={e => { if (e.key === 'Tab') { e.preventDefault(); e.stopPropagation(); setDist(); return } keepKeys(e, setDist) }}
+                placeholder={live != null ? live.toFixed(1) : '0'} style={inputStyle(false, 46)}/>
+              {unit('mm')}
+            </div>
+          ) },
+          { label: '✓ Set distance', enabled: !!offsetPreview, title: 'Fix the distance (Enter) — then click the side to place it', onClick: setDist },
+        ],
+        hint: step === 1 ? 'Click the line, circle or curve to make a parallel copy of.'
+          : offsetDistInput ? `${offsetDistInput} mm — move the mouse to the side you want, then click to place it.`
+          : 'Move the mouse to set the distance and side (or type a distance), then click to place it.',
+        onStepBack: id => { if (id === 1) resetOffset() },
+      }
+    }
+
+    // ── Draw tools: Line (and its Rectangle modes), Circle (and 3-point arc) ──
+    // (Their flyouts — LineSnapPanel, RectPanel, CircleSnapPanel, ArcPanel —
+    // are gone; the mode buttons, T / P and the size boxes live here.)
+    if (tool === 'line' || tool === 'circle') {
+      const color = '#2196F3'
+      const isLine = tool === 'line'
+      // Mode buttons with their picture above a small label (as in the old flyout).
+      const modeBtn = (id, lbl, title, on, pick) => ({ node: (
+        <button title={title} onClick={pick} style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 1,
+          width: 54, height: 40, boxSizing: 'border-box', padding: '2px 0', borderRadius: 7, cursor: 'pointer', fontFamily: 'monospace',
+          background: on ? color + '33' : 'transparent', border: `1px solid ${on ? color : '#3a3a5a'}`,
+        }}>
+          <ShapeModeIcon id={id} color={on ? color : '#8a93a6'} size={20}/>
+          <span style={{ fontSize: 8.5, letterSpacing: '0.05em', color: on ? color : '#8a93a6' }}>{lbl}</span>
+        </button>
+      ) })
+      const modeBtns = isLine
+        ? [['line', 'LINE', 'Draw lines'], ['rect', 'RECT', 'Rectangle — corner to corner (R)'], ['rectc', 'CENTRE', 'Rectangle — centre to corner (R again)']]
+            .map(([id, lbl, title]) => modeBtn(id, lbl, title, lineMode === id, () => chooseLineMode(id)))
+        : [['circle', 'CIRCLE', 'Draw circles'], ['arc3', '3-PT ARC', '3-point arc — start, end, then bend it (A)']]
+            .map(([id, lbl, title]) => modeBtn(id, lbl, title, circleMode === id, () => chooseCircleMode(id)))
+      // A size box: shows the live value until you type; Enter locks it and
+      // hands the keys back to the sketch (so the next Enter finishes).
+      const sizeBox = ({ name, value, locked, onChange, live, onEnter, unitTxt = 'mm', title, autoFocus = false, re = /^[0-9.]*$/, ref }) => ({ node: (
+        <div style={field(color)} title={title}>
+          {label((locked ? '🔒 ' : '') + name, locked)}
+          <input ref={ref} autoFocus={autoFocus} value={value}
+            onChange={e => { if (re.test(e.target.value)) onChange(e.target.value) }}
+            onKeyDown={e => {
+              if (e.key === 'Tab' && ref) { const other = ref === lineLenRef ? lineAngRef.current : lineLenRef.current; if (other) setTimeout(() => other.focus(), 0) }
+              keepKeys(e, () => { onEnter?.(); e.target.blur() })
+            }}
+            placeholder={live != null ? live.toFixed(1) : '—'} style={inputStyle(locked, 46)}/>
+          {unit(unitTxt)}
+        </div>
+      ) })
+
+      if (isLine && lineMode !== 'line') {
+        const centre = lineMode === 'rectc'
+        const step = shapePts.length > 0 ? 2 : 1
+        return {
+          op: centre ? 'CENTRE RECTANGLE' : 'RECTANGLE', color,
+          steps: [{ id: 1, label: centre ? 'Centre' : 'First corner' }, { id: 2, label: 'Opposite corner' }],
+          currentStep: step,
+          action: [...modeBtns, { divider: true },
+            sizeBox({ name: 'WIDTH', value: rectW, locked: rectW !== '' && parseFloat(rectW) > 0, onChange: setRectW, live: shapeLive?.w ?? null, title: 'Type a width to lock it (used for one rectangle)' }),
+            sizeBox({ name: 'HEIGHT', value: rectH, locked: rectH !== '' && parseFloat(rectH) > 0, onChange: setRectH, live: shapeLive?.h ?? null, title: 'Type a height to lock it (used for one rectangle)' }),
+          ],
+          hint: step === 1 ? (centre ? 'Click the centre of the rectangle.' : 'Click the first corner.') + ' Typing a width or height locks it. Esc starts again.'
+            : 'Click the opposite corner.' + (rectW || rectH ? ' The typed size is locked.' : ''),
+          onStepBack: id => { if (id === 1) setShapePts([]) },
+        }
+      }
+      if (isLine) {
+        const drawing = !!startPoint && !deferredTangent
+        const canLock = (dimInput && parseFloat(dimInput) > 0) || (!pKeyDown && angleInput && parseFloat(angleInput) >= 0)
+        return {
+          op: tKeyDown ? 'TANGENT LINE' : pKeyDown ? 'SQUARE LINE' : 'LINE', color,
+          steps: [{ id: 1, label: 'Start' }, { id: 2, label: 'End' }],
+          currentStep: drawing ? 2 : 1,
+          action: [...modeBtns, { divider: true },
+            { label: 'T', enabled: true, active: tKeyDown, title: 'Tangent — start the line touching a circle (T)', onClick: () => setTKeyDown(p => !p) },
+            { label: 'P', enabled: true, active: pKeyDown, title: 'Perpendicular — square off a line (P)', onClick: () => setPKeyDown(p => !p) },
+            ...(drawing ? [{ divider: true },
+              sizeBox({ name: 'LENGTH', value: dimInput, locked: dimLocked, onChange: v => { setDimLocked(false); setDimInput(v) }, live: lineLiveLenMm,
+                onEnter: applyDimAngleLock, title: 'Type a length, Enter locks it', autoFocus: true, ref: lineLenRef }),
+              ...(pKeyDown ? [] : [sizeBox({ name: 'ANGLE', value: angleInput, locked: angleLocked, onChange: v => { setAngleLocked(false); setAngleInput(v) }, live: lineLiveAngleDeg,
+                onEnter: applyDimAngleLock, unitTxt: '°', title: 'Type an angle (0 = right, 90 = up), Enter locks it', ref: lineAngRef })]),
+              { label: '✓ Lock it in', enabled: !!canLock, title: 'Fix the typed length / angle', onClick: applyDimAngleLock },
+            ] : []),
+          ],
+          hint: !drawing
+            ? (tKeyDown ? 'Click near a circle’s edge to start a line that touches it.'
+              : pKeyDown ? 'Click a line to start a line square off it.'
+              : 'Click to start a line — it snaps to ends, middles and centres.')
+            : 'Click the end — or type a length / angle and press Enter to lock it. Enter or double-click finishes the line.',
+          onStepBack: id => { if (id === 1) resetDrawState() },
+        }
+      }
+      if (circleMode === 'arc3') {
+        const step = shapePts.length + 1
+        return {
+          op: '3-POINT ARC', color,
+          steps: [{ id: 1, label: 'Start' }, { id: 2, label: 'End' }, { id: 3, label: 'Bend' }],
+          currentStep: Math.min(3, step),
+          action: [...modeBtns, { divider: true },
+            sizeBox({ name: 'RADIUS', value: arcR, locked: arcR !== '' && parseFloat(arcR) > 0, onChange: setArcR, live: shapeLive?.r ?? null, title: 'Type a radius to lock it (used for one arc)' })],
+          hint: step === 1 ? 'Click where the arc starts.' : step === 2 ? 'Click where it ends.'
+            : shapeLive?.tangent ? 'Tangent! Click to place it.' : 'Move the mouse to bend it, then click. It snaps to a tangent when it lines up with a line it starts or ends on.',
+          onStepBack: id => { if (id === 1) setShapePts([]); if (id === 2) setShapePts(p => p.slice(0, 1)) },
+        }
+      }
+      const drawing = !!circleCenter || (!!circleTanA && !!circleTanB)
+      return {
+        op: tKeyDown || circleTanA ? 'TANGENT CIRCLE' : 'CIRCLE', color,
+        steps: [{ id: 1, label: tKeyDown || circleTanA ? 'Two circles' : 'Centre' }, { id: 2, label: 'Size' }],
+        currentStep: drawing ? 2 : 1,
+        action: [...modeBtns, { divider: true },
+          { label: 'T', enabled: true, active: tKeyDown, title: 'Tangent — a circle touching two others (T)', onClick: () => setTKeyDown(p => !p) },
+          ...(drawing ? [{ divider: true },
+            sizeBox({ name: 'RADIUS', value: dimInput, locked: dimLocked, onChange: v => { setDimLocked(false); setDimInput(v) }, live: circleLiveRadiusMm,
+              onEnter: applyCircleRadius, title: 'Type a radius, Enter locks it', autoFocus: true }),
+            { label: '✓ Lock it in', enabled: !!(dimInput && parseFloat(dimInput) > 0), title: 'Fix the typed radius', onClick: applyCircleRadius },
+          ] : []),
+        ],
+        hint: circleTanA && circleTanB ? 'Move to size it (or type a radius), then click to place it.'
+          : circleTanA ? 'Click a different circle’s edge.'
+          : circleCenter ? 'Click to set the size — or type a radius and press Enter.'
+          : tKeyDown ? 'Click a circle’s edge (then a second one) for a circle touching both.'
+          : 'Click the centre of the circle.',
+        onStepBack: id => { if (id === 1) resetDrawState() },
+      }
+    }
+
+    // ── Spline: First point → More points, Open | Closed loop (C) ──
+    if (tool === 'spline') {
+      const color = '#FF6F00'
+      const has = splinePoints.length > 0
+      const pic = (id, lbl, title, on, onClick, draw) => ({ node: (
+        <button title={title} onClick={onClick} style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 1,
+          width: 54, height: 40, boxSizing: 'border-box', padding: '2px 0', borderRadius: 7, cursor: 'pointer', fontFamily: 'monospace',
+          background: on ? color + '33' : 'transparent', border: `1px solid ${on ? color : '#3a3a5a'}`,
+        }}>
+          <svg width="20" height="20" viewBox="0 0 22 22">{draw(on ? color : '#8a93a6')}</svg>
+          <span style={{ fontSize: 8.5, letterSpacing: '0.05em', color: on ? color : '#8a93a6' }}>{lbl}</span>
+        </button>
+      ) })
+      return {
+        op: splineClosed ? 'SPLINE LOOP' : 'SPLINE', color,
+        steps: [{ id: 1, label: 'First point' }, { id: 2, label: 'More points' }],
+        currentStep: has ? 2 : 1,
+        action: [
+          pic('open', 'OPEN', 'An open curve — ends where you stop', !splineClosed, () => setSplineClosed(false),
+            c => <><path d="M3 16 C7 4, 12 18, 19 6" stroke={c} strokeWidth="2" fill="none" strokeLinecap="round"/><circle cx="3" cy="16" r="1.8" fill={c}/><circle cx="19" cy="6" r="1.8" fill={c}/></>),
+          pic('closed', 'LOOP', 'A closed loop — joins back to the start (C)', splineClosed, () => setSplineClosed(true),
+            c => <path d="M11 3 C18 3, 20 10, 16 15 C12 20, 4 19, 3 12 C2 6, 6 3, 11 3 Z" stroke={c} strokeWidth="2" fill="none"/>),
+        ],
+        hint: !has ? 'Click points along the curve. LOOP (or C) makes it join back to the start.'
+          : `Keep clicking points — double-click, right-click or Enter to finish${splineClosed ? ' (it joins back to the start)' : ''}.`,
+        onStepBack: id => { if (id === 1) resetSpline() },
+      }
+    }
+
+    // ── Select ──
+    if (tool === 'select') {
+      const color = '#64B5F6'
+      const n = selection.length
+      const spline = n === 1 && selection[0].kind === 'spline'
+      const sizes = selectDimPanel
+      const curStyle = n ? getSelectionStyle(selection) : null
+      const apply = () => applySelectDims(selectDimPending)
+      const actions = !n ? null : [
+        { label: 'Firm', enabled: true, active: curStyle == null, title: 'A solid line', onClick: () => applySelectionStyle(null) },
+        { label: 'Dashed', enabled: true, active: curStyle === 'dashed', title: 'A dashed (hidden) line', onClick: () => applySelectionStyle('dashed') },
+        { label: 'Construction', enabled: true, active: curStyle === 'construction', title: 'Reference only', onClick: () => applySelectionStyle('construction') },
+        ...(sizes ? [{ divider: true }, ...sizes.fields.map((f, i) => ({ node: (
+          <div style={field(color)} title={`Type a new ${f.label.toLowerCase()}, then Enter or Apply`}>
+            {label(f.label.toUpperCase())}
+            <input value={selectDimPending[f.key] || ''}
+              onChange={e => { if (/^[0-9.]*$/.test(e.target.value)) setSelectDimPending(p => ({ ...p, [f.key]: e.target.value })) }}
+              onKeyDown={e => keepKeys(e, apply)}
+              placeholder={sizes.live?.[f.key] != null ? sizes.live[f.key].toFixed(2) : '0'}
+              style={inputStyle(false, i === 0 ? 52 : 46)}/>
+            {unit(f.unit)}
+          </div>
+        ) })), { label: '✓ Apply', enabled: Object.values(selectDimPending).some(v => v), title: 'Use the typed sizes (Enter)', onClick: apply }] : []),
+        { divider: true },
+        { label: 'Clear', enabled: true, title: 'Let go of the picked lines (Esc)', onClick: () => resetSelection() },
+      ]
+      return {
+        op: 'SELECT', color,
+        steps: [{ id: 1, label: n ? 'Picked' : 'Pick' }], currentStep: 1,
+        hint: !n ? 'Click or drag a box to pick. Drag a corner to move it.'
+          : spline ? 'Drag a point to reshape the curve, double-click it to add a point, Delete removes the picked point.'
+          : `${n} picked — type a new size and press Enter (click a dot on the shape to choose what stays put), drag the handles, or press Delete. Esc lets go.`,
+        action: actions,
+      }
+    }
+
+    // ── Dimension: the kind, its options, Auto sizes and the sheet's number style ──
+    if (tool === 'dim') {
+      const color = '#E91E63'
+      const running = !!dimChain
+      const kindBtn = m => ({ node: (
+        <button title={m.title} onClick={() => { setDimMode(m.id); resetDim() }} style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 1,
+          width: 50, height: 40, boxSizing: 'border-box', padding: '2px 0', borderRadius: 7, cursor: 'pointer', fontFamily: 'monospace',
+          background: dimMode === m.id ? color + '33' : 'transparent', border: `1px solid ${dimMode === m.id ? color : '#3a3a5a'}`,
+        }}>
+          <DimModeIcon id={m.id} color={dimMode === m.id ? color : '#8a93a6'}/>
+          <span style={{ fontSize: 7.5, letterSpacing: '0.02em', color: dimMode === m.id ? color : '#8a93a6' }}>{m.label}</span>
+        </button>
+      ) })
+      const chip = (lbl, on, onClick, title) => ({ label: lbl, enabled: true, active: on, title, onClick })
+      const extra = []
+      if (dimMode === 'hv' || ((dimMode === 'chain' || dimMode === 'baseline') && !running))
+        extra.push(chip('Auto', !dimOrientLock, () => setDimOrientLock(null), 'Drag up/down for horizontal, sideways for vertical'),
+          chip('H', dimOrientLock === 'h', () => setDimOrientLock('h'), 'Always horizontal'), chip('V', dimOrientLock === 'v', () => setDimOrientLock('v'), 'Always vertical'))
+      if (dimMode === 'circle')
+        extra.push(chip('Auto', dimCircleKind === 'auto', () => setDimCircleKind('auto'), 'Diameter for circles, radius for arcs'),
+          chip('⌀', dimCircleKind === 'diameter', () => setDimCircleKind('diameter'), 'Diameter'), chip('R', dimCircleKind === 'radius', () => setDimCircleKind('radius'), 'Radius'))
+      if (dimMode === 'note')
+        extra.push({ node: (
+          <div style={field(color)} title="The note's text">
+            {label('NOTE')}
+            <input value={dimNoteText} onChange={e => setDimNoteText(e.target.value)} maxLength={40} placeholder="e.g. M6 THREAD"
+              onKeyDown={e => keepKeys(e, () => e.target.blur())} style={{ ...inputStyle(false, 110), textTransform: 'uppercase' }}/>
+          </div>
+        ) })
+      if (running) extra.push({ label: '✓ Finish', enabled: true, title: 'End the row of dimensions (Enter)', onClick: resetDim })
+      const st = dimStyle
+      const numbers = (
+        <div style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 300, background: '#0f1428', border: `1px solid ${color}`,
+          borderRadius: 8, padding: '8px 10px', fontFamily: 'monospace', display: 'flex', flexDirection: 'column', gap: 6, whiteSpace: 'nowrap' }}>
+          {[['DECIMALS', [0, 1, 2].map(d => [String(d), st.decimals === d, () => setDimStyle({ ...st, decimals: d })])],
+            ['UNITS', [['40', !st.units, () => setDimStyle({ ...st, units: false })], ['40 mm', !!st.units, () => setDimStyle({ ...st, units: true })]]],
+            ['TEXT', [2.5, 3.5, 5].map(h => [String(h), st.textMm === h, () => setDimStyle({ ...st, textMm: h })])]].map(([name, opts]) => (
+            <div key={name} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ width: 62, fontSize: 9, color: '#8fa0b8' }}>{name}</span>
+              {opts.map(([t, on, f]) => (
+                <button key={t} onClick={f} style={{ padding: '3px 8px', borderRadius: 10, cursor: 'pointer', fontFamily: 'monospace', fontSize: 10,
+                  background: on ? color + '33' : 'transparent', color: on ? color : '#8a93a6', border: `1px solid ${on ? color : '#3a3a5a'}` }}>{t}</button>
+              ))}
+            </div>
+          ))}
+        </div>
+      )
+      const tip = dimMode === 'hv' ? (dimOrientLock ? `Locked ${dimOrientLock === 'h' ? 'horizontal' : 'vertical'} — click two points, then where it goes.` : 'Click two points, then drag up/down for horizontal or sideways for vertical, and click.')
+        : dimMode === 'aligned' ? 'Click two points — it measures straight from one to the other — then click where it goes.'
+        : dimMode === 'circle' ? 'Click a circle or arc, then where the size goes (small holes get a leader outside).'
+        : dimMode === 'chain' ? (running ? 'Click each next point · Enter or Finish ends the row.' : 'Place the first dimension, then keep clicking points.')
+        : dimMode === 'baseline' ? (running ? 'Click each next point · Enter or Finish ends it.' : 'The first point is the edge everything is measured from.')
+        : dimMode === 'hole' ? 'Click a hole — same-size holes in the same view are counted ("4× ⌀10").'
+        : dimMode === 'note' ? (dimNoteText.trim() ? 'Click the arrow tip, then where the text goes.' : 'Type the note in the NOTE box first.')
+        : dimAngleLines.length === 0 ? 'Click two lines.' : dimAngleLines.length === 1 ? 'Now the second line.' : 'Move to pick the side, then click.'
+      return {
+        op: 'DIMENSION', color,
+        steps: [{ id: 1, label: 'Measure' }], currentStep: 1,
+        action: [
+          ...DIM_MODES.map(kindBtn),
+          ...(extra.length ? [{ divider: true }, ...extra] : []),
+          { divider: true },
+          { label: '⚡ Auto sizes', enabled: true, title: 'Overall width, height and depth on the generated views — each shown once',
+            onClick: () => { const n = addAutoSizes(); setDimAutoMsg(n ? `Added ${n} overall size${n > 1 ? 's' : ''}.` : 'Generate the orthographic views first.') } },
+          { label: '⚙ Numbers', enabled: true, active: dimNumbersOpen, title: 'Decimals, units and text size — for the whole sheet',
+            onClick: () => setDimNumbersOpen(o => !o), popover: dimNumbersOpen ? numbers : null },
+        ],
+        hint: dimAutoMsg ? dimAutoMsg + ' ' + tip : tip,
+      }
+    }
+
+    // ── Text / Trace: place it, then their own panel ──
+    if (tool === 'text') return {
+      op: 'TEXT', color: '#FF9800',
+      steps: [{ id: 1, label: 'Place it' }, { id: 2, label: 'Type it' }], currentStep: textOpen ? 2 : 1,
+      hint: textOpen ? 'Type the words and pick the size in the text box, then add it.' : 'Click where the text starts (its bottom-left).',
+    }
+    if (tool === 'trace') return {
+      op: 'TRACE IMAGE', color: '#607D8B',
+      steps: [{ id: 1, label: 'Place it' }, { id: 2, label: 'Pick image' }], currentStep: traceOpen ? 2 : 1,
+      hint: traceOpen ? 'Choose a picture and its size in the panel — then draw over it.' : 'Click where the picture goes, then choose one to trace over.',
+    }
+
+    // ── Edit tools (Trim, Delete, Extend, Trim Corner, Join) ──
+    if (tool === 'trim') return {
+      op: 'TRIM', color: editToolColor.trim, steps: [{ id: 1, label: 'Click to trim' }], currentStep: 1,
+      hint: trimPreview?.kind === 'spline' && !trimPreview.highlightPts
+        ? 'Nothing crosses this curve, so there is no piece to cut off — use Delete to remove it whole.'
+        : 'Hover the piece you want to cut away (it stops where other lines cross), then click.',
+    }
+    if (tool === 'delete') return {
+      op: 'DELETE', color: editToolColor.delete, steps: [{ id: 1, label: 'Click to delete' }], currentStep: 1,
+      hint: 'Hover a line, circle or curve — it turns red — then click to delete it.',
+    }
+    if (tool === 'extend') return {
+      op: 'EXTEND', color: editToolColor.extend, steps: [{ id: 1, label: 'Click to extend' }], currentStep: 1,
+      hint: extendPreview ? 'Click to stretch it out to the line in the way (shown dashed).'
+        : 'Hover near the END of a line or arc you want to stretch.',
+    }
+    if (tool === 'corner') {
+      const stuck = filletAccepted && (filletPreview?.parallel || filletPreview?.needLines)
+      return {
+        op: 'TRIM CORNER', color: editToolColor.corner,
+        steps: [{ id: 1, label: 'First line' }, { id: 2, label: 'Second line' }],
+        currentStep: filletSel.length === 0 ? 1 : 2,
+        hint: stuck ? (filletPreview?.parallel ? 'Those lines are parallel, so they never meet — click a line to start again.'
+                                               : 'Trim Corner needs two straight lines — click a line to start again.')
+          : filletSel.length === 0 ? 'Click the first line, on the part you want to keep.'
+          : 'Click the second line, on the part you want to keep — both are trimmed or stretched to meet.',
+        onStepBack: id => { if (id === 1) resetFillet() },
+      }
+    }
+    if (tool === 'join') return {
+      op: 'JOIN', color: editToolColor.join,
+      steps: [{ id: 1, label: 'Pick an end' }, { id: 2, label: 'Join it' }],
+      currentStep: joinFirstPt ? 2 : 1,
+      hint: joinFirstPt ? 'Click where it should join — a line end or corner snaps.'
+        : 'Click the loose end you want to move (ends light up as you hover).',
+      onStepBack: id => { if (id === 1) setJoinFirstPt(null) },
+    }
+    return null
+  }
+
   return (
     <div ref={rootDivRef} style={{display:'flex',height:'100%',outline:'none'}} tabIndex={0} onKeyDown={handleKeyDown}>
-      {selectDimPanel&&(
-        <SelectDimPanel
-          style={{position:'fixed',left:selectDimPanel.left,top:selectDimPanel.top}}
-          toolColor="#64B5F6"
-          fields={selectDimPanel.fields}
-          liveValues={selectDimPanel.live}
-          pending={selectDimPending}
-          onChangeField={(key,val)=>setSelectDimPending(p=>({...p,[key]:val}))}
-          onApply={()=>applySelectDims(selectDimPending)}
-          styleOptions={[
-            {s:null,          label:'FIRM',  color:'#aaa'},
-            {s:'dashed',      label:'DASH',  color:'#64B5F6'},
-            {s:'construction',label:'CONST', color:'#FF9800'},
-          ]}
-          currentStyle={getSelectionStyle(selection)}
-          onSetStyle={applySelectionStyle}
-        />
-      )}
       <div style={{width:72,background:'#1e1e1e',display:'flex',flexDirection:'column',padding:'8px 4px',gap:4}}>
         {toolConfig.map(([t,Icon,title,activeColor])=>(
           <div key={t} style={{position:'relative'}}>
@@ -3779,101 +4317,6 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
                 outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
               <Icon active={tool===t} />
             </button>
-            {t==='line'&&tool==='line' && lineMode!=='line' && (
-            <RectPanel
-              toolColor={activeColor}
-              mode={lineMode} onMode={chooseLineMode} started={shapePts.length>0}
-              w={rectW} h={rectH} onW={setRectW} onH={setRectH}
-              liveW={shapeLive?.w ?? null} liveH={shapeLive?.h ?? null}
-            />
-          )}
-          {t==='line'&&tool==='line' && lineMode==='line' && (
-            <LineSnapPanel
-              modeRow={<ShapeModeRow modes={LINE_MODES} mode={lineMode} onMode={chooseLineMode} toolColor={activeColor}/>}
-                toolColor={activeColor}
-                tKeyDown={tKeyDown} pKeyDown={pKeyDown}
-                onToggleT={()=>setTKeyDown(p=>!p)}
-                onToggleP={()=>setPKeyDown(p=>!p)}
-                drawing={!!startPoint&&!deferredTangent}
-                dimInput={dimInput} angleInput={angleInput}
-                dimLocked={dimLocked} angleLocked={angleLocked}
-                onChangeDim={v=>{setDimLocked(false);setDimInput(v)}}
-                onChangeAngle={v=>{setAngleLocked(false);setAngleInput(v)}}
-                onApply={applyDimAngleLock}
-                liveLenMm={lineLiveLenMm}
-                liveAngleDeg={lineLiveAngleDeg}
-              />
-            )}
-            {t==='circle'&&tool==='circle' && circleMode==='arc3' && (
-            <ArcPanel
-              toolColor={activeColor}
-              mode={circleMode} onMode={chooseCircleMode} step={shapePts.length}
-              r={arcR} onR={setArcR} liveR={shapeLive?.r ?? null} tangent={!!shapeLive?.tangent}
-            />
-          )}
-          {t==='circle'&&tool==='circle' && circleMode==='circle' && (
-            <CircleSnapPanel
-              modeRow={<ShapeModeRow modes={CIRCLE_MODES} mode={circleMode} onMode={chooseCircleMode} toolColor={activeColor}/>}
-                toolColor={activeColor}
-                tKeyDown={tKeyDown}
-                onToggleT={()=>setTKeyDown(p=>!p)}
-                circleTanA={circleTanA} circleTanB={circleTanB}
-                circleCenter={circleCenter}
-                dimInput={dimInput} dimLocked={dimLocked}
-                onChangeDim={v=>{setDimLocked(false);setDimInput(v)}}
-                onApply={applyCircleRadius}
-                liveRadiusMm={circleLiveRadiusMm}
-              />
-            )}
-            {t==='dim'&&tool==='dim'&&(
-              <DimPanel
-                toolColor={activeColor}
-                mode={dimMode}
-                onMode={m=>{setDimMode(m);resetDim()}}
-                orientLock={dimOrientLock} onOrientLock={setDimOrientLock}
-                circleKind={dimCircleKind} onCircleKind={setDimCircleKind}
-                style={dimStyle} onStyle={setDimStyle}
-                anglePicked={dimAngleLines.length}
-                running={!!dimChain} onFinish={resetDim}
-                noteText={dimNoteText} onNoteText={setDimNoteText}
-                onAutoSizes={addAutoSizes}
-              />
-            )}
-            {t==='spline'&&tool==='spline'&&(
-              <SplineSnapPanel
-                toolColor={activeColor}
-                splineClosed={splineClosed}
-                onToggleC={()=>setSplineClosed(p=>!p)}
-                splinePoints={splinePoints}
-              />
-            )}
-            {t==='fillet'&&tool==='fillet'&&(filletSel.length===2||filletSel[0]?.kind==='chain')&&(
-              <FilletRadiusPanel
-                toolColor={activeColor}
-                value={filletRadiusInput}
-                onChange={setFilletRadiusInput}
-                onApply={applyFillet}
-                tooLarge={!!filletPreview?.tooLarge}
-                mode={filletMode}
-                onMode={setFilletMode}
-                corners={filletPreview?.count||0}
-                needLines={!!filletPreview?.needLines}
-                parallel={!!filletPreview?.parallel}
-              />
-            )}
-            {t==='offset'&&tool==='offset'&&offsetEntity&&(
-              <OffsetDistPanel
-                toolColor={activeColor}
-                value={offsetDistInput}
-                onChange={setOffsetDistInput}
-                canApply={!!offsetPreview}
-                liveValueMm={mousePos?pxToMm(distToEntity(mousePos,
-                  offsetEntity.kind==='line'?lines[offsetEntity.idx]:
-                  offsetEntity.kind==='circle'?circles[offsetEntity.idx]:
-                  offsetEntity.kind==='arc'?arcs[offsetEntity.idx]:splines[offsetEntity.idx],
-                  offsetEntity.kind)):null}
-              />
-            )}
           </div>
         ))}
       </div>
@@ -3905,64 +4348,13 @@ const DrawingApp = forwardRef(function DrawingApp({ getSolidIds }, ref) {
                   outline:tool===t?`2px solid ${activeColor}`:'none',outlineOffset:'-2px'}}>
                 <Icon active={tool===t}/>
               </button>
-              {t==='movecopy'&&tool==='movecopy'&&(
-                <CopyModePanel
-                  toolColor={activeColor}
-                  primaryKey="M" primaryLabel="Move" primaryMode="move"
-                  mode={moveCopyMode} count={moveCopyCountInput}
-                  onSetMode={setMoveCopyMode}
-                  onSetCount={n=>setMoveCopyCountInput(String(Math.max(1,Math.min(100,n))))}
-                  locked={!!startPoint}
-                  selCount={moveCopySel.length} accepted={moveCopyAccepted}
-                  onAccept={()=>setMoveCopyAccepted(true)}
-                  dimInput={dimInput} dimLocked={dimLocked}
-                  onChangeDim={val=>{setDimLocked(false);setDimInput(val)}}
-                  angleInput={angleInput} angleLocked={angleLocked}
-                  onChangeAngle={val=>{setAngleLocked(false);setAngleInput(val)}}
-                  onApplyLock={applyDimAngleLock}
-                  liveDistMm={moveCopyLiveDistMm}
-                  liveAngleDeg={moveCopyLiveAngleDeg}
-                />
-              )}
-              {t==='rotatecopy'&&tool==='rotatecopy'&&(
-                <CopyModePanel
-                  toolColor={activeColor}
-                  primaryKey="R" primaryLabel="Rotate" primaryMode="rotate"
-                  mode={rotateCopyMode} count={rotateCopyCountInput}
-                  onSetMode={setRotateCopyMode}
-                  onSetCount={n=>setRotateCopyCountInput(String(Math.max(1,Math.min(100,n))))}
-                  locked={!!startPoint}
-                  selCount={rotateCopySel.length} accepted={rotateCopyAccepted}
-                  onAccept={()=>setRotateCopyAccepted(true)}
-                  angleInput={angleInput} angleLocked={angleLocked}
-                  onChangeAngle={val=>{setAngleLocked(false);setAngleInput(val)}}
-                  onApplyLock={()=>{ if(angleInput) setAngleLocked(true) }}
-                  liveAngleDeg={rotateCopyLiveAngleDeg}
-                />
-              )}
-              {t==='resize'&&tool==='resize'&&(
-                <ResizeScalePanel
-                  toolColor={activeColor}
-                  selCount={resizeSel.length} accepted={resizeAccepted}
-                  onAccept={()=>setResizeAccepted(true)}
-                  scaleInput={resizeScaleInput}
-                  onChangeScale={setResizeScaleInput}
-                />
-              )}
-              {t==='mirror'&&tool==='mirror'&&(
-                <MirrorPanel
-                  toolColor={activeColor}
-                  selCount={mirrorSel.length} accepted={mirrorAccepted}
-                  onAccept={()=>setMirrorAccepted(true)}
-                  hasAxisStart={!!mirrorP1}
-                />
-              )}
             </div>
           ))}
         </div>
         {/* ── Canvas ── */}
         <div style={{flex:1,display:'flex',minHeight:0}}>
-          <div style={{flex:1,overflow:'hidden',minWidth:0}}>
+          <div style={{flex:1,overflow:'hidden',minWidth:0,position:'relative'}}>
+          <SmartStepBar {...(drawingToolRibbon() || { op: null })}/>
           <canvas ref={canvasRef}
           width={canvasSize.w} height={canvasSize.h}
           style={{background:'white',cursor:isPanningRef.current?'grabbing':tool==='select'?((selectDragHandleRef.current||splineNodeDragging)?'grabbing':(selectHover||splineNodeHover)?'pointer':'default'):'crosshair',display:'block',touchAction:'none'}}

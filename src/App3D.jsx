@@ -42,7 +42,6 @@ import SaveAsPanel from './tools/SaveAsPanel.jsx'
 import CloudSavePanel from './tools/CloudSavePanel.jsx'
 import CloudOpenPanel from './tools/CloudOpenPanel.jsx'
 import SplashScreen from './SplashScreen.jsx'
-import SelectDimPanel from './tools/SelectDimPanel.jsx'
 import { useDraggablePanel, DragHandle } from './tools/useDraggablePanel.jsx'
 import {
   IconLine, IconRect, IconRectCentre, IconArc3, IconCircle, IconTrim, IconDelete, IconExtend, IconCorner, IconOffset,
@@ -3243,15 +3242,39 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     // ── Select ──
     if (tool === 'select') {
+      const color = '#64B5F6'
       const n = selection.length
       const spline = n === 1 && selection[0].kind === 'spline'
+      // The size boxes (they used to be SelectDimPanel, floating beside the
+      // pick): Length / Angle for one line, Radius (+ Angle) for a circle or
+      // arc, Width / Height for several. Firm | Construction too.
+      const sizes = selectDimPanel
+      const curStyle = n ? getSelectionStyle(selection) : null
+      const apply = () => applySelectDims(selectDimPending)
+      const actions = !n ? null : [
+        { label: 'Firm', enabled: true, active: curStyle == null, title: 'Part of the shape', onClick: () => applySelectionStyle(null) },
+        { label: 'Construction', enabled: true, active: curStyle === 'construction', title: 'Reference only — dashed, not part of the solid (D)', onClick: () => applySelectionStyle('construction') },
+        ...(sizes ? [{ divider: true }, ...sizes.fields.map((f, i) => ({ node: (
+          <div style={field(color)} title={`Type a new ${f.label.toLowerCase()}, then Enter or Apply`}>
+            {label(f.label.toUpperCase())}
+            <input autoFocus={false} value={selectDimPending[f.key] || ''}
+              onChange={e => { if (/^[0-9.]*$/.test(e.target.value)) setSelectDimPending(p => ({ ...p, [f.key]: e.target.value })) }}
+              onKeyDown={e => keepKeys(e, apply)}
+              placeholder={sizes.live?.[f.key] != null ? sizes.live[f.key].toFixed(2) : '0'}
+              style={inputStyle(false, i === 0 ? 52 : 46)}/>
+            {unit(f.unit)}
+          </div>
+        ) })), { label: '✓ Apply', enabled: Object.values(selectDimPending).some(v => v), title: 'Use the typed sizes (Enter)', onClick: apply }] : []),
+        { divider: true },
+        { label: 'Clear', enabled: true, title: 'Let go of the picked lines (Esc)', onClick: () => resetSelection() },
+      ]
       return {
-        op: 'SELECT', color: '#64B5F6',
+        op: 'SELECT', color,
         steps: [{ id: 1, label: n ? 'Picked' : 'Pick' }], currentStep: 1,
         hint: !n ? 'Click or drag a box to pick. Drag a corner to move it. Click a dimension’s number to change it.'
           : spline ? 'Drag a point to reshape the curve, double-click it to add a point, Delete removes the picked point.'
-          : `${n} picked — drag the handles to stretch or scale, type sizes in the box beside it, or press Delete. Esc lets go.`,
-        action: n ? [{ label: 'Clear', enabled: true, title: 'Let go of the picked lines (Esc)', onClick: () => resetSelection() }] : null,
+          : `${n} picked — type a new size and press Enter (click a dot on the shape to choose what stays put), drag the handles, or press Delete. Esc lets go.`,
+        action: actions,
       }
     }
 
@@ -15835,23 +15858,6 @@ const App3D = forwardRef(function App3D(props, ref) {
           </div>
         )
       })()}
-      {selectDimPanel&&(
-        <SelectDimPanel
-          style={{position:'fixed',left:selectDimPanel.left,top:selectDimPanel.top}}
-          toolColor="#64B5F6"
-          fields={selectDimPanel.fields}
-          liveValues={selectDimPanel.live}
-          pending={selectDimPending}
-          onChangeField={(key,val)=>setSelectDimPending(p=>({...p,[key]:val}))}
-          onApply={()=>applySelectDims(selectDimPending)}
-          styleOptions={[
-            {s:null,          label:'FIRM',  color:'#aaa'},
-            {s:'construction',label:'CONST', color:'#FF9800'},
-          ]}
-          currentStyle={getSelectionStyle(selection)}
-          onSetStyle={applySelectionStyle}
-        />
-      )}
 
       {/* ══ LEFT SIDEBAR ══════════════════════════════════════════════════════ */}
       <div style={{width: sketchMode ? 72 : 161, background:'#1a1a2e',display:'flex',flexDirection:'column',

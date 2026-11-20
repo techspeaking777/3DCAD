@@ -3241,6 +3241,66 @@ const App3D = forwardRef(function App3D(props, ref) {
       }
     }
 
+    // ── Select ──
+    if (tool === 'select') {
+      const n = selection.length
+      const spline = n === 1 && selection[0].kind === 'spline'
+      return {
+        op: 'SELECT', color: '#64B5F6',
+        steps: [{ id: 1, label: n ? 'Picked' : 'Pick' }], currentStep: 1,
+        hint: !n ? 'Click or drag a box to pick. Drag a corner to move it. Click a dimension’s number to change it.'
+          : spline ? 'Drag a point to reshape the curve, double-click it to add a point, Delete removes the picked point.'
+          : `${n} picked — drag the handles to stretch or scale, type sizes in the box beside it, or press Delete. Esc lets go.`,
+        action: n ? [{ label: 'Clear', enabled: true, title: 'Let go of the picked lines (Esc)', onClick: () => resetSelection() }] : null,
+      }
+    }
+
+    // ── Dimension: First point → Second point → Place ──
+    if (tool === 'dim') {
+      const step = Math.min(3, dimToolStep + 1)
+      return {
+        op: 'DIMENSION', color: '#E91E63',
+        steps: [{ id: 1, label: 'First point' }, { id: 2, label: 'Second point' }, { id: 3, label: 'Place' }],
+        currentStep: step,
+        hint: step === 1 ? 'Click a line’s middle to size it, a circle or arc for its size, or a point to start a distance. Click a dimension’s number to change it.'
+          : step === 2 ? 'Click the second point (or near an origin axis to measure to it).'
+          : 'Move out to where the dimension should sit, then click.',
+        onStepBack: id => {
+          if (id === 1) resetDim()
+          if (id === 2) { setDimToolStep(1); setDimToolPts(p => p.slice(0, 1)) }
+        },
+      }
+    }
+
+    // ── Rev Axis: Start → End ──
+    if (tool === 'axis') return {
+      op: 'REV AXIS', color: '#E0E0E0',
+      steps: [{ id: 1, label: 'Start' }, { id: 2, label: 'End' }], currentStep: startPoint ? 2 : 1,
+      hint: startPoint ? 'Click the other end (Shift holds it on a guide).'
+        : 'Click where the axis line starts — Revolve and Spring spin round it. One per sketch: a new one replaces it.',
+      onStepBack: id => { if (id === 1) resetDrawState() },
+    }
+
+    // ── Text / Trace: place it, then their own panel ──
+    if (tool === 'text') return {
+      op: 'TEXT', color: '#FF9800',
+      steps: [{ id: 1, label: 'Place it' }, { id: 2, label: 'Type it' }], currentStep: textOpen ? 2 : 1,
+      hint: textOpen ? 'Type the words and pick the size in the text box, then add it.' : 'Click where the text starts (its bottom-left).',
+    }
+    if (tool === 'trace') return {
+      op: 'TRACE IMAGE', color: '#607D8B',
+      steps: [{ id: 1, label: 'Place it' }, { id: 2, label: 'Pick image' }], currentStep: traceOpen ? 2 : 1,
+      hint: traceOpen ? 'Choose a picture and its size in the panel — then draw over it.' : 'Click where the picture goes, then choose one to trace over.',
+    }
+
+    // ── Loft Point (end the loft at a tip) ──
+    if (tool === 'loftpoint') return {
+      op: 'POINT', color: '#FBDA2D',
+      steps: [{ id: 1, label: 'Place tip' }], currentStep: 1,
+      hint: loftTipPt ? 'Tip placed — click elsewhere to move it, then Finish sketch to make the loft.'
+        : 'Click where the loft’s tip goes (corners and centres snap), then Finish sketch.',
+    }
+
     // ── Edit tools (Trim, Delete, Extend, Trim Corner, Join) ──
     if (tool === 'trim') return {
       op: 'TRIM', color: editToolColor.trim, steps: [{ id: 1, label: 'Click to trim' }], currentStep: 1,

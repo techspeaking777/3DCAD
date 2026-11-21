@@ -389,7 +389,7 @@ export const FOLLOW_REFUSED_MSG = 'That would move the fixed corner — choose t
 // Line `idx` gets length newLen (px) and direction angleRad (x1→x2, sketch
 // coords), end `fixedEnd` staying put. Returns {lines, arcs, splines} (new
 // arrays) or {refused: true}.
-export function resizeLineFollowingCorners(lines, arcs, splines, idx, fixedEnd, newLen, angleRad) {
+export function resizeLineFollowingCorners(lines, arcs, splines, idx, fixedEnd, newLen, angleRad, rigid = null) {
   const l = lines[idx]
   const nx = Math.cos(angleRad), ny = Math.sin(angleRad)
   const F = fixedEnd === 1 ? { x: l.x1, y: l.y1 } : { x: l.x2, y: l.y2 }
@@ -399,24 +399,29 @@ export function resizeLineFollowingCorners(lines, arcs, splines, idx, fixedEnd, 
   const outA = arcs.map(a => ({ ...a }))
   const outS = splines.map(s => (Array.isArray(s.points) ? { ...s, points: s.points.map(p => ({ ...p })) } : s))
   if (fixedEnd === 1) { outL[idx].x2 = Mn.x; outL[idx].y2 = Mn.y } else { outL[idx].x1 = Mn.x; outL[idx].y1 = Mn.y }
-  return spreadCornerMove(lines, arcs, splines, outL, outA, outS, [{ p: M, d: { x: Mn.x - M.x, y: Mn.y - M.y } }], [F], new Set([idx]))
+  return spreadCornerMove(lines, arcs, splines, outL, outA, outS, [{ p: M, d: { x: Mn.x - M.x, y: Mn.y - M.y } }], [F], new Set([idx]), null, null, rigid)
 }
 
 // Corner P moves by d (px) and the shape follows by the same rules (dimension
 // edits: one corner of a distance, edit history Session 5). `fixedPts` must not
-// move ({refused} if the change reaches one). Returns {lines, arcs, splines}.
-export function moveCornerFollowing(lines, arcs, splines, P, d, fixedPts = [], skipArcs = null) {
+// move ({refused} if the change reaches one). `rigid` (a Set of line indices —
+// lines locked by a driving length dimension) slide whole instead of stretching.
+// Returns {lines, arcs, splines}.
+export function moveCornerFollowing(lines, arcs, splines, P, d, fixedPts = [], skipArcs = null, rigid = null) {
   const outL = lines.map(x => ({ ...x }))
   const outA = arcs.map(a => ({ ...a }))
   const outS = splines.map(s => (Array.isArray(s.points) ? { ...s, points: s.points.map(p => ({ ...p })) } : s))
-  return spreadCornerMove(lines, arcs, splines, outL, outA, outS, [{ p: P, d }], fixedPts, new Set(), skipArcs)
+  return spreadCornerMove(lines, arcs, splines, outL, outA, outS, [{ p: P, d }], fixedPts, new Set(), skipArcs, null, rigid)
 }
 
 // The shared walk: each queued {p, d} moves whatever meets at p (see the rules above).
-function spreadCornerMove(lines, arcs, splines, outL, outA, outS, queue, fixedPts, doneLines, doneArcs = null, skipSplines = null) {
+function spreadCornerMove(lines, arcs, splines, outL, outA, outS, queue, fixedPts, doneLines, doneArcs = null, skipSplines = null, rigid = null) {
   const near = (a, b) => Math.hypot(a.x - b.x, a.y - b.y) <= CORNER_JOIN_TOL
   doneArcs = doneArcs || new Set()
   const doneSplineEnds = new Set()
+  // Line ends this walk has moved ('i:1' / 'i:2'); lines handed in as done count as moved.
+  const movedEnds = new Set()
+  doneLines.forEach(i => { movedEnds.add(i + ':1'); movedEnds.add(i + ':2') })
   let steps = 0
   while (queue.length) {
     const { p, d } = queue.shift()
@@ -424,14 +429,22 @@ function spreadCornerMove(lines, arcs, splines, outL, outA, outS, queue, fixedPt
     if (Math.hypot(d.x, d.y) < 1e-9) continue
     if (fixedPts.some(F => near(F, p))) return { refused: true }
     lines.forEach((L, i) => {
-      if (doneLines.has(i) || L.ghostRef) return
+      if (L.ghostRef) return
       const e = near({ x: L.x1, y: L.y1 }, p) ? 1 : near({ x: L.x2, y: L.y2 }, p) ? 2 : 0
       if (!e) return
+      const move = (end, v) => {
+        movedEnds.add(i + ':' + end)
+        if (end === 1) { outL[i].x1 += v.x; outL[i].y1 += v.y } else { outL[i].x2 += v.x; outL[i].y2 += v.y }
+      }
+      // Reached again at its OTHER end (the move went round a closed shape):
+      // that end follows the corner too, so the shape stays joined.
+      if (doneLines.has(i)) { if (!movedEnds.has(i + ':' + e)) move(e, d); return }
       doneLines.add(i)
       const far = e === 1 ? { x: L.x2, y: L.y2 } : { x: L.x1, y: L.y1 }
       const len = Math.hypot(far.x - p.x, far.y - p.y)
-      const move = (end, v) => { if (end === 1) { outL[i].x1 += v.x; outL[i].y1 += v.y } else { outL[i].x2 += v.x; outL[i].y2 += v.y } }
       if (len < 1e-9) { move(1, d); move(2, d); return }
+      // A locked line (driving length dimension) slides whole and passes the move on.
+      if (rigid?.has(i)) { move(1, d); move(2, d); queue.push({ p: far, d }); return }
       const u = { x: (far.x - p.x) / len, y: (far.y - p.y) / len }
       const along = d.x * u.x + d.y * u.y
       const perp = { x: d.x - along * u.x, y: d.y - along * u.y }

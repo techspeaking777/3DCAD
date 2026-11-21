@@ -6,13 +6,22 @@
 // and kept its parent's id). A LINKED dimension refers to geometry by id, so
 // it always shows the current size and can be typed into:
 //   {kind:'len',  lineId, offset}               a line's length
-//   {kind:'dist', a:{id,end}, b:{id,end}, offset}  two points (end 1 / 2 of a
-//                                               line, or 'c' = a circle/arc centre)
+//   {kind:'dist', a:{id,end}, b:{id,end}, offset[, orient]}  two points (end 1 / 2
+//                                               of a line, or 'c' = a circle/arc centre;
+//                                               id 'origin' = the sketch origin: end 'o' the
+//                                               point, 'x' the X axis (y = 0), 'y' the Y axis
+//                                               (x = 0) — an axis is the perpendicular foot
+//                                               from the other point). orient 'h' / 'v' (2026-11-21)
+//                                               measures only across / up-down; offset is then
+//                                               where the dimension line sits, from point a
+//                                               (y for h, x for v). No orient = aligned.
 //   {kind:'dia',  circleId, angle}               a circle's diameter
 //   {kind:'rad',  arcId, angle}                  an arc's radius
 // `ref: true` = a reference dimension (measure only — grey, in brackets).
-// Older dims ({kind:'linear'|'diameter'|'radius'} with plain coordinates) are
+// Older dims ({kind:'linear'|'ortho'|'diameter'|'radius'} with plain coordinates) are
 // kept as they were and are reference only.
+// A line with a DRIVING length dimension is locked (lockedLineIds): a dimension
+// edit slides it whole instead of stretching it.
 import { resizeLineFollowingCorners, moveCornerFollowing, defaultFixedEnd, CORNER_JOIN_TOL } from './selectMath.js'
 
 const PX_PER_MM = 2
@@ -41,8 +50,13 @@ export function ensureIds(arr, taken = new Set()) {
 
 const byId = (arr, id) => { const i = arr.findIndex(e => e.id === id); return i < 0 ? null : { i, e: arr[i] } }
 
-export function refPoint(ref, geo) {
+export function refPoint(ref, geo, other = null) {
   if (!ref) return null
+  if (ref.id === 'origin') {
+    if (ref.end === 'x') return other ? { x: other.x, y: 0 } : null
+    if (ref.end === 'y') return other ? { x: 0, y: other.y } : null
+    return { x: 0, y: 0 }
+  }
   if (ref.end === 'c') {
     const c = byId(geo.circles, ref.id) || byId(geo.arcs, ref.id)
     return c ? { x: c.e.cx, y: c.e.cy } : null
@@ -66,24 +80,63 @@ export function pointRefAt(pt, geo, tol = CORNER_JOIN_TOL * 1.5) {
 
 // A placed two-point dimension, linked when both points sit on geometry: the
 // two ends of one line → that line's length, else the distance between them.
-export function linkTwoPointDim(p1, p2, offset, geo) {
+// opts: {orient:'h'|'v', pos} for a horizontal / vertical dimension (pos =
+// where its line sits, sketch px); {axis1, axis2} = 'origin' | 'x' | 'y' when
+// that point was picked on the origin / an origin axis (originAxisSnap).
+export function linkTwoPointDim(p1, p2, offset, geo, opts = {}) {
+  const axisRef = ax => ax === 'origin' ? { id: 'origin', end: 'o' } : ax === 'x' ? { id: 'origin', end: 'x' } : ax === 'y' ? { id: 'origin', end: 'y' } : null
+  let orient = opts.orient || null
+  // To an axis the size is always square to it.
+  if (opts.axis1 === 'y' || opts.axis2 === 'y') orient = 'h'
+  if (opts.axis1 === 'x' || opts.axis2 === 'x') orient = 'v'
+  const pos = opts.pos ?? (orient === 'h' ? p1.y : p1.x)
   // A line running between the two points (a corner touches two lines, so
-  // look for the one that has BOTH ends here).
+  // look for the one that has BOTH ends here) — sized as its length when the
+  // dimension is aligned, or the line is exactly level (h) / upright (v).
   const tol = CORNER_JOIN_TOL * 1.5
   const at = (x, y, p) => Math.hypot(x - p.x, y - p.y) <= tol
-  for (const l of geo.lines) {
-    if (!l.id || l.ghostRef || l.style === 'axis') continue
-    if (at(l.x1, l.y1, p1) && at(l.x2, l.y2, p2)) return { kind: 'len', lineId: l.id, offset }
-    if (at(l.x2, l.y2, p1) && at(l.x1, l.y1, p2)) return { kind: 'len', lineId: l.id, offset: -offset }
+  if (!opts.axis1 && !opts.axis2) {
+    for (const l of geo.lines) {
+      if (!l.id || l.ghostRef || l.style === 'axis') continue
+      const fwd = at(l.x1, l.y1, p1) && at(l.x2, l.y2, p2), back = at(l.x2, l.y2, p1) && at(l.x1, l.y1, p2)
+      if (!fwd && !back) continue
+      if (!orient) return { kind: 'len', lineId: l.id, offset: fwd ? offset : -offset }
+      const hv = Math.abs(l.y2 - l.y1) <= 1e-3 ? 'h' : Math.abs(l.x2 - l.x1) <= 1e-3 ? 'v' : null
+      if (hv !== orient) continue
+      // the line's own perpendicular offset that puts the dimension at pos
+      const dx = l.x2 - l.x1, dy = l.y2 - l.y1, len = Math.hypot(dx, dy) || 1
+      return { kind: 'len', lineId: l.id, offset: orient === 'h' ? (pos - l.y1) * (dx / len) : (pos - l.x1) * (-dy / len) }
+    }
   }
-  const a = pointRefAt(p1, geo), b = pointRefAt(p2, geo)
-  if (a && b && a.id === b.id && a.end !== 'c' && b.end !== 'c' && a.end !== b.end) {
+  const a = axisRef(opts.axis1) || pointRefAt(p1, geo), b = axisRef(opts.axis2) || pointRefAt(p2, geo)
+  if (!a || !b) return null
+  if (a.id === 'origin' && b.id === 'origin') return null
+  if (a.id === b.id && a.end === b.end) return null
+  if (!orient && a.id === b.id && a.end !== 'c' && b.end !== 'c' && a.end !== b.end && a.id !== 'origin') {
     // Keep the offset on the same side whichever way round the line runs.
     const flip = a.end === 2
     return { kind: 'len', lineId: a.id, offset: flip ? -offset : offset }
   }
-  if (a && b && !(a.id === b.id && a.end === b.end)) return { kind: 'dist', a, b, offset }
-  return null
+  if (!orient) return { kind: 'dist', a, b, offset }
+  const [pa] = resolvePair({ a, b }, geo)
+  const from = pa || p1
+  return { kind: 'dist', a, b, orient, offset: pos - (orient === 'h' ? from.y : from.x) }
+}
+
+// The two points of a dist dimension (an origin axis is the foot from the other one).
+function resolvePair(dim, geo) {
+  const oa = dim.a?.id === 'origin', ob = dim.b?.id === 'origin'
+  if (oa && ob) return [null, null]
+  if (oa) { const b = refPoint(dim.b, geo); return [b && refPoint(dim.a, geo, b), b] }
+  const a = refPoint(dim.a, geo)
+  return [a, a && refPoint(dim.b, geo, a)]
+}
+
+// Ids of lines locked by a DRIVING length dimension (not dims[exceptIdx]'s own).
+export function lockedLineIds(dims, exceptIdx = -1) {
+  const out = new Set()
+  dims.forEach((d, i) => { if (i !== exceptIdx && d.kind === 'len' && !d.ref) out.add(d.lineId) })
+  return out
 }
 
 // What a dimension shows now, in the shape the drawing / hit-test code uses
@@ -93,6 +146,7 @@ export function resolveDim(dim, geo) {
   const linked = dim.kind === 'len' || dim.kind === 'dist' || dim.kind === 'dia' || dim.kind === 'rad'
   if (!linked) {
     const valueMm = dim.kind === 'linear' ? Math.hypot(dim.x2 - dim.x1, dim.y2 - dim.y1) / PX_PER_MM
+      : dim.kind === 'ortho' ? Math.abs(dim.orient === 'h' ? dim.x2 - dim.x1 : dim.y2 - dim.y1) / PX_PER_MM
       : dim.kind === 'diameter' ? dim.r * 2 / PX_PER_MM : dim.kind === 'radius' ? dim.r / PX_PER_MM : null
     return { ...dim, valueMm, linked: false, driving: false }
   }
@@ -104,8 +158,13 @@ export function resolveDim(dim, geo) {
       valueMm: Math.hypot(l.e.x2 - l.e.x1, l.e.y2 - l.e.y1) / PX_PER_MM, linked, driving, ref: dim.ref }
   }
   if (dim.kind === 'dist') {
-    const a = refPoint(dim.a, geo), b = refPoint(dim.b, geo)
+    const [a, b] = resolvePair(dim, geo)
     if (!a || !b) return { kind: 'gone', broken: true, linked, driving }
+    if (dim.orient) {
+      const h = dim.orient === 'h'
+      return { kind: 'ortho', x1: a.x, y1: a.y, x2: b.x, y2: b.y, orient: dim.orient, pos: (h ? a.y : a.x) + (dim.offset || 0),
+        valueMm: Math.abs(h ? b.x - a.x : b.y - a.y) / PX_PER_MM, linked, driving, ref: dim.ref }
+    }
     return { kind: 'linear', x1: a.x, y1: a.y, x2: b.x, y2: b.y, offset: dim.offset || 0,
       valueMm: Math.hypot(b.x - a.x, b.y - a.y) / PX_PER_MM, linked, driving, ref: dim.ref }
   }
@@ -123,6 +182,7 @@ export function sameMeasure(a, b) {
   if (a.kind === 'rad') return a.arcId === b.arcId
   if (a.kind === 'dist') {
     const k = r => r.id + ':' + r.end
+    if ((a.orient || '') !== (b.orient || '')) return false
     return (k(a.a) === k(b.a) && k(a.b) === k(b.b)) || (k(a.a) === k(b.b) && k(a.b) === k(b.a))
   }
   return false
@@ -135,6 +195,7 @@ export function dimLabelPoint(v) {
     const nx = -dy / len, ny = dx / len
     return { x: (v.x1 + v.x2) / 2 + nx * v.offset, y: (v.y1 + v.y2) / 2 + ny * v.offset }
   }
+  if (v.kind === 'ortho') return v.orient === 'h' ? { x: (v.x1 + v.x2) / 2, y: v.pos } : { x: v.pos, y: (v.y1 + v.y2) / 2 }
   if (v.kind === 'diameter') return { x: v.cx, y: v.cy }
   if (v.kind === 'radius') return { x: v.cx + Math.cos(v.angle) * v.r / 2, y: v.cy + Math.sin(v.angle) * v.r / 2 }
   return null
@@ -193,27 +254,39 @@ function refilletArc(geo, ai, rPx) {
 // The sketch after dimension `dim` is set to `valueMm`: {lines, circles, arcs,
 // splines} or {error: 'plain message'}. Uses the follow-the-corner rules: the
 // end / point nearest the sketch origin stays put.
-export function applyDimValue(dim, valueMm, geo) {
+// `locked` = lockedLineIds(...): those lines slide whole instead of stretching.
+export function applyDimValue(dim, valueMm, geo, locked = null) {
   const v = valueMm * PX_PER_MM
   if (!(v > 0)) return { error: 'Type a size bigger than 0.' }
+  let rigid = null
+  if (locked?.size) { rigid = new Set(); geo.lines.forEach((l, i) => { if (locked.has(l.id)) rigid.add(i) }) }
   if (dim.kind === 'len') {
     const l = byId(geo.lines, dim.lineId)
     if (!l) return { error: 'The line this measured has gone.' }
     const ang = Math.atan2(l.e.y2 - l.e.y1, l.e.x2 - l.e.x1)
-    const res = resizeLineFollowingCorners(geo.lines, geo.arcs, geo.splines, l.i, defaultFixedEnd(l.e), v, ang)
+    const res = resizeLineFollowingCorners(geo.lines, geo.arcs, geo.splines, l.i, defaultFixedEnd(l.e), v, ang, rigid)
     if (res.refused) return { error: 'That change would have to move the corner nearest the origin.' }
     return { lines: res.lines, circles: geo.circles, arcs: res.arcs, splines: res.splines }
   }
   if (dim.kind === 'dist') {
-    const pa = refPoint(dim.a, geo), pb = refPoint(dim.b, geo)
+    const [pa, pb] = resolvePair(dim, geo)
     if (!pa || !pb) return { error: 'Something this measured has gone.' }
-    const cur = Math.hypot(pb.x - pa.x, pb.y - pa.y)
-    if (cur < 1e-9) return { error: 'Those two points are on top of each other.' }
-    // The point nearer the origin stays; the other moves along the line between them.
-    const aFixed = Math.hypot(pa.x, pa.y) <= Math.hypot(pb.x, pb.y)
+    // The origin never moves; otherwise the point nearer the origin stays.
+    const aFixed = dim.a.id === 'origin' ? true : dim.b.id === 'origin' ? false : Math.hypot(pa.x, pa.y) <= Math.hypot(pb.x, pb.y)
     const F = aFixed ? pa : pb, M = aFixed ? pb : pa, mRef = aFixed ? dim.b : dim.a
-    const u = { x: (M.x - F.x) / cur, y: (M.y - F.y) / cur }
-    const d = { x: u.x * (v - cur), y: u.y * (v - cur) }
+    let d
+    if (dim.orient) {
+      // Horizontal: only across; vertical: only up / down.
+      const c = dim.orient === 'h' ? 'x' : 'y'
+      const cur = Math.abs(M[c] - F[c])
+      const dir = cur > 1e-9 ? Math.sign(M[c] - F[c]) : (Math.sign(M[c]) || 1)
+      d = c === 'x' ? { x: dir * (v - cur), y: 0 } : { x: 0, y: dir * (v - cur) }
+    } else {
+      const cur = Math.hypot(pb.x - pa.x, pb.y - pa.y)
+      if (cur < 1e-9) return { error: 'Those two points are on top of each other.' }
+      // The other point moves along the line between them.
+      d = { x: (M.x - F.x) / cur * (v - cur), y: (M.y - F.y) / cur * (v - cur) }
+    }
     if (mRef.end === 'c') {
       const c = byId(geo.circles, mRef.id)
       if (c) {
@@ -225,12 +298,12 @@ export function applyDimValue(dim, valueMm, geo) {
       if (!a) return { error: 'Something this measured has gone.' }
       const [s, e] = arcEnds(a.e)
       const arcs = geo.arcs.slice(); arcs[a.i] = { ...a.e, cx: a.e.cx + d.x, cy: a.e.cy + d.y }
-      let res = moveCornerFollowing(geo.lines, arcs, geo.splines, s, d, [F], new Set([a.i]))
-      if (!res.refused) res = moveCornerFollowing(res.lines, res.arcs, res.splines, e, d, [F], new Set([a.i]))
+      let res = moveCornerFollowing(geo.lines, arcs, geo.splines, s, d, [F], new Set([a.i]), rigid)
+      if (!res.refused) res = moveCornerFollowing(res.lines, res.arcs, res.splines, e, d, [F], new Set([a.i]), rigid)
       if (res.refused) return { error: 'That change would have to move the other point too.' }
       return { lines: res.lines, circles: geo.circles, arcs: res.arcs, splines: res.splines }
     }
-    const res = moveCornerFollowing(geo.lines, geo.arcs, geo.splines, M, d, [F])
+    const res = moveCornerFollowing(geo.lines, geo.arcs, geo.splines, M, d, [F], null, rigid)
     if (res.refused) return { error: 'That change would have to move the other point too.' }
     return { lines: res.lines, circles: geo.circles, arcs: res.arcs, splines: res.splines }
   }
@@ -250,8 +323,8 @@ export function applyDimValue(dim, valueMm, geo) {
     const [s0, e0] = arcEnds(a.e)
     const arcs = geo.arcs.slice(); arcs[a.i] = { ...a.e, r: v }
     const [s1, e1] = arcEnds(arcs[a.i])
-    let res = moveCornerFollowing(geo.lines, arcs, geo.splines, s0, { x: s1.x - s0.x, y: s1.y - s0.y }, [], new Set([a.i]))
-    if (!res.refused) res = moveCornerFollowing(res.lines, res.arcs, res.splines, e0, { x: e1.x - e0.x, y: e1.y - e0.y }, [], new Set([a.i]))
+    let res = moveCornerFollowing(geo.lines, arcs, geo.splines, s0, { x: s1.x - s0.x, y: s1.y - s0.y }, [], new Set([a.i]), rigid)
+    if (!res.refused) res = moveCornerFollowing(res.lines, res.arcs, res.splines, e0, { x: e1.x - e0.x, y: e1.y - e0.y }, [], new Set([a.i]), rigid)
     if (res.refused) return { error: 'That radius would pull the shape apart.' }
     return { lines: res.lines, circles: geo.circles, arcs: res.arcs, splines: res.splines }
   }

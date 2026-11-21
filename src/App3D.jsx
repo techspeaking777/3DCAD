@@ -23,7 +23,8 @@ import { drawLineIndicator, drawHVIndicator, drawTracks, drawLabel, drawPreviewL
 import { useHistory } from './tools/history.js'
 import { rectCorners, rectLines, rectSize, threePointArc, arcMidPoint } from './tools/shapeMath.js'
 import { ShapeModeIcon } from './tools/ShapeModePanels.jsx'
-import { ensureIds, linkTwoPointDim, resolveDim, sameMeasure, dimLabelPoint, applyDimValue, dimClash, dimText } from './tools/sketchDims.js'
+import { ensureIds, linkTwoPointDim, resolveDim, sameMeasure, dimLabelPoint, applyDimValue, dimClash, dimText, lockedLineIds } from './tools/sketchDims.js'
+import { orthoDimFromPoints } from './tools/dimGeometry.js'
 import { loadJSON, exportDXF, parseDXF, centreDxfResult, saveProjectAs, canPickSaveLocation, exportFaceDXF as writeFaceDXF, saveBlobAs, saveProjectFileAs, loadProjectFile, serializeProject, parseProjectData } from './tools/saveLoad.js'
 import { getAuthState, fetchMyClasses, saveNewCloudProject, updateCloudProject, loadCloudProject, saveFeedbackCopy, updateFeedbackCopy } from './tools/cloudSave.js'
 import { detectProfiles, detectPath, buildSolid, openEnds } from './tools/extrudeMath.js'
@@ -173,6 +174,38 @@ function originAxisSnap(pos, tol, from) {
   const useX = nearX && (!nearY || Math.abs(pos.y) <= Math.abs(pos.x))
   if (useX) return { x: from ? from.x : pos.x, y: 0, axis: 'x' }
   return { x: 0, y: from ? from.y : pos.y, axis: 'y' }
+}
+
+// A horizontal / vertical sketch dimension ({kind:'ortho', x1..y2, orient, pos})
+// as its three pieces — two extension lines, then the dimension line.
+function orthoDimSegs(v) {
+  if (v.orient === 'h') return [[v.x1, v.y1, v.x1, v.pos], [v.x2, v.y2, v.x2, v.pos], [v.x1, v.pos, v.x2, v.pos]]
+  return [[v.x1, v.y1, v.pos, v.y1], [v.x2, v.y2, v.pos, v.y2], [v.pos, v.y1, v.pos, v.y2]]
+}
+function drawOrthoDim(ctx, v, sc, txt) {
+  const ARR = 6 / sc, FS = 11 / sc
+  const [e1, e2, dl] = orthoDimSegs(v)
+  ctx.beginPath()
+  for (const [ax, ay, bx, by] of [e1, e2]) {
+    const l = Math.hypot(bx - ax, by - ay), ux = l ? (bx - ax) / l : 0, uy = l ? (by - ay) / l : 0
+    ctx.moveTo(ax, ay); ctx.lineTo(bx + ux * ARR * 1.5, by + uy * ARR * 1.5)
+  }
+  ctx.moveTo(dl[0], dl[1]); ctx.lineTo(dl[2], dl[3]); ctx.stroke()
+  const len = Math.hypot(dl[2] - dl[0], dl[3] - dl[1])
+  ctx.save(); ctx.setLineDash([])
+  if (len > 1e-6) {
+    const ux = (dl[2] - dl[0]) / len, uy = (dl[3] - dl[1]) / len
+    for (const [ax, ay, a2x, a2y] of [[dl[0], dl[1], ux, uy], [dl[2], dl[3], -ux, -uy]]) {
+      ctx.beginPath(); ctx.moveTo(ax, ay)
+      ctx.lineTo(ax + a2x * ARR - a2y * ARR * 0.35, ay + a2y * ARR + a2x * ARR * 0.35)
+      ctx.lineTo(ax + a2x * ARR + a2y * ARR * 0.35, ay + a2y * ARR - a2x * ARR * 0.35)
+      ctx.closePath(); ctx.fill()
+    }
+  }
+  ctx.translate((dl[0] + dl[2]) / 2, (dl[1] + dl[3]) / 2); ctx.scale(1 / sc, 1 / sc)
+  if (v.orient === 'v') ctx.rotate(-Math.PI / 2)
+  ctx.font = `${FS * sc}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillText(txt, 0, -3)
+  ctx.restore()
 }
 
 // Unit world normal an extrude grows along ('front'), per sketch plane — the same
@@ -2300,6 +2333,9 @@ const App3D = forwardRef(function App3D(props, ref) {
   const [dimToolStep,setDimToolStep]=useState(0)    // 0=idle, 1=got p1, 2=got p2
   const [dimToolPts,setDimToolPts]=useState([])     // clicked points so far
   const [dimToolPreview,setDimToolPreview]=useState(null)  // live preview
+  // Two-point dimensions: 'auto' (drag up/down = horizontal, sideways = vertical),
+  // 'h', 'v' or 'aligned' (straight point to point). Kept between uses.
+  const [dimOrient,setDimOrient]=useState('auto')
 
   // Join tool state
   const [joinFirstPt,setJoinFirstPt]=useState(null)   // {lineIdx, end:'x1y1'|'x2y2', x, y} or spline equiv
@@ -2458,7 +2494,8 @@ const App3D = forwardRef(function App3D(props, ref) {
   function openDimEdit(idx){
     const v=viewDims[idx]
     if (!v||v.broken) return
-    setDimEdit({idx,input:v.valueMm!=null?String(Math.round(v.valueMm*100)/100):'',ref:!!dims[idx].ref})
+    // stamp: the size box is re-made (autofocus + select the old value) each time it opens
+    setDimEdit({idx,input:v.valueMm!=null?String(Math.round(v.valueMm*100)/100):'',ref:!!dims[idx].ref,stamp:Date.now()})
   }
   // Typing a new value into a driving dimension: the sketch follows (follow-
   // the-corner rules), unless that would change another driving dimension.
@@ -2482,7 +2519,8 @@ const App3D = forwardRef(function App3D(props, ref) {
     const cur=resolveDim(dim,geo).valueMm
     if (!(val>0)){setCadError('Type a size bigger than 0.');setTimeout(()=>setCadError(null),5000);return}
     if (Math.abs(val-cur)<1e-6){setDimEdit(null);return}
-    const res=applyDimValue(dim,val,geo)
+    // Lines with a driving length dimension slide whole instead of stretching.
+    const res=applyDimValue(dim,val,geo,lockedLineIds(dims,ed.idx))
     if (res.error){setCadError(res.error);setTimeout(()=>setCadError(null),6000);return}
     const clash=dimClash(dims,ed.idx,geo,res,val)
     if (clash){
@@ -2683,6 +2721,44 @@ const App3D = forwardRef(function App3D(props, ref) {
     const keepKeys = (e, onEnter) => {
       if (e.key !== 'Tab' && e.key !== 'Escape' && !e.ctrlKey && !e.metaKey) e.stopPropagation()
       if (e.key === 'Enter') onEnter?.()
+    }
+    // A dimension being typed into (click / double-click its number): the size
+    // box, Driving | Reference, Apply — the floating pop-up's old contents.
+    const dimEditRow = op => {
+      const v = dimEdit && viewDims[dimEdit.idx]
+      if (!v) return null
+      const color = '#1565C0'
+      if (!v.linked) return {
+        op, color, steps: [{ id: 1, label: 'Read only' }], currentStep: 1,
+        action: [
+          { node: <div style={field(color)}>{label('SIZE')}<span style={{ color: '#dce8ff', fontFamily: 'monospace', fontWeight: 'bold', fontSize: 13 }}>{dimText({ ...v, linked: true, driving: true })}</span></div> },
+          { label: 'OK', enabled: true, title: 'Close (Esc)', onClick: () => setDimEdit(null) },
+        ],
+        hint: "This dimension isn't attached to the sketch, so it can only be read. Place a new one on line ends, a circle or the origin to change the size.",
+      }
+      return {
+        op, color, steps: [{ id: 1, label: 'Change size' }], currentStep: 1,
+        action: [
+          { node: (
+            <div style={field(color)} title={dimEdit.ref ? 'A reference only measures' : 'Type the new size, then Enter'}>
+              {label('SIZE')}
+              <input key={dimEdit.stamp} autoFocus value={dimEdit.input} disabled={dimEdit.ref}
+                onChange={e => { if (/^[0-9.]*$/.test(e.target.value)) setDimEdit(d => ({ ...d, input: e.target.value })) }}
+                onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter') applyDimEdit(); if (e.key === 'Escape') setDimEdit(null) }}
+                onFocus={e => e.target.select()}
+                style={{ ...inputStyle(false, 56), color: dimEdit.ref ? '#777' : '#dce8ff' }}/>
+              {unit('mm')}
+            </div>
+          ) },
+          { label: 'Driving', enabled: true, active: !dimEdit.ref, title: 'Typing a size moves the sketch (blue)', onClick: () => setDimEdit(d => ({ ...d, ref: false })) },
+          { label: 'Reference', enabled: true, active: dimEdit.ref, title: 'Only measures (grey, in brackets)', onClick: () => setDimEdit(d => ({ ...d, ref: true })) },
+          { label: '✓ Apply', enabled: true, title: 'Use it (Enter)', onClick: applyDimEdit },
+          { label: '✕', enabled: true, title: 'Close (Esc)', onClick: () => setDimEdit(null) },
+        ],
+        hint: (dimEdit.ref !== !!dims[dimEdit.idx]?.ref) ? 'Apply saves the Driving / Reference switch.'
+          : dimEdit.ref ? 'A reference only measures — pick Driving to type a size.'
+          : 'Type the new size and press Enter — the sketch follows. The point nearest the origin stays put; lines with a blue length dimension keep their length and slide.',
+      }
     }
     // Move | Copy (or Rotate | Copy) plus the number of copies.
     const modeItems = (color, primary, primaryKey, isCopy, setMode, n, setCountText) => {
@@ -3093,6 +3169,10 @@ const App3D = forwardRef(function App3D(props, ref) {
     }
 
     // ── Select ──
+    if (tool === 'select' && dimEdit) {
+      const ed = dimEditRow('SELECT')
+      if (ed) return ed
+    }
     if (tool === 'select') {
       const color = '#64B5F6'
       const n = selection.length
@@ -3132,13 +3212,23 @@ const App3D = forwardRef(function App3D(props, ref) {
 
     // ── Dimension: First point → Second point → Place ──
     if (tool === 'dim') {
+      const ed = dimEditRow('DIMENSION')
+      if (ed) return ed
       const step = Math.min(3, dimToolStep + 1)
+      const chip = (id, lbl, title) => ({ label: lbl, enabled: true, active: dimOrient === id, title, onClick: () => setDimOrient(id) })
       return {
         op: 'DIMENSION', color: '#E91E63',
         steps: [{ id: 1, label: 'First point' }, { id: 2, label: 'Second point' }, { id: 3, label: 'Place' }],
         currentStep: step,
+        action: [
+          chip('auto', 'Auto', 'Drag up/down for a horizontal size, sideways for a vertical one'),
+          chip('h', 'H', 'Always horizontal — measures only across'),
+          chip('v', 'V', 'Always vertical — measures only up and down'),
+          chip('aligned', 'Aligned', 'Straight from one point to the other'),
+        ],
         hint: step === 1 ? 'Click a line’s middle to size it, a circle or arc for its size, or a point to start a distance. Click a dimension’s number to change it.'
-          : step === 2 ? 'Click the second point (or near an origin axis to measure to it).'
+          : step === 2 ? 'Click the second point (or near the origin or an axis to measure to it).'
+          : dimOrient === 'auto' ? 'Drag up/down for a horizontal size or sideways for a vertical one, then click where it sits.'
           : 'Move out to where the dimension should sit, then click.',
         onStepBack: id => {
           if (id === 1) resetDim()
@@ -4242,6 +4332,8 @@ const App3D = forwardRef(function App3D(props, ref) {
           d=Math.min(distToSeg(mousePos.x,mousePos.y,d1x,d1y,d2x,d2y),
                      distToSeg(mousePos.x,mousePos.y,dim.x1,dim.y1,d1x,d1y),
                      distToSeg(mousePos.x,mousePos.y,dim.x2,dim.y2,d2x,d2y))
+        } else if (dim.kind==='ortho'){
+          d=Math.min(...orthoDimSegs(dim).map(g=>distToSeg(mousePos.x,mousePos.y,g[0],g[1],g[2],g[3])))
         } else if ((dim.kind==='diameter'||dim.kind==='radius')&&dim.cx!=null){
           const ex=dim.cx+Math.cos(dim.angle)*(dim.kind==='diameter'?dim.r*2:dim.r)
           const ey=dim.cy+Math.sin(dim.angle)*(dim.kind==='diameter'?dim.r*2:dim.r)
@@ -4364,6 +4456,15 @@ const App3D = forwardRef(function App3D(props, ref) {
     } else if (dimToolStep===2){
       // Got p1+p2, set offset distance
       const [p1,p2]=dimToolPts
+      // Horizontal / vertical (an origin axis forces the one square to it; a
+      // line's middle click stays its length unless H or V is picked).
+      const forced=(p1.axis==='y'||p2.axis==='y')?'h':(p1.axis==='x'||p2.axis==='x')?'v':null
+      const mode=forced||(p1.lineLen&&dimOrient==='auto'?'aligned':dimOrient)
+      if (mode!=='aligned'){
+        const o=orthoDimFromPoints(p1,p2,mousePos,mode==='auto'?null:mode)
+        setDimToolPreview({kind:'ortho',x1:p1.x,y1:p1.y,x2:p2.x,y2:p2.y,orient:o.orient,pos:o.pos})
+        return
+      }
       const dx=p2.x-p1.x,dy=p2.y-p1.y,len=Math.hypot(dx,dy)
       if(len<1) return
       // Perpendicular offset = signed distance from mouse to line p1-p2
@@ -4371,7 +4472,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       const offset=(mousePos.x-p1.x)*nx+(mousePos.y-p1.y)*ny
       setDimToolPreview({kind:'linear',x1:p1.x,y1:p1.y,x2:p2.x,y2:p2.y,offset})
     }
-  },[tool,mousePos,dimToolStep,dimToolPts,circles,arcs])
+  },[tool,mousePos,dimToolStep,dimToolPts,dimOrient,circles,arcs])
 
   // Join tool hover — find nearest line/spline endpoint within snap distance
   useEffect(()=>{
@@ -4436,7 +4537,9 @@ const App3D = forwardRef(function App3D(props, ref) {
         d=Math.min(distToSeg(mousePos.x,mousePos.y,d1x,d1y,d2x,d2y),
                    distToSeg(mousePos.x,mousePos.y,dim.x1,dim.y1,d1x,d1y),
                    distToSeg(mousePos.x,mousePos.y,dim.x2,dim.y2,d2x,d2y))
-      } else if ((dim.kind==='diameter'||dim.kind==='radius')&&dim.cx!=null){
+      } else if (dim.kind==='ortho'){
+          d=Math.min(...orthoDimSegs(dim).map(g=>distToSeg(mousePos.x,mousePos.y,g[0],g[1],g[2],g[3])))
+        } else if ((dim.kind==='diameter'||dim.kind==='radius')&&dim.cx!=null){
         const ex=dim.cx+Math.cos(dim.angle)*(dim.kind==='diameter'?dim.r*2:dim.r)
         const ey=dim.cy+Math.sin(dim.angle)*(dim.kind==='diameter'?dim.r*2:dim.r)
         const sx=dim.kind==='diameter'?dim.cx-Math.cos(dim.angle)*dim.r:dim.cx
@@ -5290,6 +5393,8 @@ const App3D = forwardRef(function App3D(props, ref) {
         const txt=dim.text||(dim.linked?dimText(dim):pxToMm(len).toFixed(2)+' mm')
         const mx=(d1x+d2x)/2,my=(d1y+d2y)/2
         ctx.save();ctx.translate(mx,my);ctx.scale(1/sc,1/sc);let ang=Math.atan2(uy,ux);if(ang>Math.PI/2||ang<-Math.PI/2)ang+=Math.PI;ctx.rotate(ang);ctx.font=`${FS*sc}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='bottom';ctx.fillStyle=dimColor;ctx.fillText(txt,0,-3);ctx.restore()
+      } else if (dim.kind==='ortho'){
+        drawOrthoDim(ctx,dim,sc,dim.text||(dim.linked?dimText(dim):pxToMm(Math.abs(dim.orient==='h'?dim.x2-dim.x1:dim.y2-dim.y1)).toFixed(2)+' mm'))
       } else if (dim.kind==='diameter'){
         const {cx,cy,r,angle}=dim,cos=Math.cos(angle),sin=Math.sin(angle)
         ctx.beginPath();ctx.moveTo(cx-r*cos,cy-r*sin);ctx.lineTo(cx+r*cos,cy+r*sin);ctx.stroke()
@@ -5309,7 +5414,9 @@ const App3D = forwardRef(function App3D(props, ref) {
       ctx.save();ctx.strokeStyle='#E91E63';ctx.fillStyle='#E91E63';ctx.lineWidth=0.8/sc;ctx.setLineDash([4/sc,2/sc])
       const ARR=6/sc,FS=11/sc
       const p=dimToolPreview
-      if (p.kind==='linear'){
+      if (p.kind==='ortho'){
+        drawOrthoDim(ctx,p,sc,pxToMm(Math.abs(p.orient==='h'?p.x2-p.x1:p.y2-p.y1)).toFixed(2)+' mm')
+      } else if (p.kind==='linear'){
         const dx=p.x2-p.x1,dy=p.y2-p.y1,len=Math.hypot(dx,dy)
         if(len>1){
           const ux=dx/len,uy=dy/len,nx=-uy,ny=ux,off=p.offset
@@ -14037,7 +14144,7 @@ const App3D = forwardRef(function App3D(props, ref) {
       // No geometry under the cursor: fall back to the sketch's X / Y origin axes
       // (second point = the perpendicular foot from the first, so it measures TO the axis).
       const axisPt=snap?null:originAxisSnap(raw,SELECT_DIST*1.5/zoomRef.scale,dimToolStep===1?dimToolPts[0]:null)
-      const pt=snap?{x:snap.x,y:snap.y}:axisPt?{x:axisPt.x,y:axisPt.y}:raw
+      const pt=snap?{x:snap.x,y:snap.y}:axisPt?{x:axisPt.x,y:axisPt.y,axis:axisPt.axis}:{x:raw.x,y:raw.y}
 
       // Circle / arc: one click places dim
       if (dimToolPreview?.kind==='diameter'){
@@ -14064,7 +14171,7 @@ const App3D = forwardRef(function App3D(props, ref) {
         if ((!snap||snap.type==='midpoint'||snap.type==='online')&&!axisPt){
           const sel=SELECT_DIST/zoomRef.scale
           const li=lines.findIndex(l=>!l.ghostRef&&l.style!=='axis'&&distToSeg(raw.x,raw.y,l.x1,l.y1,l.x2,l.y2)<sel)
-          if (li>=0){const l=lines[li];setDimToolPts([{x:l.x1,y:l.y1},{x:l.x2,y:l.y2}]);setDimToolStep(2);return}
+          if (li>=0){const l=lines[li];setDimToolPts([{x:l.x1,y:l.y1,lineLen:true},{x:l.x2,y:l.y2}]);setDimToolStep(2);return}
         }
         setDimToolPts([pt]);setDimToolStep(1)
       } else if (dimToolStep===1){
@@ -14074,7 +14181,11 @@ const App3D = forwardRef(function App3D(props, ref) {
         // Linked to the geometry when both ends sit on it (Session 5) — then it
         // can be typed into; a repeat of an existing one is a reference.
         const p=dimToolPreview
-        const link=linkTwoPointDim({x:p.x1,y:p.y1},{x:p.x2,y:p.y2},p.offset,{lines,circles,arcs,splines})
+        const [q1,q2]=dimToolPts
+        const opts=p.kind==='ortho'?{orient:p.orient,pos:p.pos}:{}
+        if (q1?.axis) opts.axis1=q1.axis
+        if (q2?.axis) opts.axis2=q2.axis
+        const link=linkTwoPointDim({x:p.x1,y:p.y1},{x:p.x2,y:p.y2},p.offset||0,{lines,circles,arcs,splines},opts)
         setDims(d=>[...d,link?(d.some(o=>!o.ref&&sameMeasure(o,link))?{...link,ref:true}:link):{...p,text:''}])
         resetDim()
       }
@@ -14537,6 +14648,11 @@ const App3D = forwardRef(function App3D(props, ref) {
   }
 
   function handleDoubleClick(e){
+    // A dimension's number: change its size (a single click does it too).
+    if (sketchMode&&((tool==='dim'&&dimToolStep===0)||(tool==='select'&&!selection.length))){
+      const hitDim=dimLabelAt(screenToWorld(e.clientX,e.clientY))
+      if (hitDim>=0){e.preventDefault();openDimEdit(hitDim);return}
+    }
     // Fillet: double-click a line to round (or chamfer) every corner of the
     // shape it belongs to — one radius for the lot.
     if ((tool==='fillet'||tool==='corner')&&!filletAccepted){
@@ -15820,43 +15936,6 @@ const App3D = forwardRef(function App3D(props, ref) {
         </div>
       )}
 
-      {dimEdit&&sketchMode&&(()=>{
-        const v=viewDims[dimEdit.idx], q=v&&dimLabelPoint(v), vp=viewport3dRef.current
-        if (!q||!vp) return null
-        const planeId=typeof activePlane==='string'?activePlane:null
-        const facePlane=(activePlane&&typeof activePlane==='object')?activePlane:null
-        const sp=vp.sketchToScreen(q.x,q.y,planeId,facePlane)
-        if (!sp) return null
-        const linked=v.linked
-        return (
-          <div style={{position:'fixed',left:sp.x+14,top:Math.max(8,sp.y-18),zIndex:60,background:'#14142a',border:'2px solid #1565C0',borderRadius:8,padding:'8px 10px',fontFamily:'monospace',boxShadow:'0 6px 20px rgba(0,0,0,0.5)',width:180}}
-            onMouseDown={e=>e.stopPropagation()}>
-            <div style={{fontSize:9,color:'#90CAF9',letterSpacing:'0.08em',marginBottom:6}}>DIMENSION</div>
-            {linked?(<>
-              <div style={{display:'flex',alignItems:'center',gap:6}}>
-                <input autoFocus value={dimEdit.input} disabled={dimEdit.ref}
-                  onChange={e=>{if(/^[0-9.]*$/.test(e.target.value))setDimEdit(d=>({...d,input:e.target.value}))}}
-                  onKeyDown={e=>{e.stopPropagation();if(e.key==='Enter')applyDimEdit();if(e.key==='Escape')setDimEdit(null)}}
-                  style={{width:80,textAlign:'center',fontFamily:'monospace',fontSize:15,fontWeight:'bold',background:'#0d0d1a',color:dimEdit.ref?'#777':'#fff',border:'2px solid #1565C0',borderRadius:6,padding:'4px'}}/>
-                <span style={{color:'#888',fontSize:11}}>mm</span>
-              </div>
-              <label style={{display:'flex',alignItems:'center',gap:6,marginTop:8,fontSize:10,color:'#aaa',cursor:'pointer'}}>
-                <input type="checkbox" checked={dimEdit.ref} onChange={e=>setDimEdit(d=>({...d,ref:e.target.checked}))}/>
-                Reference (measure only)
-              </label>
-              <div style={{display:'flex',gap:6,marginTop:8}}>
-                <button onClick={applyDimEdit} style={{flex:1,padding:'5px 0',borderRadius:6,border:'none',background:'#1565C0',color:'#fff',fontFamily:'monospace',fontWeight:'bold',cursor:'pointer'}}>✓ Apply</button>
-                <button onClick={()=>setDimEdit(null)} style={{padding:'5px 8px',borderRadius:6,border:'1px solid #3a3a5a',background:'transparent',color:'#aaa',fontFamily:'monospace',cursor:'pointer'}}>✕</button>
-              </div>
-              <div style={{marginTop:6,fontSize:9,color:'#666',textAlign:'center'}}>The end nearest the origin stays put</div>
-            </>):(<>
-              <div style={{fontSize:11,color:'#ccc'}}>{dimText({...v,linked:true,driving:true})}</div>
-              <div style={{marginTop:6,fontSize:9,color:'#777'}}>This dimension isn't attached to the sketch, so it can only be read. Place a new one on line ends or a circle to change the size.</div>
-              <button onClick={()=>setDimEdit(null)} style={{marginTop:6,width:'100%',padding:'4px 0',borderRadius:6,border:'1px solid #3a3a5a',background:'transparent',color:'#aaa',fontFamily:'monospace',cursor:'pointer'}}>OK</button>
-            </>)}
-          </div>
-        )
-      })()}
 
       {/* ══ LEFT SIDEBAR ══════════════════════════════════════════════════════ */}
       <div style={{width: sketchMode ? 72 : 161, background:'#1a1a2e',display:'flex',flexDirection:'column',

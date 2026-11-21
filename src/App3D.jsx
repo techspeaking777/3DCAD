@@ -2520,9 +2520,16 @@ const App3D = forwardRef(function App3D(props, ref) {
     if (!(val>0)){setCadError('Type a size bigger than 0.');setTimeout(()=>setCadError(null),5000);return}
     if (Math.abs(val-cur)<1e-6){setDimEdit(null);return}
     // Lines with a driving length dimension slide whole instead of stretching.
-    const res=applyDimValue(dim,val,geo,lockedLineIds(dims,ed.idx))
+    // The end nearest the origin stays put — unless that would change another
+    // dimension, then the other end stays put instead.
+    const locked=lockedLineIds(dims,ed.idx)
+    let res=applyDimValue(dim,val,geo,locked)
+    let clash=res.error?null:dimClash(dims,ed.idx,geo,res,val)
+    if (res.error||clash){
+      const alt=applyDimValue(dim,val,geo,locked,true)
+      if (!alt.error&&!dimClash(dims,ed.idx,geo,alt,val)){res=alt;clash=null}
+    }
     if (res.error){setCadError(res.error);setTimeout(()=>setCadError(null),6000);return}
-    const clash=dimClash(dims,ed.idx,geo,res,val)
     if (clash){
       setCadError(clash.self
         ? "That size can't be reached with the shape the way it is."

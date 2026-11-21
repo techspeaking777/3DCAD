@@ -255,7 +255,9 @@ function refilletArc(geo, ai, rPx) {
 // splines} or {error: 'plain message'}. Uses the follow-the-corner rules: the
 // end / point nearest the sketch origin stays put.
 // `locked` = lockedLineIds(...): those lines slide whole instead of stretching.
-export function applyDimValue(dim, valueMm, geo, locked = null) {
+// `flip` keeps the OTHER end still (the caller tries it when the usual end
+// would change another dimension).
+export function applyDimValue(dim, valueMm, geo, locked = null, flip = false) {
   const v = valueMm * PX_PER_MM
   if (!(v > 0)) return { error: 'Type a size bigger than 0.' }
   let rigid = null
@@ -264,7 +266,7 @@ export function applyDimValue(dim, valueMm, geo, locked = null) {
     const l = byId(geo.lines, dim.lineId)
     if (!l) return { error: 'The line this measured has gone.' }
     const ang = Math.atan2(l.e.y2 - l.e.y1, l.e.x2 - l.e.x1)
-    const res = resizeLineFollowingCorners(geo.lines, geo.arcs, geo.splines, l.i, defaultFixedEnd(l.e), v, ang, rigid)
+    const res = resizeLineFollowingCorners(geo.lines, geo.arcs, geo.splines, l.i, flip ? 3 - defaultFixedEnd(l.e) : defaultFixedEnd(l.e), v, ang, rigid)
     if (res.refused) return { error: 'That change would have to move the corner nearest the origin.' }
     return { lines: res.lines, circles: geo.circles, arcs: res.arcs, splines: res.splines }
   }
@@ -272,7 +274,7 @@ export function applyDimValue(dim, valueMm, geo, locked = null) {
     const [pa, pb] = resolvePair(dim, geo)
     if (!pa || !pb) return { error: 'Something this measured has gone.' }
     // The origin never moves; otherwise the point nearer the origin stays.
-    const aFixed = dim.a.id === 'origin' ? true : dim.b.id === 'origin' ? false : Math.hypot(pa.x, pa.y) <= Math.hypot(pb.x, pb.y)
+    const aFixed = dim.a.id === 'origin' ? true : dim.b.id === 'origin' ? false : (Math.hypot(pa.x, pa.y) <= Math.hypot(pb.x, pb.y)) !== flip
     const F = aFixed ? pa : pb, M = aFixed ? pb : pa, mRef = aFixed ? dim.b : dim.a
     let d
     if (dim.orient) {
